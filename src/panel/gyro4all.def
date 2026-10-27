@@ -1,0 +1,3 @@
+LIBRARY gyro4all
+EXPORTS
+    g4a_get_api

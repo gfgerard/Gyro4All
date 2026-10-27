@@ -1,0 +1,21 @@
+dist/
+build/
+third_party/
+*.pak
+*.uasset
+*.uexp
+*.ubulk
+*.dll
+*.pdb
+*.zip
+*.rar
+*.bak
+extract/
+.vs/
+bench/*.csv
+games/
+GyroCamProbe/
+# Frostbite tools write their results to the work folder; never commit game-derived data.
+tools/frostbite/*.pkl
+tools/frostbite/*.npz
+__pycache__/

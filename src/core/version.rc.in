@@ -1,0 +1,31 @@
+// Windows version resource (Properties > Details). Configured by CMake from project(Gyro4All VERSION ...),
+// so the version still lives only in CMakeLists.txt.
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION     @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+ PRODUCTVERSION  @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+ FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+ FILEFLAGS       0
+ FILEOS          VOS_NT_WINDOWS32
+ FILETYPE        VFT_DLL
+ FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription",  "Gyro4All - Native Gyro (almost) any game"
+            VALUE "ProductName",      "Gyro4All"
+            VALUE "FileVersion",      "@PROJECT_VERSION@"
+            VALUE "ProductVersion",   "@PROJECT_VERSION@"
+            VALUE "InternalName",     "Gyro4All"
+            VALUE "OriginalFilename", "winmm.dll"
+            VALUE "LegalCopyright",   "MIT License"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
