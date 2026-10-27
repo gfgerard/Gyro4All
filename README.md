@@ -1,15 +1,15 @@
 # <img src="logo.png" alt="Gyro4All logo" width="64px" />Gyro4All
 
-*Formerly [GyroUE](https://github.com/gfgerard/Gyro4All).*
+*Formerly [GyroUE](https://github.com/gfgerard/GyroUE).*
 
 ## Introduction
 The purpose of this project is to provide a mod that natively enables gyro in games developed with 
 (almost) any engine.
 
 > [!NOTE]
-> Tested on the [supported games](docs/GAMES.md); other games often work too (especially Unreal Engine ones).
+> Tested on the [list of supported games](docs/GAMES.md); other games often work too (especially Unreal Engine ones).
 > Feel free to [suggest other games](https://github.com/gfgerard/Gyro4All/issues/new?template=game_support.md) to be supported (or add support yourself and make a pull request).
-> Bugs and crashes are possible. **Offline single-player games only**: never use it in online or anti-cheat protected
+> Bugs and crashes are possible. **Offline single-player games only**: never use it in online, anti-cheat protected
 > games.
 
 
