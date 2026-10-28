@@ -54,7 +54,7 @@ More:
 
 #### Install
 
-1. **Download** `Gyro4All-vX.Y.Z.zip` from the [Releases](https://github.com/gfgerard/GyroUE/releases) page.
+1. **Download** `Gyro4All-vX.Y.Z.zip` from the [Releases](https://github.com/gfgerard/Gyro4All/releases) page.
 2. **Find the game's real exe folder.**  Usually it's the one with a file ending in **`-Win64-Shipping.exe`**, at 
    `<Game>\<Something>\Binaries\Win64`, **not** the game's main folder (that exe is only a launcher).
    Tip: search the game folder for `Shipping.exe`. It's where other mods like Optiscaler or Reshade go.
