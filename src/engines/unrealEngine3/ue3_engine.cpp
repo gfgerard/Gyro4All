@@ -226,6 +226,16 @@ bool find_names() {
     // Most samples, not all: some objects have names that aren't identifiers (Mass Effect LE 1: "<uninitialized>").
     auto fits = [&](uintptr_t a, Names kind, uintptr_t text_at) {
         if (name_text(a, kind, text_at, value) != "Class") return false;
+        if (kind == Names::Chunks) {
+            // Every chunk the names use must exist and be its own: a decoy array can repeat chunk 0 in slot 1 (Mass Effect
+            // LE 3), and what it reads there are fragments of other names, which still look like identifiers.
+            uintptr_t seen[8] = {};
+            for (uint32_t v : samples) {
+                const uintptr_t slot = (v >> 29) & 7, chunk = mem::rdp(a + slot * 8);
+                if (!chunk || (std::find(seen, seen + 8, chunk) != seen + 8 && seen[slot] != chunk)) return false;
+                seen[slot] = chunk;
+            }
+        }
         size_t good = 0;
         for (uint32_t v : samples) good += identifier(name_text(a, kind, text_at, v));
         if (good * 4 < samples.size() * 3) return false;

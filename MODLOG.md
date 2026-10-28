@@ -5049,3 +5049,15 @@ or gyro to stick.
     handled, so the Present-driven frame thread is **removed** (with the setting and the D3D12-swapchain wait for the
     panel; `overlay::has_dx12_swapchain()` removed from the core again). The gyro frame runs on the PeekMessageA hook
     like the other engines, on the game thread, so its angle writes can no longer land in the middle of the update.
+- 2026-10-28 **Bug (user): Mass Effect LE 3 fell to the blind stick fallback (1.8.3, then 1.9.0).** Log: `ue3: engine not
+  found (GObjects found, names found, property offset field missing)`; `ue3tool.py find` failed the same way (no
+  `Matrix` planes). Cause: the name table the search accepted is a **decoy array** whose chunk 0 and chunk 1 slots hold
+  the same pointer (an address inside the exe; the real chunk 1 is on the heap). Names in chunk 1 (24093 of ~53000 values) are read
+  from inside other entries, so they come out as tails of other names ("nlineEventSet", "nterpTrackSet..."), which are
+  still identifiers and passed the 3/4-identifiers rule added on 2026-10-26. `Matrix`/`Vector`/`Rotator` have the class
+  `ScriptStruct` (a chunk 1 name), so they read as `nlineEventSet` and the planes were never found. The real table
+  (`exe+0x17B33D0`, text at entry +0xC) gives: GObjects `exe+0x1887E40` (153259 objects), UProperty Offset +0x94, bool mask
+  +0xD0, SuperField +0x60, Engine.GamePlayers +0x498, Player.Actor +0x68, Actor.Rotation +0x114, Controller.Pawn +0x3BC,
+  Actor.WorldInfo +0x198, WorldInfo.Pauser +0x670. Fix: a chunk-array candidate is rejected when two chunks that the
+  sampled names use are the same pointer or null (module `find_names` and `ue3tool.py`). `ue3tool.py find` now works on
+  ME3; module built, 674 checks pass. **Not yet verified in game** (needs redeploying and a run).

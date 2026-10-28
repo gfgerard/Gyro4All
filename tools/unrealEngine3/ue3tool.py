@@ -279,6 +279,11 @@ class UE3:
             L.update(names=a, names_kind=kind, name_text=text)
             if self._read_raw(value) != "Class":
                 return False
+            if kind == "sfx":  # a decoy array can repeat a chunk in two slots (Mass Effect LE 3)
+                used = {v >> 29 for v in samples}
+                ptrs = [p.u64(a + 8 * s) for s in used]
+                if not all(ptrs) or len(set(ptrs)) != len(ptrs):
+                    return False
             # Most, not all: Mass Effect LE 1 has objects named "<uninitialized>".
             return sum(1 for v in samples if ident.fullmatch(self._read_raw(v) or "?")) * 4 >= len(samples) * 3
 
