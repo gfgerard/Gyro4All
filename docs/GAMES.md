@@ -72,6 +72,13 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 
 | Game | Engine | Year | Notes |
 |---|---|---|---|
+| Hitman 3 | Glacier 2 | 2021 |
+| 007 First Light | Glacier 2 | 2026 |
+| Halo: The Master Chief Collection | Blam! / Saber 3D / Halo | 2014 |
+| Halo: Campaign Evolved | Unreal Engine 5 | 2026 |
+| Alan Wake Remastered | Northlight | 2021 |
+| Control | Northlight | 2019 |
+| Alan Wake 2 | Northlight | 2023 |
 | Borderlands 3 | Unreal Engine 4 | 2019 |
 | Borderlands 4	| Unreal Engine 5 | 2025 |
 | Crysis 2| CryEngine 3 | 2011 |
@@ -87,4 +94,3 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 | BioShock | Unreal Engine 2.5 (modified) | 2007 | 32bit |
 | BioShock 2 | Unreal Engine 2.5 (modified) | 2010 | 32bit |
 | BioShock Infinite | Unreal Engine 3 | 2013 | 32bit |
-| CoD: Modern Warfare 3 | IW 5.0  | 2026 |
