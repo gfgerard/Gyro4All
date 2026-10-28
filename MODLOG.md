@@ -755,7 +755,7 @@ or gyro to stick.
   faulting page (VirtualQuery + VirtualProtect on `ExceptionInformation[1]`) and handles it; access violations and
   in-page errors are handled as before; anything else is no longer swallowed (EXCEPTION_CONTINUE_SEARCH). No GyroUE crash
   was attributed to this yet; it's a latent bug in the shared core. Built with `tools/build-gyroue.sh`, release zip
-  packaged. Deployed to Luto (`D:\Epic\LutoF2kGB\Luto\Binaries\Win64`, `winmm.dll`, replacing 0.6.17; alongside
+  packaged. Deployed to Luto (`<Luto>\Luto\Binaries\Win64`, `winmm.dll`, replacing 0.6.17; alongside
   PSButtonsUE 0.1.0 `dsound.dll` and scskiller `d3d12.dll`; generic profile, gyrolib.ini kept). Not run in game yet.
 
 - 2026-10-11 **Severed Steel (Demo, UE 4.27.2, exe `ThankYouVeryCool-Win64-Shipping.exe`, DX11).**

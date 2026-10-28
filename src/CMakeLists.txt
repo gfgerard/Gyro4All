@@ -42,7 +42,8 @@ target_link_libraries(Gyro4All PRIVATE gyro_options gyro_core gyro_unreal gyro_r
 # gyrolib.dll lives in the Gyro4All subfolder and is loaded by full path before first use.
 target_link_options(Gyro4All PRIVATE /DELAYLOAD:gyrolib.dll)
 # Symbols for crash dumps (build/Gyro4All/Release/winmm.pdb; never shipped). /OPT keeps the release layout.
-target_link_options(Gyro4All PRIVATE /DEBUG /OPT:REF /OPT:ICF)
+# /PDBALTPATH stores only the PDB file name in the DLL, not the build folder.
+target_link_options(Gyro4All PRIVATE /DEBUG /PDBALTPATH:%_PDB% /OPT:REF /OPT:ICF)
 
 # Unit tests of the parts that need no game (the Unreal profile's views, the core's Match=Camera choice):
 # tools/test-gyro4all.sh builds and runs them. Never shipped.
