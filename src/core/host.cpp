@@ -238,13 +238,15 @@ struct Delivery {
     }
 } g_delivery;
 
-// Motion trace (MotionTrace=1 in Gyro4All.ini): 30 s of per-sample and per-frame timing in Gyro4All\motion-trace.csv,
+// Motion trace (MotionTrace=1 in Gyro4All.ini; a number over 1: that many seconds instead of 30): per-sample and
+// per-frame timing in Gyro4All\motion-trace.csv,
 // to see where motion gets bunched (controller, transport, frame) and how GyroLib's burst delivery spreads it.
 //   S,sensor_ns,arrival_ns,gyro_x,gyro_y,gyro_z         every accepted sample (GyroLib sample observer)
 //   F,now_ns,new_samples,raw_yaw,raw_pitch,yaw,pitch     every frame while the gyro may turn the camera (raw = GyroLib
 //                                                        output, yaw/pitch = applied; equal since Gyro4All has no pacer)
 struct Trace {
     bool wanted = false, done = false;
+    int seconds = 30;
     FILE* file = nullptr;
     uint64_t start_ns = 0;
 } g_trace;
@@ -270,12 +272,12 @@ void trace_frame(uint64_t now_ns, bool camera, uint32_t new_samples, const gl_ou
         }
         std::fprintf(g_trace.file, "kind,a,b,c,d,e,f\n");
         g_trace.start_ns = now_ns;
-        log("trace: recording 30 s of motion timing to %s", narrow(path).c_str());
+        log("trace: recording %d s of motion timing to %s", g_trace.seconds, narrow(path).c_str());
     }
     if (camera)
         std::fprintf(g_trace.file, "F,%llu,%u,%.5f,%.5f,%.5f,%.5f\n", (unsigned long long)now_ns, new_samples,
                      out.yaw_degrees, out.pitch_degrees, yaw, pitch);
-    if (now_ns - g_trace.start_ns >= 30'000'000'000ull) {
+    if (now_ns - g_trace.start_ns >= uint64_t(g_trace.seconds) * 1'000'000'000ull) {
         std::fclose(g_trace.file);
         g_trace.file = nullptr;
         g_trace.done = true;
@@ -909,8 +911,10 @@ void host_raw_input(void* raw_input_handle) {
 void host_configure(Engine& engine) {
     g_engine = &engine;
     settings::ensure_file(engine.default_settings());
-    g_trace.wanted = settings::get(L"MotionTrace", 0) != 0;
-    if (g_trace.wanted) log("settings: MotionTrace=1 (30 s from the first gameplay frame)");
+    const int trace = settings::get(L"MotionTrace", 0);
+    g_trace.wanted = trace != 0;
+    g_trace.seconds = trace > 1 ? trace : 30;
+    if (g_trace.wanted) log("settings: MotionTrace=%d (%d s from the first gameplay frame)", trace, g_trace.seconds);
     // On-screen notices (camera check, probe progress); Notices=0 keeps them in the log only.
     const bool notices = settings::get(L"Notices", 1) != 0;
     log("settings: Notices=%d (Gyro4All.ini, the game's profile overrides)", notices ? 1 : 0);

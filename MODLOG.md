@@ -4931,3 +4931,121 @@ or gyro to stick.
   674 checks pass). Changes since 1.8.2: Crysis 2 Remastered in the CryEngine module (detection by the Remastered
   games table, `..\GameCrysis2\gamedata_chk0.pak`; the camera through PreUpdate's movement request, per-build
   `input_player` 0x310). `docs/GAMES.md` lists it as working (user: rename `MSVCP140.dll` in Bin64).
+- 2026-10-28 **Release 1.9.0.** `build/release/Gyro4All-v1.9.0.zip` (30 files, `winmm.dll` reads `Gyro4All 1.9.0`;
+  674 checks pass). Changes since 1.8.3: new Glacier 2 engine module (`src/engines/glacier/`) for HITMAN 3 (World of
+  Assassination): the third-person camera controller's angles turned directly, the game's live pitch limits, the
+  look-at blend at aim in/out stopped while the gyro turns, pause and cursor gating (entry below). Core:
+  `MotionTrace=<seconds>` (values over 1 set the trace length; 1 = 30 s as before). No profile for the game.
+- 2026-10-28 **Hitman 3 (Glacier 2): new engine module `src/engines/glacier/`, camera turned directly, working.**
+  Epic build, `HITMAN3.exe` FileVersion 3.280.0.0 (`gameinfo.txt`: Build ID 10545744). Tested by the user with a DualSense
+  over USB, Steam Input off; the F10 panel (DX12, through Streamline's `sl.interposer.dll`) works.
+  - Loading: `Retail\winmm.dll` loads (the exe imports `timeBeginPeriod`/`timeGetTime`/`timeEndPeriod`). Frame from
+    `PeekMessageA` on the main thread (called from exe+0x12951B3). No anti-cheat in the folder (EOS SDK only); the
+    game has online modes: offline/single-player use only. ZHMModSDK uses `dinput8.dll`, no clash.
+  - Controller: the game reads the DualSense itself over HID through Sony's `libScePad.dll` (imports `scePadReadState`
+    etc., not `scePadSetMotionSensorState`: no gyro of its own on PC). Report 0x01 (USB); buttons match SDL.
+  - Detection: `thumbs.dat` next to the exe and `..\Runtime\packagedefinition.txt`.
+  - Globals (signatures from ZHMModSDK, https://github.com/OrfeasZ/ZHMModSDK, checked unique in this exe): player
+    registry exe+0x3130720 (`lea rdx,[rip+..]; mov [rsp+50h],r15`), ZGameTimeManager exe+0x315D5C0 (static object,
+    `m_bPaused` +0x70, works: pause menu), also CameraManager exe+0x3946CE0, InputManager exe+0x312B6E0,
+    Hitman5Module exe+0x245B350, GetCurrentCamera's global exe+0x3194BA0.
+  - The registry's `TArray<SNetPlayerData>` at +0x390 has begin = registry+0x50 and **end = 0** in this build: read the
+    inline `m_aPlayerData[4]` at +0x50 (0xD0 each; net player +0x50, Hitman ZEntityRef +0xA8). Interfaces found by name
+    through the entity type (+0x20 list of {STypeID*, offset}; IType name at +0x10): `ZHitman5` at ref+0x3A8;
+    `m_rMainCamera` at ZHitman5+0x1348 (ref), +0x1350 (`ZHM5MainCamera`, also `ZCameraEntity`).
+  - Dead end: snapshots of ZHM5MainCamera (0x3000 bytes), its composite entity and ZHitman5 while turning a full
+    circle: only matrices and quaternions, no float angles.
+  - camtrace (3 breakpoints): the camera's world matrix (ZHM5MainCamera+0x20) is written by a generic set-transform
+    (exe+0x3F182) from local quat (+0x50) and position (+0x60) composed up the parent chain (+0x80; the parent is
+    identity here) at exe+0xF26D90; the local quaternion is written at exe+0xF26748 from the **third-person camera
+    controller's update exe+0x724240** (`this` from an execute breakpoint at exe+0x7242ED). The controller: vtable
+    **exe+0x1E1BA10** (constructor exe+0x722945: `xor ebp,ebp; lea rax,[rip+vt]; mov [rsi],rax; lea rcx,[rsi+2F0h]`,
+    unique), +0x10 the ZHM5MainCamera interface, +0x18/+0x20 the Hitman ref/ZHitman5, **yaw +0x2C, pitch +0x30**
+    (float radians; copies at +0x3E4/+0x3E0). Write tests on both kept. Yaw grows turning right (kept in [0, 2π) by the game), pitch
+    grows looking down; the game clamps the pitch (-0.785 up seen, at least 1.222 down).
+  - A pointer search for the camera at +0x10 missed the controller (it lies in a region the search skipped); the
+    module finds it with a heap scan for the vtable (+0x20 = the local ZHitman5) on its own thread.
+  - Pitch: the gyro stops at the game's limits (45 up, 70 down: -0.78540..1.22173 rad, checked with the stick held fully up and down; widened by the game's own stick, at most 1.5); pushing
+    past them made the stick fallback start. The stick fallback still starts now and then in play (9 times in a few
+    minutes, 1 s each; the game takes the camera over at times) and saved `StickFallbackLearned=radial,0.000,1.75,76.2,
+    35.7,3` to the game's `profiles\hitman3.ini`.
+  - Next: which moments make the game undo writes (cover, aiming, interactions, cutscenes?), aiming/scope views,
+    Bluetooth and Steam Input on, a shipped `profiles/hitman3.ini`, GAMES.md row.
+  - Aiming (L2 with a weapon, recorded 60 s, gyro still): the same controller and the same two angles turn the view;
+    only the FOV changes (+0x200 and copies: 40 on foot, 25 aiming; +0x2D0 -31.6 -> -6.8, +0x414 0 -> ~15.5 and
+    moving with the yaw while aiming). The stick fallback starts while aiming: suspected aim assist/aim slowdown (the
+    update's branch at exe+0x7243E2 recomputes the pending yaw +0x3E4 toward a target point, under game flags) taking
+    the angles back from the gyro's writes. To check with the game's aim assist off.
+  - The game's aim assist was already off: not the cause. Stick fallback switched off for Glacier (the module reports
+    no view_angles while the controller is found; recenter reads the pitch itself). The blind fallback (no
+    controller found) stays. To test: aiming with the gyro.
+  - **The aim freeze was the message pump, not the camera.** `MotionTrace=300` (new: a number over 1 = that many
+    seconds): at every weapon raise and lower the game thread pumps no window messages for 0.14-0.2 s while it keeps
+    rendering (no F lines and no samples consumed at 15.8, 21.8, 27.9, 36.4, 45.4 s; nothing in the log there), so the
+    PeekMessageA frame didn't run. The game's own stick keeps working (read inside its update). Static reading of the
+    update first (exe+0x724550): it adds the stick delta from the input object `[ZHitman5+0xBD0]+0x50` to the pending
+    angles, clamps the pitch to +0x5C4/+0x5C8 and stores them unless a vfunc ([+0x320]+0xD0) says not to; nothing
+    resets the yaw. Fix: the Glacier module runs Gyro4All's frame on its own thread woken by each Present
+    (frame_source, as Frostbite); apply adds the turn to the angles and to their pending copies (+0x3E4/+0x3E0), each on
+    its own, so a write landing mid-update still counts once.
+  - Dead end, don't repeat: a conditional hardware breakpoint (`--cond`) on a value the game writes every frame stops
+    the game at each write; it hung the GPU (`GPU hang. D3D12: Removing Device.`) and the game died.
+  - **Crash with that build** (twice, ~1 min into play, gyro turning): the game's own `int 3` at exe+0x11DFCEF, the
+    same place it stopped after its "GPU hang" under the debugger; Gyro4All's frame thread idle (waiting for Present)
+    in both minidumps (no heap in them); the trace up to the crash: no NaN, largest turns 9 deg yaw / 21 deg pitch in
+    a frame. Cause not known yet: bisecting with two test switches in Gyro4All.ini, `GlacierPresentFrame` (0 = frame on
+    the PeekMessageA hook) and `GlacierPendingWrites` (0 = only the angles are written). First test: Present frame on,
+    pending writes off.
+  - Test 1 (Present frame, pending writes off): no crash, freeze as before. Its trace: during each aim animation the
+    frame thread ran on its 50 ms timeout, i.e. **no Present at all** for ~0.2 s: the game's whole frame loop blocks,
+    apparently after the update's `pending = angle` copy, so angle writes in the block are lost to `angle = pending`.
+  - The update's input delta: `[ZHitman5+0xBD0]+0x50` = float yaw, pitch **in degrees** (scaled by pi/180 at
+    exe+0x1F92698 in the update, added to the pending angles, cleared after). New default `GlacierInputDelta=1`: the
+    gyro's turn is added there instead, for the game's update to consume. Not yet known whether the game's input
+    adds to it or overwrites it each frame.
+  - Input delta result: on foot the update consumes it (yaw follows, delta cleared); **aiming at full zoom it doesn't**
+    (yaw frozen exactly, the gyro's turn left in the delta; the update skips its stick step, exe+0x72494E's vfunc), while
+    the game's own stick still turns the aiming camera another way. The `+0x8BC` yaw arc stays at pi: no arc. Fix: a
+    delta still exactly as the module left it last frame = not consumed: the leftover goes back out, the turn goes to
+    the angles (aiming), and every 8th frame the delta is tried again.
+  - That fix failed in game (DualSense USB, Steam Input off): aimed in, the gyro barely moved. Live recording (25 s,
+    aim in and out twice): aimed, the update **clears the delta every frame without applying it** (yaw +0x2C constant
+    for 12 s with the delta written each frame), so "cleared" read as "consumed" and the turn was thrown away; the
+    log's "doesn't consume" switches (every 50-100 ms, also on foot) were just reads before the game's next update.
+    Both behaviours seen aimed (left, or cleared and dropped). Also: `+0x8B4`/`+0x8B8` (= the update's +0x2F0 +
+    0x5C4/+0x5C8) are the **live pitch limits**: 1.222/-0.785 (70 down/45 up) on foot, +-1.396 (80) aimed,
+    interpolated during the raise and lower.
+  - Fix: each delta write judged on the next frame by **whether the angles moved by at least half of it** (yaw, or
+    pitch away from its limits; turns under 0.005 deg tell nothing). Dropped (re-checked 1 ms later, in case the read
+    fell between the update's clear and its store) or left untouched for 3 Presents: the turn is added again and goes
+    to the angles; in the angles mode a 0.01 deg yaw marker (alternating sign) sits in an empty delta, and once the
+    game applies it the gyro goes back to the delta. The delta is updated with an 8-byte compare-exchange, so the
+    game's update can't consume it between Gyro4All's read and write. The pitch clamp reads the live limits (the
+    learned widening is gone). The status line shows the mode and the switch count.
+  - Still frozen/flickering at aim in and out (the environment moving and snapping back). Recordings with the stick
+    only: the right stick never goes through `[ZHitman5+0xBD0]+0x50` (only Gyro4All's own writes are there; probably
+    the mouse's path); on foot the stick's turn rate is the controller's `+0x2F4` (= the update's +0x2F0 struct +4);
+    aimed, the game turns `+0x2C` itself (stick, ~0.12 deg/frame) in another path. The second input object
+    `[ZHitman5+0xBD8]` (+0xB0 after the first, same class) stayed zero. The game's own aimed turning made the
+    delta/marker judging flap 30-40 times a second (dead end).
+  - The input step's delta gate `r12b` (exe+0x72476D) comes from globals exe+0x315D5A8..5B4 / exe+0x30A1196, constant
+    in play; the clear at exe+0x724928 depends on `[[ZHitman5+0xEA0]+0x183]`, 0 throughout. Neither is the aim switch.
+  - Cause of the freeze: the **look-at blend** (exe+0x727E05..727EEC): while the byte at the update's +0x2F0 struct
+    +0x6C4 (controller `+0x9B4`) is set, each update pulls the pending angles toward a fixed world point (+0x6A0, i.e.
+    controller `+0x990`) by the progress +0x6C8 over +0x570 (0.54 s), then clears it. Recorded: started at a gyro
+    aim-in (yaw held for 0.54 s), never at the four stick aim-ins/outs. What sets it was not found (the two
+    `mov byte [rbx+0x6C4],1` in the exe, exe+0x676DEF and exe+0x677365, are on another object).
+  - Fix: angles written directly again (`GlacierInputDelta` now defaults to 0) and, while the gyro turns, the blend
+    byte is cleared (as the game does when it ends); logged as "look-at blend stopped for the gyro". Untested.
+  - In game (DualSense USB, Steam Input off): aim in/out with the gyro now works as intended (the look-at blend stopped
+    once in the log). But the **F10 panel was gone**: the exe first makes a D3D11 swapchain for a startup window
+    (0.3 s after start), and the Present-driven frame thread ran its first frame (GyroLib's context, `overlay::attach`)
+    right away, so the panel attached as the static D3D11 one there and stayed; the game's D3D12 swapchain (captured
+    4 s later) never got it. Fix: `overlay::has_dx12_swapchain()` (core), and the Glacier frame thread holds its first
+    frame until the D3D12 swapchain is captured (20 s fallback). Frostbite's frame thread starts the same way (not
+    seen to lose its panel). Checked in game: the F10 panel is back.
+  - No per-game profile for Hitman 3: everything it needs is in the Glacier module (decided with the user).
+  - Tested by the user: the game behaves the same with `GlacierPresentFrame=0` and `=1` now that the look-at blend is
+    handled, so the Present-driven frame thread is **removed** (with the setting and the D3D12-swapchain wait for the
+    panel; `overlay::has_dx12_swapchain()` removed from the core again). The gyro frame runs on the PeekMessageA hook
+    like the other engines, on the game thread, so its angle writes can no longer land in the middle of the update.

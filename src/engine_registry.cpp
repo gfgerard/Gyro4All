@@ -11,11 +11,12 @@
 #include "unreal.hpp"
 #include "unreal3.hpp"
 #include "cryengine.hpp"
+#include "glacier.hpp"
 
 namespace gyro4all {
 
 std::span<Engine* const> all_engines() {
-    static Engine* const engines[] = {&unreal::engine(), &unreal3::engine(), &re::engine(), &fb::engine(), &idtech::engine(), &source::engine(), &foura::engine(), &swarm::engine(), &cryengine::engine()};
+    static Engine* const engines[] = {&unreal::engine(), &unreal3::engine(), &re::engine(), &fb::engine(), &idtech::engine(), &source::engine(), &foura::engine(), &swarm::engine(), &cryengine::engine(), &glacier::engine()};
     return engines;
 }
 

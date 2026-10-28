@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(Gyro4All VERSION 1.8.3 LANGUAGES C CXX)  # the one place the Gyro4All version lives (DLL log line + release zip name)
+project(Gyro4All VERSION 1.9.0 LANGUAGES C CXX)  # the one place the Gyro4All version lives (DLL log line + release zip name)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")  # static CRT: one less DLL to ship
 
@@ -31,6 +31,7 @@ add_subdirectory(engines/unrealEngine3)
 add_subdirectory(engines/4aEngine)
 add_subdirectory(engines/swarm)
 add_subdirectory(engines/cryEngine)
+add_subdirectory(engines/glacier)
 # panel/: gyro4all.dll, the settings panel for non-DX12 games (dynamic CRT, loaded by winmm.dll only when needed).
 add_subdirectory(panel)
 
@@ -38,7 +39,7 @@ add_subdirectory(panel)
 configure_file(core/version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/version.rc" @ONLY)
 add_library(Gyro4All SHARED engine_registry.cpp core/proxy.def "${CMAKE_CURRENT_BINARY_DIR}/version.rc")
 set_target_properties(Gyro4All PROPERTIES OUTPUT_NAME winmm)
-target_link_libraries(Gyro4All PRIVATE gyro_options gyro_core gyro_unreal gyro_re gyro_frostbite gyro_idtech gyro_source gyro_unreal3 gyro_foura gyro_swarm gyro_cryengine delayimp dxguid)
+target_link_libraries(Gyro4All PRIVATE gyro_options gyro_core gyro_unreal gyro_re gyro_frostbite gyro_idtech gyro_source gyro_unreal3 gyro_foura gyro_swarm gyro_cryengine gyro_glacier delayimp dxguid)
 # gyrolib.dll lives in the Gyro4All subfolder and is loaded by full path before first use.
 target_link_options(Gyro4All PRIVATE /DELAYLOAD:gyrolib.dll)
 # Symbols for crash dumps (build/Gyro4All/Release/winmm.pdb; never shipped). /OPT keeps the release layout.
