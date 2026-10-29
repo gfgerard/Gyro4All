@@ -3,6 +3,7 @@
 #include "hooks.hpp"
 #include "log.hpp"
 #include "mem.hpp"
+#include "vtable_hook.hpp"
 
 #define DIRECTINPUT_VERSION 0x0800
 #include <windows.h>
@@ -30,39 +31,6 @@ using GetDeviceData_t = HRESULT(STDMETHODCALLTYPE*)(void*, DWORD, LPDIDEVICEOBJE
 // COM vtable slots: IDirectInput8 CreateDevice; IDirectInputDevice8 (A and W alike) GetCapabilities, GetProperty,
 // GetDeviceState, GetDeviceData.
 constexpr int kCreateDevice = 3, kGetCapabilities = 3, kGetProperty = 5, kGetDeviceState = 9, kGetDeviceData = 10;
-
-// One vtable slot patched in place, in each vtable seen (dinput8.dll has one per A/W flavour). The vtables are shared
-// by every object of their class, also GyroLib's SDL's: the hooks check which device they were called for.
-struct VtableHook {
-    std::mutex mutex;
-    void** vtables[4] = {};
-    void* originals[4] = {};
-    std::atomic<int> count{0};
-
-    void* original_for(const void* object) {
-        void** vt = object ? *static_cast<void** const*>(object) : nullptr;
-        for (int i = 0, n = count.load(std::memory_order_acquire); i < n; ++i)
-            if (vtables[i] == vt) return originals[i];
-        return nullptr;
-    }
-
-    void patch(void* object, int index, void* replacement) {
-        void** vt = *static_cast<void***>(object);
-        std::lock_guard lock(mutex);
-        const int n = count.load();
-        for (int i = 0; i < n; ++i)
-            if (vtables[i] == vt) return;
-        DWORD old = 0;
-        if (n == 4 || vt[index] == replacement ||
-            !VirtualProtect(&vt[index], sizeof(void*), PAGE_EXECUTE_READWRITE, &old))
-            return;
-        vtables[n] = vt;
-        originals[n] = vt[index];
-        count.store(n + 1, std::memory_order_release);  // before the patch: a call may arrive right after it
-        InterlockedExchangePointer(&vt[index], replacement);
-        VirtualProtect(&vt[index], sizeof(void*), old, &old);
-    }
-};
 
 Create_t g_create = nullptr;
 VtableHook g_create_device, g_get_state, g_get_data;

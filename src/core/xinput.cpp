@@ -1,4 +1,5 @@
 #include "xinput.hpp"
+#include "xinput_wmi.hpp"
 
 #include "dinputpad.hpp"
 #include "hooks.hpp"
@@ -83,6 +84,8 @@ std::atomic<bool> g_game_polls{false};        // the game called XInputGetState 
 std::atomic<uint32_t> g_polls[4] = {};        // XInputGetState(Ex) calls per slot (diagnostics, reset every 10 s)
 std::atomic<uint32_t> g_polls_ours{0};        // ... of those, answered with the translated controller
 std::atomic<uint32_t> g_listed{0};            // vendor << 16 | product the game lists as XInput (listed_as_xinput)
+std::atomic<bool> g_listed_pending{false};    // ... and the frame hasn't decided about it yet
+std::atomic<uint32_t> g_real_mask{0};         // real XInput controllers connected (the watcher thread), bit per slot
 
 // ------------------------------------------------------------------ native pad support (Auto mode)
 
@@ -211,7 +214,11 @@ DWORD get_caps(GetCaps_t real, DWORD user, DWORD flags, XINPUT_CAPABILITIES* cap
     Inside inside;
     {
         std::lock_guard lock(g_mutex);
-        if (g_exposed && user == g_slot) {
+        // A controller the game listed as XInput, not shown yet: connected in the first free slot, where it will be.
+        DWORD first_free = 0;
+        while (first_free < 4 && (g_real_mask.load() & (1u << first_free))) ++first_free;
+        const bool pending = !g_exposed && g_listed_pending.load() && user == first_free;
+        if ((g_exposed && user == g_slot) || pending) {
             if (!caps) return ERROR_BAD_ARGUMENTS;
             *caps = {};
             caps->Type = XINPUT_DEVTYPE_GAMEPAD;
@@ -404,7 +411,6 @@ void di_read(uint32_t id, const char* how) {
 
 // Polls the real XInput slots and the loaded modules once per second, off the game thread (XInputGetState on an
 // empty slot can be slow, and a module scan is a few hundred calls).
-std::atomic<uint32_t> g_real_mask{0};   // real XInput controllers connected (bit per slot)
 std::atomic<bool> g_watch_ready{false}; // at least one full pass done
 
 // Native pad libraries among the game modules' imports: a delay-loaded libScePad.dll (The Outer Worlds: Spacer's
@@ -674,9 +680,14 @@ bool right_stick_pushed() {
     return g_exposed && (std::abs(g_state.Gamepad.sThumbRX) > quarter || std::abs(g_state.Gamepad.sThumbRY) > quarter);
 }
 
-void listed_as_xinput(uint16_t vendor, uint16_t product) {
+void listed_as_xinput(uint16_t vendor, uint16_t product, bool wait) {
     if (g_listed.exchange(uint32_t(vendor) << 16 | product) != (uint32_t(vendor) << 16 | product))
         log("xinput: the game lists controller %04X:%04X as an XInput device itself", vendor, product);
+    {
+        std::lock_guard lock(g_mutex);
+        if (!g_exposed) g_listed_pending = true;
+    }
+    if (!wait) return;
     // The game asks XInputGetCapabilities right after its check, once (Battlefield 4's device constructor): wait for
     // the frame (on another thread, Frostbite) to show the controller, so that answer is "connected".
     const ULONGLONG until = GetTickCount64() + 1000;
@@ -729,6 +740,9 @@ void install(const Settings& settings) {
     log("settings: XInput=%d (%s) XInputNintendoLabels=%d XInputTouchpadBack=%d", g_settings.mode, modes[g_settings.mode],
         g_settings.nintendo_labels ? 1 : 0, g_settings.touchpad_back ? 1 : 0);
     if (g_settings.mode == Off) return;
+    // Games that take XInput controllers from DirectInput's list and WMI (IsXInputDevice): every HID game controller
+    // passes their check (xinput_wmi.cpp).
+    install_wmi(g_settings.mode == Always);
     if (hooks::inline_mode()) {
         // Protected exe: no import slots, so inline hooks on the exports of the XInput DLLs games link against. All
         // three are loaded here, so a later load returns the hooked module: xinput9_1_0 (Battlefield 4 imports it; its
@@ -951,6 +965,7 @@ bool frame(gl_context* ctx, gl_sdl* reader, const gl_output& out, bool suppress_
             g_slot = first;
         }
         g_exposed = show;
+        if (listed && (show || reason.rfind("waiting", 0) != 0)) g_listed_pending = false;  // decided
         if (show && std::memcmp(&g, &g_state.Gamepad, sizeof g) != 0) {
             g_state.Gamepad = g;
             ++g_state.dwPacketNumber;

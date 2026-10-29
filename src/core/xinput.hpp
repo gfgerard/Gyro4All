@@ -32,9 +32,10 @@ bool translates();
 // The game itself lists the controller vendor:product as an XInput device (an engine module made the game's own
 // device check say so, e.g. Frostbite's IsXInputDevice): auto mode then shows that controller as XInput even though
 // the game also opened it through DirectInput or HID, since the game reads it through XInput only (and without the
-// grace period). Waits up to 1 s for the frame to show it (the game asks XInputGetCapabilities right after): call it
-// from a thread that isn't the one running the frame.
-void listed_as_xinput(uint16_t vendor, uint16_t product);
+// grace period). Until the frame decides about it, XInputGetCapabilities reads a connected gamepad in the slot it will
+// get (games that pick the slot once, right after the check: 007 First Light). wait: also waits up to 1 s for the
+// frame to show it (Battlefield 4); only from a thread that isn't the one running the frame.
+void listed_as_xinput(uint16_t vendor, uint16_t product, bool wait = true);
 
 // The controller shown as XInput has its right stick pushed past a quarter (the player's own stick, as last given to
 // the game, before the stick fallback's deflection). Any thread; false when no controller is shown.
