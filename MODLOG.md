@@ -5126,3 +5126,309 @@ or gyro to stick.
     the 0.57 owed in that frame, the next frames as GyroLib (-0.55/-0.59, -0.28/-0.20): no tail. Gyro4All's own frame
     work in that 10 s window: max 0.61 ms (perf line), so the stall is the game's. Two more stalls (148 and 189 ms)
     happened while the camera was still.
+- 2026-10-29 **007 First Light (Steam, Glacier, `Retail\007FirstLight.exe`): GyroLib never starts; the game loop's frame
+  hook found (offline, plus read-only stack reads of the running game; no debugger).**
+  - Symptom (1.9.0): `engine: Glacier (detected)`, then no gyro frame at all, so GyroLib is never created and no
+    `gyrolib.ini` is written. The exe imports `GetMessageW`/`DispatchMessageW` only (no `PeekMessageA/W`,
+    `MsgWaitForMultipleObjects`): the window is pumped by a thread of its own, blocked in `GetMessageW`, and the game
+    loop runs on the main thread (the DllMain thread). Same shape as RE7 (above), unlike HITMAN 3 (`PeekMessageA` on the
+    main thread).
+  - The exe is not packed and keeps MSVC RTTI (`.?AVZGameLoopManager@@`, `.?AVZGameTimeManager@@`, ...).
+    `ZGameLoopManager`: vtable exe+0x2D0B628 (5 entries), constructor exe+0x7AC3A0, a **static object at
+    exe+0x5CF8280** (built at exe+0x7BAC87 by the startup code that builds the engine's static components).
+  - In this build `ZGameLoopManager` is not ZHMModSDK's HITMAN 3 frame-update registry: exe+0x7AD0C0
+    (`this, const ZString& event, const delegate& (32 bytes), int priority`, 82 call sites) registers listeners of
+    named **game-loop events** (`Start`, `Stop`, `Paused`, `Resumed`, `GameplayStart`, `GameplayStop`, `IntroCutStart`,
+    `IntroCutEnd`, `LoadScreenGone`, `PlayingAfterLoad`, `SavegameRestored`, `StartSingletons`, ...; kept in a tree at
+    +0x60 keyed by name, strcmp), exe+0x7AD320 unregisters them, exe+0x7ACFA0 raises one by name. `Paused`/`Resumed`
+    could gate the gyro. Dead ends: the `ZEntityManager::FrameUpdate` ZString constants (exe+0x34ED288, 30 users) are
+    keys of a per-name time budget table (exe+0x3E95E00, via exe+0x7E660), not frame callbacks;
+    `ZBoxReflectionManager::PerFrameUpdate` is only an assert string.
+  - **The main loop** (main thread, from the CRT entry): exe+0x2A8E3B0 -> 0x46430 (WinMain) -> 0x3F4F0 -> 0x3F6D0 ->
+    0x676F0 -> (vcall +0x138) 0x3DA20 -> **0x3E150 (the loop)** -> **0x49C10 (one frame; returns false to quit)** ->
+    **0x4A300 (the frame's work**: `timeBeginPeriod`/`Sleep` frame limiter, `QueryPerformanceCounter`, reads
+    `ZGameLoopManager` +0x18/+0x20 (times) and +0x98 (loop state, 3 = running), calls the subsystems' updates).
+  - **Hook point, data only:** 0x49C10 (at exe+0x4A218) loads a 32-byte delegate from **`ZGameLoopManager` +0xB0**
+    (q0 = member fn, q1 low dword = this adjustment, q2 = static fn, q3 = object) and calls the frame through it when
+    set: q0 && q3: `q0(q3 + int(q1), &closure)`; else q2 && !q3: `q2(&closure)`; else `0x4A300(this)` directly. The
+    closure is a delegate of the same layout {0x4A300, 0, 0, the app object}. Live, +0xB0..+0xCF are all zero (no
+    wrapper). Plan: a static wrapper in q2 that runs the gyro frame and then `closure.q0(closure.q3 + int(closure.q1))`,
+    on the game thread, once per game frame, before the frame's update; found by the code at exe+0x4A218 (a
+    RIP-relative `vmovups ymm2, [rip+X]`) rather than the fixed offset. Not implemented or tested yet.
+  - **Implemented (not yet tested in game):** `src/engines/glacier/glacier_engine.cpp` `frame_source`: when the exe
+    imports neither `PeekMessageA` nor `PeekMessageW` (HITMAN 3 imports `PeekMessageA` and keeps the core's pump
+    frame, unchanged), a thread finds the wrapper by its code (`kWrapperCode`, exe+0x4A218 -> exe+0x5CF8330), waits
+    for `ZGameLoopManager`'s vtable at wrapper-0xB0 (up to 5 min), then sets only the delegate's static fn (+0x10, one
+    locked 8-byte exchange from 0) to `loop_frame`, which runs the gyro frame and then the frame's own delegate
+    (`member(object + adjust)`). Checked every second: put back if cleared, left alone if something else fills it.
+    Log lines: `glacier: the exe never calls PeekMessage: the gyro frame runs in the game loop`, `glacier: gyro frame
+    in the game loop's frame wrapper (...)`. The camera is still HITMAN 3's patterns (expected: not found, so the
+    gyro goes out as right stick until 007's camera is found). Deployed to the game folder as `winmm.dll`.
+  - **Tested in game (DualSense, report 0x01, Steam Input reports no controller):** works. The wrapper was found and
+    set 187 ms after start; GyroLib started on the first loop frame (`gyrolib.ini` created), the F10 panel opens and
+    closes (DX12, render worker), motion at ~470 samples/s. Gyro frames ~79/s against ~157 presents/s (frame
+    generation on). Gyro4All's frame: avg ~110-130 us, p99 ~250-300 us. The gyro stays off: the HITMAN 3 patterns
+    (player registry, game time manager, camera controller vtable) all match 0 addresses in this exe, so there is no
+    local player and no gameplay view (not even the stick fallback). Next: 007 First Light's scene and camera.
+- 2026-10-29 **007 First Light: looking for the camera (in progress; camtrace, read-only searches, write tests, two
+  one-hit write breakpoints with cdb; DualSense, Steam Input reports no controller).**
+  - Nothing of HITMAN 3's camera carries over: RTTI shows a different camera system ("Knt" kinetic cameras and game
+    camera entities: `ZSphericalOrbitGameCameraEntity` (69 live), `ZKntHumanoidCamera` (1), `ZCylindricalOrbitGameCameraEntity`
+    (2), `ZStateDrivenGameCameraEntity`, `ZPlayerCameraOrientationLimiter`...). Sampled while the camera turned, the
+    `ZKntHumanoidCamera` and both cylindrical entities don't change at all: configuration, not the live view.
+  - Glacier is **Z up**: camtrace's `vectors` assumes Y up (heading atan2(x, z), pitch asin(y)) and ranks junk first; the
+    scratch low-memory variant used heading atan2(y, x), pitch asin(z). camtrace `vectors` also ran out of memory on
+    two 7.4 GB heap snapshots (both loaded at once).
+  - The view (forward vector) has 48 copies, 10 in the exe's static data (e.g. exe+0x5E7B240, used as the view's
+    forward in the tests below). Yaw copies = -(view heading) - 90 deg, in radians: exe+0x3ED7ED0 and exe+0x4A23848 are
+    `ZAudioManagerWwise` (static object at exe+0x4A234C0) fields, written each frame by exe+0x6915A0 from a
+    `ZKntAudioListener`'s transform (`atan2` into +0x388): copies (write tests undone within a frame).
+  - `ZCameraManagerMain` is a static object at **exe+0x5D1B200** (vtable exe+0x2D897E0); its vfunc +0x38 (exe+0xBBE2C0,
+    via exe+0xBBE030) returns the active camera entity.
+  - The camera and the player live in the **Gameplay World ("Gpw")**: a data-oriented simulation fed through input
+    queues (`Gameplay::TInputPool<SGpwInput_...>`), in a **2.7 GB private region** (camtrace snapshots skip regions over
+    2 GB). Camera inputs include `SGpwInput_PlayerCameraSetSphericalCoordinates`, `SGpwInput_SetPlayerCameraWorldHeading`,
+    `SGpwInput_AddPlayerCameraOffsetInput`, `SGpwInput_BlockPlayerCameraInput`. `ZPlayerSphericalCameraRotateToYaw`
+    (vfunc 22/23 -> exe+0x17FF5F0) queues a rotate command (degrees * pi/180) into the object at [exe+0x6452820] (+0x1B850).
+  - A yaw/pitch pair in radians (yaw = -heading - 90, then pitch, both exact) in that region at
+    `<component> + 0x10C/+0x110` (one run: 0x18457358C): written every frame by exe+0x17CCE80 (from exe+0x17CD680,
+    main thread, in the game loop frame: ... exe+0x13ACBC0 -> 0x13ADA60 -> 0x13AD870 -> 0x189E320 -> 0x17CD680), computed
+    from the camera entity's orientation quaternion (from exe+0x16FD2D0); the components are arrays reached through
+    `[exe+0x64528E0]+8` (+0x88 base / +0x90 stride, and +0xE0 / +0xE8 for the source copied into +0x00). A copy (write
+    test undone within a frame).
+  - Write-tested, no view change: 0x15C531E44 (kept, nothing reads it), 0x17119CE68 (animation value), 0x1C101AE28
+    (undone). Not yet tried: the persistent state as a quaternion or a 2D (cos, sin) heading vector; the code that
+    consumes `SGpwInput_PlayerCameraSetSphericalCoordinates`; or turning through the official input
+    (`AddPlayerCameraOffsetInput` / the stick input) instead of a state.
+  - **The right stick, followed from the pad to the camera** (read-only searches, then one-hit read/write breakpoints;
+    camtrace's `bp` got `--read` for this, cdb `ba r`):
+    1. `scePadReadState` (IAT exe+0x2B1E8E0) in `ZDeviceGamepad_DualSense` vfunc 9 (exe+0x993C60; vtable
+       exe+0x2D571A8; DS4: `ZDeviceGamepad_Dualshock4_Windows` exe+0x99BAF0, XInput: `ZDeviceGamepad_XInput_Windows`
+       exe+0x99BED0): `ScePadData` to a generic state (dead zone exe+0x992200), copied to device+0x20: **right stick
+       at device+0x144 (x) / +0x148 (y)**. The device object lives in the 2.7 GB region (heap scans that skip regions
+       over 1-2 GB miss it). exe+0x995D80 copies that state to the stack for the input system.
+    2. In the Gameplay World ("Gpw": `[exe+0x64528E0]+8` is a table of component arrays {base, stride} at +off/+off+8,
+       indexed by entity; the player is entity 0): exe+0x191352D (main thread, game loop frame) copies a per-frame input
+       record (0x250-byte entries) into the **player input component** (+0x558/+0x560): record +0x20/+0x24 -> +0/+4
+       (the right stick), +0x18/+0x1C -> +8/+0xC, +0x10/+0x14 -> +0x18/+0x1C, +8/+0xC -> +0x20/+0x24, ...
+    3. The same function runs the **look input pipeline** exe+0x17CBE20: a float2 through the stage table at
+       exe+0x2BD0F30 (.rdata: [0] exe+0x17CB6F0 reads input component +0x20/+0x24, [1] exe+0x17CB730 dead zone and a
+       timer, [2] exe+0x17CB810 identity, [3] exe+0x17CB820 radial curve, [4] exe+0x17CB890 angle snapping (atan2), [5]
+       exe+0x17CB970 ..., 9+ stages), result (64 bytes) stored in the **camera input component** (+0xE0/+0xE8) at
+       +0x30..+0x6F (previous frame at +0x70, last non-zero at +0xB0).
+    4. exe+0x1AD7420 (from exe+0x18A5500): unless blocked (+0x60), copies that rate (+0x30..+0x3B) into the player
+       camera control component (+0x1210/+0x1218) at +0; its +0x10.. holds the control config (turn speeds 55/85/75/110
+       and 110/90/45/45 deg/s by mode, curve values); then the player camera update exe+0x17B8B10 (components +0x1218,
+       +0x4EF0, +0x23F8, +0x2138, +0x2450, +0x3DC0, +0xAE0, +0x4028, +0x3F20).
+    - Not found: a persistent yaw/pitch of the camera. No component of entity 0 holds the view's heading as an angle
+      (+-h + k*90, rad/deg, f32/f64) except the derived copy (+0x88, +0x10C) and coincidences (+0x1000 +0x58 is the
+      player's height); none holds the forward vector or (cos, sin) of the heading; no (x, y, z, w) quaternion in the
+      first 64 entities of any component rotates an axis onto the forward.
+    - Candidate injection point (not tried): a stage of the look input pipeline (its table is in .rdata) or the
+      camera input component's rate at +0x30, written and read in the same frame on the main thread: the gyro as a
+      turn rate the game's own camera integrates.
+  - **First injection try (built and deployed, not committed): doesn't turn the camera.** `src/engines/glacier/
+    glacier_look.cpp`: in builds without PeekMessage, a MinHook inline hook on the player camera update (found from
+    its call site, exe+0x1AD74A3 -> exe+0x17B8B10; the Gameplay World global from the update's start, exe+0x17B8B5D
+    -> exe+0x64528E0) adds the gyro to the control component's direction/magnitude (+0x1210 component +0/+4/+8)
+    as a rate (degrees / (GlacierLookYawSpeed or GlacierLookPitchSpeed, default 110 / 90, * frame time)), unless the
+    camera input component's +0x60 (blocked) is set; the view's angles from the derived view component (+0x88 +0x10C
+    / +0x110) for a calibration log line every 2 s. In game (DualSense, Steam Input reports no controller): the hook
+    is found and called every frame ("player camera running"; it stops in pause/menus), but the view doesn't follow:
+    2 s windows asked up to 74 deg and the view turned 0.00 (frames where the stick was still). So the update doesn't
+    take its turn from those three floats, or something after the copy overwrites them; next: find where the update
+    actually reads the turn (its use of the control component, or exe+0x18A5500 after exe+0x1AD7420). The update's
+    edx (the control "entity") is a handle (0x0C020000), used through its low 16 bits (entity 0).
+  - User report (stick only): turning the right stick in continuous circles, the camera ends up drifting up or down,
+    as if turning inside a sphere. The user saw it in game before this test too, before the look input hook existed
+    (earlier builds never wrote the camera): the game's own camera behaviour, not Gyro4All's. Worth keeping in mind
+    for the injection (the turn may be applied about the camera's own axes, not yaw about world up then pitch).
+  - **The first injection hooked the character's locomotion, not the camera** (offline disassembly, then read-only
+    memory sampling while the user moved each stick; DualSense, Steam Input reports no controller):
+    - Player input component (`[exe+0x64528E0]+8`, +0x558/+0x560, entity 0): **+0/+4 is the right stick** (already
+      scaled: held right ~+0.27, held up ~+0.14), **+0x20/+0x24 the left stick**. The "look input pipeline"
+      exe+0x17CBE20 reads +0x20/+0x24, so it is the **move** pipeline: camera input component +0x30 (direction x, y,
+      magnitude) and the control component +0x1210 +0/+4/+8 carry the left stick. Sampled with Gyro4All's hook on, the
+      control component's direction jittered with the gyro while the stick was still: the gyro was being added to
+      movement.
+    - exe+0x17B8B10 (the hooked "player camera update") passes control +0/+4 to exe+0x17CC360 (dead zone, then the
+      stick turned into a world direction through a body rotation quaternion `[r9]`: entity transforms {quat, pos} of
+      stride 0x40 at `[[exe+0x3E9AA20]+8]+0x30`, index the word at `[exe+0x3E9AA68]+4`; live it held the character's
+      yaw-only quaternion and position). A second component table at `[exe+0x6452868]+8` holds the same body transform
+      (+0x23F0, stride 0x50) and a 2D facing direction at +0x40. So it is the character's locomotion/facing update.
+    - The "derived view" yaw at W1 +0x88 +0x10C (exe+0x17CCE80 via exe+0x17CCA10) is atan2 of a target position minus
+      the character's position (a look-at/aim heading), not the camera's own state; exe+0x16FD2D0 looks up a 0x60-byte
+      record by entity handle in `[exe+0x6452828]` +0xB30 (live: one record, the character's transform).
+    - The right stick (+0/+4) is written by the copier at exe+0x1913936 (from the per-frame input record +0x20/+0x24)
+      and read by an "any input?" idle check at exe+0x1A38A81 (+0, +4, +0x20, +0x24, +0x18, +0x1C, flags +0x76/+0x71).
+      Its camera consumer is not found yet: next, a read breakpoint on +0 with those two skipped, in gameplay.
+  - **Dead end that crashed the game:** 007 First Light pauses (pause menu, cursor shown) when it loses focus, so
+    breakpoint runs started while the user was in this app's window never hit; three of them were ended by killing cdb
+    (`timeout`). Killing an attached cdb leaves the hardware breakpoint in the game threads' debug registers: when
+    gameplay resumed, the next access crashed the game. camtrace `bp` now has `--timeout` (default 120 s): it breaks in
+    with DebugBreakProcess, clears the breakpoints (`bc *`) and detaches; `bc *` also runs before the detach after a
+    hit. Tested on a harmless process (break-in, `bc *`, detach, process kept running). Never wrap `bp` in `timeout`.
+  - **In-process traces instead of cdb** (core `WriteWatch`, already in Gyro4All: hardware read/write breakpoints on
+    every game thread from its own exception handler, every accessor logged with counts and callers; no debugger, so
+    nothing to crash, and the game can stay in front). `glacier_look.cpp` now provides the name `input` (player input
+    component, entity 0) and adds nothing to the control component (the gyro turns nothing in this build). In the
+    game's `Gyro4All.ini`: `WriteWatch=on` at start, then `WriteWatch=r:input` (re-read every 500 ms), 60 s.
+    - `r:input` (+0, the right stick's x; 60 s of gameplay, stick moved): only **exe+0x1914931** (the copier, 2832x,
+      `mov [rdi], eax` from the frame's input record `[r14+r12+0x20]`) and **exe+0x1A39681** (the idle check, 2832x).
+      The camera doesn't read the stick from this component. (This copier is at exe+0x1914916; an identical one at
+      exe+0x1913936.)
+    - `r:<record +0x20>` (the queued input record at a stable address across frames): only **exe+0x14FD4D8** (2993x:
+      copies the whole record from `r9`, a pending input `{.., 0x263, entity handle 0x0C020000 at +0x10, ...}`, into the
+      queue; callers exe+0x14D6A63 <- exe+0x13C9604 <- exe+0x5EA179 <- exe+0x13AEC49) and the copier (2237x). The camera
+      doesn't read this record either: the stick reaches the camera by another path.
+    - Idea (not yet checked live): exe+0x17CCA10 (the "derived view yaw") computes the heading from a position (W
+      `[exe+0x64528F0]` kind +0x710 +0x10, for the entity id at W1 kind +0xEA0 +0x30) minus the character's position
+      (W2 kind +0x2340 +0x10). If that is the camera's position, the orbit camera keeps its view as a position on a
+      sphere around the player, not as angles: why no persistent angle or quaternion was found, and fits the drift
+      when circling the stick.
+  - **Steam updated the game at 13:28 on 2026-10-29** (exe timestamp): code moved by about +0xFE0 (the player update to
+    exe+0x17B9AF0, the frame wrapper to exe+0x5CF86B0), the Gameplay World global to **exe+0x6452CA0** (+0x3C0).
+    Gyro4All's code patterns found them all again; the addresses above (from the earlier build) are stale.
+  - **The camera's orientation is a quaternion** (paused-view comparisons, read-only, Python against the running
+    game: every unit float4/float3 and double in the big private RW regions, kept when it rotated by the view's angle
+    between two paused views; reference = the rendered view's vectors). Float angles: none persistent (only the
+    derived +0x10C/+0x110 and transient copies). Yaw test (83 deg) and up-to-down test (139.89 deg): a family of 14
+    identical (x, y, z, w) quaternions (e.g. in the entity transform array {quat, pos} pairs) and **one unique
+    quaternion followed by a position and lens values (35, 3000)**: in that run at 0x182AAD570, position at +0x10.
+    Forward is the local +Y axis, Z up; the derived yaw = heading - 90.
+  - **Write tests while paused are not conclusive.** Rotating 0x182AAD570 by 45 deg while paused: the first time
+    the derived yaw moved +43.5 within 10 s of unpausing (most likely the user's own stick move: the user saw nothing,
+    the camera looking 72 deg down); the second time, at a level view, the game had put the old orientation back after
+    unpausing and the view didn't move. Pausing may re-sync the camera from its own state. Next: write while the game
+    runs (a few degrees every frame for 3 s), started when Gyro4All logs `player camera running`.
+  - **Live spin tests (writing a few degrees every 30 ms for 3 s while the game runs, started on `player camera
+    running`) on the copies: no effect**, rewritten every frame: the quaternion family (0x1832C8CA0), 0x182AAD570, the
+    orbit offset. A degrees copy (camera-controller-like object with limits -180/180, -60/75; written by exe+0x561B93
+    from a copy of the derived angles) kept the writes but nothing reads it.
+  - **Following the writers back with in-mod write traces (`WriteWatch=<addr>`, 60 s each, user turning the camera):**
+    derived view (W1 +0x88, exe+0x17CDE80: swing/twist angles of a quaternion) <- the per-entity record table
+    `[exe+0x6452BE8]`+0xB30 (exe+0x14E378E, the Gameplay World's input queue: the camera reaches the Gameplay World as
+    an input) <- a queued record (exe+0xC23507, pushed by exe+0x18A6B90 from the object at `[[exe+0x3E9AE20]+0x10]`)
+    <- that object (exe+0x540539, worker thread: the **active camera**'s transform, handle at `[exe+0x3E9ADE8]+4`) <-
+    the camera's entity transform {quat, pos, prev quat, prev pos} in `[[exe+0x3E9ADA0]+8]` +0x30/+0x38 (exe+0x4FE5B8:
+    only for dirty entities; quaternion from exe+0x538560: a look-at when the flag at bitset +0x720 is set, else
+    exe+0x564DD0 from component +0x1E8 = {pivot, offset, shoulder offsets, up}) <- the offset (exe+0x545687 clears the
+    component every frame, exe+0x52E0A5 fills it) <- **the orbit update** (loop at exe+0x52DEB0).
+  - **The orbit camera's state (persistent, integrated by the game):** camera world `[exe+0x3E9ADA0]` (+8 component
+    table), per camera entity: **+0x500 (stride +0x508): radius, yaw, pitch (radians), radius/yaw/pitch rates
+    (+0xC/+0x10/+0x14, set by the right stick), yaw/pitch offsets (+0x18/+0x1C)**; each frame `angle += dt * rate`,
+    clamped by **+0x558 (stride +0x560): radius, yaw min/max, pitch min/max** (exe+0x51D0F0), angles wrapped to +-pi,
+    radius maybe overridden (+0x9D0), then turned into the offset around the pivot (exe+0x5640A0). Live: radius 2.0, yaw
+    141.35 deg (derived 141.28), pitch -4.15 (derived -5.81; up negative), limits yaw +-180, pitch -60..75. Spin test on
+    the yaw (+0x504): **62 writes of 2 deg turned the view +122 deg** and the game kept it.
+  - **Implemented and tested in game (DualSense, Steam Input reports no controller; connection not recorded): works.**
+    `glacier_look.cpp` rewritten: code patterns find the camera world (the orbit update loop, which also pins the
+    +0x500/+0x508/+0x558/+0x560 offsets), the active camera global and, as before, the Gameplay World and the player
+    update (its hook now only tells when gameplay runs). Each gyro frame (game thread, before the frame's update) adds
+    the turn to the active orbit camera's yaw (kYawSense +1: grows to the right) and pitch (kPitchSense -1: grows
+    downwards), the pitch clamped to the camera's limits, the yaw wrapped to +-pi; no turn when the active camera has no
+    orbit state. Log `glacier: orbit camera <handle> (state ..., limits pitch ..)` on each camera switch: in 7 minutes
+    it followed four orbit cameras (13020057 limits -60..75, 13020086, 1302006F, 13020067 limits -75..75). User: the gyro
+    turns the camera in the right directions and the right stick still works. Calibration lines (view moved / asked,
+    2 s windows without the stick): large turns x1.02/1.06, x1.10/1.08, x1.07/1.07, x1.18/0.99 (the derived view is a
+    smoothed proxy; the orbit angles take the turn 1:1 by construction); short windows and camera switches are noisy.
+    No recenter (Recenter::No). Not yet: a release, GAMES.md, aiming/cover cameras checked one by one, cutscenes.
+  - **Indoors, the pause menu (deployed; not yet confirmed one by one in game).** The player's locomotion update stops indoors, so the
+    gate is now an inline hook on the orbit update (exe+0x52DDE0, the function around the loop, found from the exe's
+    unwind table: `RtlLookupFunctionEntry`, following chained fragments). The orbit update keeps running behind the
+    pause menu: the gyro also needs the game loop running, **ZGameLoopManager (the gyro frame's wrapper - 0xB0)
+    +0x98: 3 = running, 2 = pause menu** (ZGameTimeManager +0x90 = 1 when paused would also do).
+  - **Look-at cameras (L2).** Some orbit cameras look at a point: camera world bitset `[[world]+0x38]+0x720` and the
+    point at component +0x1A50 (stride +0x1A58), seen from the transform's position (+0x30, position at +0x10;
+    exe+0x538560). Spin tests: the **aim camera (1302006B, limits -80..80) ignores its orbit angles and follows the
+    point** (turning the point turns the view 1:1); the normal look-at cameras (13020067 while a weapon is out) keep the
+    point but follow their angles. So the gyro turns both on such cameras: the point about the camera's position
+    (heading -= yaw, elevation += pitch within the pitch limits) and the orbit angles.
+  - **Aim freezes, three causes found with per-frame traces in the mod (logged on each camera switch; removed):**
+    1. When the aim ray hits nothing, the point is at about 1e8 m along the view (e.g. 89393240, -44822248, 52902):
+       a sanity limit of 1e4 m skipped it and the aim camera stayed fixed for the whole aim. Limit now 1e12 m.
+    2. Ruled out: the game doesn't move the written point or angles after the switch, the active camera is the one
+       rendered (the camera system exe+0x540460 follows a redirect chain, bitset +0x330 -> component +0xBE0, which
+       stayed on the active camera), and its output (`[[exe+0x3E9AE20]+0x10]`, transform first) turned with the gyro
+       from the first frame.
+    3. **L2's zoom (0.4-0.5 s, with or without a weapon; shorter with one) runs on a transition camera without an orbit
+       state**: entity 0x11E with a new generation each time (1302011E, 1303011E, ...), between 13020067 and 1302006B
+       both ways (also on other cuts, e.g. to 1302009E). None of its components below +0x4000 holds another camera's
+       handle. The orbit update integrates every orbit camera in its list (its argument +8/+0x10: begin/end of 16-bit
+       entities), active or not, so the stick keeps turning them during the zoom. Fix: **while the active camera has no
+       orbit state, the gyro turns every orbit camera in that list** (points included); the game re-aligns 13020067 to
+       the aim camera's view when it switches back. **Tested in game (user): the gyro now turns the view during the
+       zoom, with and without a weapon.** Not checked: whether other cameras (cover 13020061, 1302008E, 1302009E) come
+       back turned after a cut that turned them, and cutscenes (other cameras without orbit, e.g. 130100CF, also
+       trigger it).
+  - **With the gyro activated by L2 (GyroLib trigger activation, threshold 0.2).** One session (gyrolib.ini switched
+    from always-on to L2 while the game ran) reported the zoom still frozen; it couldn't be told apart in that log. After
+    a restart, a summary line per transition (`glacier: transition camera <handle> for N ms: N gyro frames (N turned
+    cameras), asked yaw .. pitch ..`, first 12 transitions) showed the gyro arriving on every frame of every zoom
+    (27 frames in 500-516 ms, every frame turned the cameras) and the user saw it work, with L2 activation and again
+    with always-on. That game's transition camera was entity 0x105 (1302..13140105): the entity changes between
+    sessions, so it is told by having no orbit state, not by its index. The cause of the earlier report is unknown.
+  - **Log cleanup for publishing.** Removed the 2 s calibration line (`glacier: orbit camera: N frames, the view
+    turned ...`, ~1800 lines an hour of play); the camera line (`glacier: orbit camera <handle> (...)`) is now logged
+    once per camera (16 kept) instead of on every switch; the transition line stays (first 12 per session). The core's
+    status block (status, motion, sensor pacing, perf: 4 lines, every engine) now comes every 30 s instead of 10 s
+    (`kStatusMs` in `src/core/host.cpp`; its rates are per second over the real span, so unchanged; docs/ADVANCED.md
+    updated).
+- 2026-10-29 **007 First Light: a Switch Pro controller (DirectInput, no Steam Input) shown as XInput but never read**
+  (built, not tested in game yet). Log: `Nintendo Switch Pro Controller shown as XInput controller 0`, then every 10 s
+  `game polls per slot 0/0/0/0`: the game never called XInputGetState (imported from XINPUT9_1_0, hooked).
+  - **Why**, from the exe (static disassembly): the input manager's DirectInput device callback exe+0x994820 (rdx =
+    DIDEVICEINSTANCEW: guidProduct at +0x14, dwDevType at +0x24) first matches the Sony product GUIDs (Sony pad
+    devices), then calls exe+0x994F40 (rcx = ?, rdx = &guidProduct; returns BOOL in eax): Microsoft's WMI
+    `IsXInputDevice` sample (wide `Win32_PNPEntity`, `DeviceID`, `IG_`, `VID_`; `cmp ecx,[r14]` = guidProduct.Data1).
+    True: an XInput device (0x1B0 bytes, ZDeviceGamepad_XInput_Windows) whose slot is the first from the manager's
+    next-slot counter (+0x48) up to 3 where `XInputGetCapabilities(slot, 0)` succeeds with SubType 1 (gamepad), asked
+    once; none: slot -1 (never polled). False: nothing (the game has no DirectInput joysticks). Its update exe+0x99BF90
+    calls XInputGetState([this+0x188]). Same scheme as Battlefield 4 (2026-10-21), different calling convention.
+    A second copy of the `IG_` string's user, exe+0x28B4620 (caller exe+0x28B3D93, result not tested), isn't it.
+  - **Fix** (`src/engines/glacier/glacier_xinput.cpp`): from the game's first DirectInput8Create (`dinputpad::on_create`),
+    the functions that `lea` the wide "IG_" string whose direct callers test the result (`call; test eax,eax|al,al; je`
+    within 16 bytes): exactly one in 007FirstLight.exe (exe+0x994F40, checked offline with the same search in Python).
+    Hooked with MinHook; answers 1 for Nintendo (057E) controllers when the XInput translation is on (Sony ones keep
+    their native route; other DirectInput pads not handled). Core (`xinput.cpp`): `listed_as_xinput(vendor, product,
+    wait)`: Glacier doesn't wait (the device list may be built on the frame's thread, and GyroLib's controller only
+    shows seconds later: 3 s in the log), so a listed controller not shown yet reads as a connected gamepad to
+    XInputGetCapabilities in the first free slot until the frame decides about it (`g_listed_pending`); the device
+    then gets that slot and reads not connected until the controller is shown. Battlefield 4 keeps its 1 s wait.
+  - **Engine-neutral fix on top** (`src/core/xinput_wmi.cpp`, built, not tested in game): instead of each engine
+    hooking its copy of the check, the check's WMI query is answered differently. `CoCreateInstance` (game modules'
+    imports; combase.dll's export inline on protected exes): when the game creates CLSID_WbemLocator, a class object of
+    our own (CLSID_WbemClassObject, in process, no WMI connection) gives fastprox.dll's `CWbemObject::Get`
+    (IWbemClassObject slot 4), hooked inline with MinHook. A test program here: all 235 Win32_PNPEntity instances share
+    that Get with our object (CWbemInstance and CWbemClass vtables alike).
+    **First version crashed 007 First Light at start** (stack overflow, dump in CrashDumps): it patched the vtable
+    slots of IWbemLocator::ConnectServer (3), IWbemServices::CreateInstanceEnum (18) / ExecQuery (20) and
+    IEnumWbemClassObject::Next (4) in place, and the Steam overlay (`gameoverlayrenderer64.dll`) hooks the same
+    ConnectServer and CreateInstanceEnum (our ConnectServer original was its hook); our CreateInstanceEnum hook and
+    Steam's ended up calling each other. Dead end: patching WMI vtables shared with the Steam overlay.
+    The rest of the first version stays: a `DeviceID` starting `HID\` without `IG_`, whose
+    VID/PID (USB `VID_xxxx`, Bluetooth `_VID&0002xxxx`) is a present HID game controller (SetupAPI + hid.dll: usage page
+    1, usage 4/5/8; paths with `IG_` skipped; Sony skipped with XInput=1 when the game has Sony's pad library), reads as
+    `HID\VID_xxxx&PID_xxxx&IG_00\<instance>` (Bluetooth rebuilt in the USB form, which the sample's `swscanf("VID_%4X")`
+    parses), and `listed_as_xinput(.., false)` is called. Calls from Gyro4All, gyrolib.dll and SDL3.dll pass untouched.
+    The controller list is read again when older than 2 s. Covers any DirectInput pad (8BitDo in DInput mode, generic
+    pads), not only Nintendo. The engine hooks (`fb_xinput.cpp`, `glacier_xinput.cpp`) stay as a fallback: with the WMI
+    answer the real check already says yes and they pass it on. `VtableHook` moved from dinputpad.cpp to
+    `src/core/vtable_hook.hpp` to share it. Not covered: other forms of the check (`IG_` in a Raw Input or SetupAPI device
+    name) and controllers DirectInput doesn't list (Steam Controller without Steam).
+  - First run (vtable version): `the game creates a WbemLocator` at 5 s, before its first DirectInput8Create, and
+    `the game reads controller 057E:2009's DeviceID: shown as an XInput one` 1 s later: the check works as planned.
+  - To verify: `xinput: WMI: the game creates a WbemLocator`, `WMI: IWbemClassObject::Get hooked`, `WMI: the game reads controller 057E:2009's DeviceID: shown
+    as an XInput one`, `the game lists controller 057E:2009 as an XInput device itself`, then `the game polls
+    XInputGetState` and nonzero polls on slot 0. Also Battlefield 4 again (DualSense, its fb hook now passes the real
+    answer) and a game that polls XInput slots directly (no change expected).
+- 2026-10-29 **007 First Light: Switch Pro controller as an Xbox controller through the WMI hook, user-verified**
+  (inline `CWbemObject::Get` version; Steam Input off: `No controllers reported by the game's Steam Input service`;
+  Pro controller connection not recorded). The user: the Pro controller (DirectInput, no Steam Input) works in game,
+  and so does the DualSense afterwards (the game's own support: `nativepad: the game opened controller 054C:0CE6`,
+  64-byte reports, USB). Log: `the game creates a WbemLocator` at 10 s, `IWbemClassObject::Get hooked` 70 ms later,
+  `057E:2009's DeviceID: shown as an XInput one` (5 s before the game's first DirectInput8Create: the WMI pass
+  runs before the device list), `shown as XInput controller 0`, `the game polls XInputGetState`, then 300-1500 polls
+  per 10 s on slot 0, all answered with the controller, sticks and buttons moving. No crash with the Steam overlay.
+  The Glacier hook (`glacier_xinput.cpp`) was installed too but had nothing to add (the real check already said yes).
+  Not tested yet: Battlefield 4 with this build, an 8BitDo/generic DirectInput pad, a Bluetooth Pro controller.

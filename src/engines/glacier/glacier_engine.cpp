@@ -2,7 +2,8 @@
 // thumbs.dat next to the exe (Retail\) and its package list in ..\Runtime\packagedefinition.txt. The exe pumps messages
 // with PeekMessageA on the main thread; Gyro4All's frame runs there, from its hook (a Present-driven frame thread made no
 // difference once the look-at blend was handled, and moved the F10 panel to a startup window). The game reads the
-// DualSense itself over HID (Sony's libScePad.dll).
+// DualSense itself over HID (Sony's libScePad.dll). 007 First Light never calls PeekMessage: its frame comes from the
+// game loop's frame wrapper (loop_thread), and its camera turns through the active orbit camera's angles (glacier_look.cpp).
 //
 // The scene (layouts from ZHMModSDK's reconstructed headers, https://github.com/OrfeasZ/ZHMModSDK; the globals found by
 // the code that refers to them, as the SDK does): the player registry (a static object) holds SNetPlayerData[4]
@@ -22,7 +23,10 @@
 // a heap scan on a thread of its own, again whenever it goes away. Without the vtable, or while no controller matches
 // the local Hitman, the gyro goes to the game as right-stick input (the core's blind stick fallback).
 #include "glacier.hpp"
+#include "glacier_look.hpp"
+#include "glacier_xinput.hpp"
 
+#include "dinputpad.hpp"
 #include "engine.hpp"
 #include "log.hpp"
 #include "mem.hpp"
@@ -33,6 +37,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <format>
 #include <vector>
@@ -41,9 +46,9 @@ namespace gyro4all::glacier {
 
 namespace {
 
-// Code that refers to each global (0xFF in the mask = byte must match); the disp32 at kDisp is relative to the end of
-// the instruction, kInsnEnd bytes from the pattern's start. Each unique in .text of HITMAN3.exe 3.280.0.0 (2026-10-28).
-constexpr size_t kDisp = 3, kInsnEnd = 7;
+// Code that refers to each global (0xFF in the mask = byte must match); the disp32 at byte 3 is relative to the end of
+// the instruction, 7 bytes from the pattern's start (data_from_code's defaults). Each unique in .text of HITMAN3.exe
+// 3.280.0.0 (2026-10-28).
 // lea rdx,[rip+registry]; mov [rsp+50h],r15 (exe+0xBD121 -> exe+0x3130720).
 constexpr uint8_t kRegistryCode[] = {0x48, 0x8D, 0x15, 0, 0, 0, 0, 0x4C, 0x89, 0x7C, 0x24, 0x50};
 constexpr uint8_t kRegistryMask[] = {0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -108,10 +113,12 @@ mem::Range exe_section(const char* name) {
     return {0, 0};
 }
 
+}  // namespace
+
 // The address in the exe's section `in` a RIP-relative instruction refers to, from the code around it. 0 unless the
-// pattern is found and all its matches agree.
-uintptr_t data_from_code(const uint8_t* code, const uint8_t* mask, size_t n, const char* what, size_t disp_at = kDisp,
-                         size_t insn_end = kInsnEnd, const char* in = ".data") {
+// pattern is found and all its matches agree; code_at: where it matched (the last match).
+uintptr_t data_from_code(const uint8_t* code, const uint8_t* mask, size_t n, const char* what, size_t disp_at,
+                         size_t insn_end, const char* in, uintptr_t* code_at) {
     const mem::Range text = exe_section(".text");
     const mem::Range data = exe_section(in);
     if (!text.begin || !data.begin) return 0;
@@ -129,6 +136,7 @@ uintptr_t data_from_code(const uint8_t* code, const uint8_t* mask, size_t n, con
             std::memcpy(&disp, &chunk[i + disp_at], 4);
             const uintptr_t target = at + i + insn_end + disp;
             if (target >= data.begin && target < data.end && target != found) found = target, ++hits;
+            if (target == found && code_at) *code_at = at + i;
         }
         if (len < chunk.size()) break;
     }
@@ -139,6 +147,8 @@ uintptr_t data_from_code(const uint8_t* code, const uint8_t* mask, size_t n, con
     log("glacier: %s at %s", what, mem::module_offset(found).c_str());
     return found;
 }
+
+namespace {
 
 // A type's name from its STypeID (STypeID::GetTypeInfo, then IType's name), "" if unreadable.
 std::string type_name(uintptr_t type_id) {
@@ -252,9 +262,133 @@ bool exchange_delta(uintptr_t at, const float (&expected)[2], const float (&valu
     }
 }
 
+// The game loop's frame (MODLOG 2026-10-29, 007 First Light): builds whose exe never calls PeekMessage pump the window on
+// a thread of their own (GetMessageW) and run the game loop on the main thread. Each frame of that loop (exe+0x49C10)
+// calls the frame's work (exe+0x4A300) through an optional wrapper, a delegate in ZGameLoopManager (+0xB0), empty in
+// the game: {member fn, this adjustment (low dword), static fn, object}. A static fn alone is called with the frame's
+// own delegate ({0x4A300, 0, 0, the app}); the gyro frame runs there, just before the frame's work, on the main thread.
+struct Delegate {
+    void* member;
+    int64_t adjust;
+    void* fn;
+    void* object;
+};
+// vmovups ymm2,[rip+wrapper]; mov rsi,[rsp+..]; vmovq r9,xmm2; vextractf128 xmm0,ymm2,1; vextractf128 xmm1,ymm2,1;
+// vmovq r8,xmm0; vpextrq rdx,xmm1,1; test r9,r9 (exe+0x4A218 -> exe+0x5CF8330, unique).
+constexpr uint8_t kWrapperCode[] = {0xC5, 0xFC, 0x10, 0x15, 0, 0, 0, 0, 0x48, 0x8B, 0xB4, 0x24, 0, 0, 0, 0,
+                                    0xC4, 0xC1, 0xF9, 0x7E, 0xD1, 0xC4, 0xE3, 0x7D, 0x19, 0xD0, 0x01, 0xC4, 0xE3, 0x7D,
+                                    0x19, 0xD1, 0x01, 0xC4, 0xC1, 0xF9, 0x7E, 0xC0, 0xC4, 0xE3, 0xF9, 0x16, 0xCA, 0x01,
+                                    0x4D, 0x85, 0xC9};
+constexpr uint8_t kWrapperMask[] = {0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0,
+                                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                    0xFF, 0xFF, 0xFF};
+constexpr size_t kWrapperDisp = 4, kWrapperInsnEnd = 8;
+constexpr uintptr_t kManagerWrapper = 0xB0;  // the wrapper's offset in ZGameLoopManager, whose vtable is at +0
+// ZGameLoopManager's loop state (007 First Light, MODLOG 2026-10-29): 3 while the game runs, 2 in the pause menu (the
+// orbit camera keeps updating behind it).
+constexpr uintptr_t kLoopState = 0x98;
+constexpr uint32_t kLoopRunning = 3;
+constexpr ULONGLONG kManagerWaitMs = 300000;
+
+Engine::FrameFn g_frame = nullptr;
+std::atomic<uintptr_t> g_loop_manager{0};  // ZGameLoopManager, once built
+
+// The game loop runs (not paused); true while ZGameLoopManager isn't known yet.
+bool loop_running() {
+    const uintptr_t manager = g_loop_manager.load();
+    uint32_t state = 0;
+    return !manager || (mem::rd(manager + kLoopState, state) && state == kLoopRunning);
+}
+
+void loop_frame(const Delegate* frame) {
+    g_frame();
+    using Work = void (*)(void*);
+    reinterpret_cast<Work>(frame->member)(static_cast<char*>(frame->object) + static_cast<int32_t>(frame->adjust));
+}
+
+// True if the exe imports PeekMessageA or PeekMessageW (HITMAN 3): the core's pump hook gives the frame then.
+bool exe_imports_peek() {
+    const uintptr_t base = exe_base();
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress) return false;
+    for (auto* imp = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress); imp->Name; ++imp) {
+        if (_stricmp(reinterpret_cast<const char*>(base + imp->Name), "user32.dll") != 0 || !imp->OriginalFirstThunk) continue;
+        for (auto* t = reinterpret_cast<const IMAGE_THUNK_DATA64*>(base + imp->OriginalFirstThunk); t->u1.AddressOfData; ++t) {
+            if (IMAGE_SNAP_BY_ORDINAL64(t->u1.Ordinal)) continue;
+            const char* fn = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + t->u1.AddressOfData)->Name;
+            if (!std::strcmp(fn, "PeekMessageW") || !std::strcmp(fn, "PeekMessageA")) return true;
+        }
+    }
+    return false;
+}
+
+// Installs the wrapper once ZGameLoopManager is built (its vtable, in .rdata, at +0; the constructor clears the wrapper
+// after it), then keeps it: put back if the game clears it, left alone if something else installs one.
+DWORD WINAPI loop_thread(void*) {
+    const uintptr_t wrapper = data_from_code(kWrapperCode, kWrapperMask, sizeof kWrapperCode, "the game loop's frame wrapper",
+                                             kWrapperDisp, kWrapperInsnEnd);
+    if (!wrapper) {
+        log("glacier: no game loop frame: no gyro (this build's frame loop isn't known)");
+        return 0;
+    }
+    look::install();
+    const mem::Range rdata = exe_section(".rdata");
+    const ULONGLONG start = GetTickCount64();
+    for (;;) {
+        const uintptr_t vtable = mem::rdp(wrapper - kManagerWrapper);
+        if (vtable >= rdata.begin && vtable < rdata.end) {
+            g_loop_manager = wrapper - kManagerWrapper;
+            break;
+        }
+        if (GetTickCount64() - start > kManagerWaitMs) {
+            log("glacier: ZGameLoopManager not built after %llu s: no gyro", kManagerWaitMs / 1000);
+            return 0;
+        }
+        Sleep(10);
+    }
+    Sleep(100);
+    auto* slot = reinterpret_cast<volatile LONG64*>(wrapper + offsetof(Delegate, fn));
+    const LONG64 ours = reinterpret_cast<LONG64>(&loop_frame);
+    bool installed = false, foreign = false;
+    for (;;) {
+        Delegate d{};
+        if (!mem::guarded_copy(&d, wrapper, sizeof d)) {
+            log("glacier: the game loop's frame wrapper is unreadable: no gyro");
+            return 0;
+        }
+        if (d.member || d.object || (d.fn && d.fn != &loop_frame)) {
+            if (!foreign) log("glacier: the game loop's frame wrapper is in use (%p %p): left alone, no gyro", d.member, d.fn);
+            foreign = true;
+            installed = false;
+        } else if (!d.fn && InterlockedCompareExchange64(slot, ours, 0) == 0) {
+            if (installed) log("glacier: the game loop's frame wrapper was cleared: put back");
+            else log("glacier: gyro frame in the game loop's frame wrapper (%s), %llu ms after start",
+                     mem::module_offset(wrapper).c_str(), static_cast<unsigned long long>(GetTickCount64() - start));
+            installed = true;
+            foreign = false;
+        }
+        Sleep(1000);
+    }
+}
+
 class GlacierEngine final : public Engine {
 public:
     const char* name() const override { return "Glacier"; }
+
+    // Builds that pump with PeekMessage (HITMAN 3) get the core's frame; the others the game loop's (loop_thread).
+    bool frame_source(FrameFn frame) override {
+        if (!loop_mode_) return false;
+        g_frame = frame;
+        if (HANDLE thread = CreateThread(nullptr, 0, &loop_thread, nullptr, 0, nullptr)) {
+            CloseHandle(thread);
+            log("glacier: the exe never calls PeekMessage: the gyro frame runs in the game loop");
+            return true;
+        }
+        log("glacier: can't start the game loop thread (error %lu)", GetLastError());
+        return false;
+    }
 
     bool detect(const std::wstring& exe_path) const override {
         const std::wstring dir = exe_path.substr(0, exe_path.find_last_of(L"\\/"));
@@ -267,21 +401,26 @@ public:
     // Test switches (MODLOG 2026-10-28): GlacierInputDelta=1 turns through the input delta (flaps while aimed), and
     // GlacierPendingWrites=1 writes the angles' pending copies too (crashed the game twice, GPU hang, with the Present frame
     // since removed).
+    // Builds without PeekMessage (007 First Light) run the gyro frame in the game loop and turn the active orbit camera's
+    // angles (glacier_look.cpp).
     void configure() override {
+        loop_mode_ = !exe_imports_peek();
         input_delta_ = settings::get(L"GlacierInputDelta", 0) != 0;
         pending_writes_ = settings::get(L"GlacierPendingWrites", 0) != 0;
         log("settings: GlacierInputDelta=%d GlacierPendingWrites=%d", int(input_delta_), int(pending_writes_));
+        dinputpad::on_create(&hook_xinput_device_check);
     }
 
     // The default view while a local Hitman exists (the game's pause and the mouse cursor gate it); nothing otherwise
     // (front end, loading). Its camera controller turned directly, the gyro as right stick until it is found.
     EngineFrame read_frame() override {
-        if (!searched_) find_globals();
         EngineFrame f;
         const bool was_cursor = cursor_;
         cursor_ = cursor_shown();
         if (cursor_ != was_cursor) log("glacier: mouse cursor %s", cursor_ ? "shown (menu)" : "hidden");
         f.cursor = cursor_;
+        if (loop_mode_) return read_look_frame(f);
+        if (!searched_) find_globals();
         f.paused = paused();
         const uintptr_t hitman = local_hitman();
         if (hitman != hitman_) {
@@ -330,6 +469,9 @@ public:
     // GlacierInputDelta=0 (default): the angles only. Angle writes can land in the middle of the game's update and be lost to its
     // angle = pending; GlacierPendingWrites=1 writes the pending copies too.
     bool apply(double pitch, double yaw) override {
+        if (loop_mode_) {
+            return look::live() && loop_running() && look::turn(pitch, yaw);
+        }
         if (!controller_) return false;
         ++frames_;
         double ty = kYawSense * yaw, tp = kPitchSense * pitch;  // degrees, the game's senses
@@ -377,6 +519,10 @@ public:
     }
 
     Recenter recenter_support(std::string& detail) override {
+        if (loop_mode_) {
+            detail = "the orbit camera (no leveling)";
+            return Recenter::No;
+        }
         float p = 0;
         if (!controller_ || !mem::rd(controller_ + kPitch, p)) {
             detail = "camera controller not found";
@@ -400,6 +546,7 @@ public:
     bool sees_menus() const override { return false; }
 
     std::string status_scene() const override {
+        if (loop_mode_) return std::format("{} cursor={}", look::status(), int(cursor_));
         float a[2] = {}, up = 0, down = 0;
         if (controller_) mem::guarded_copy(a, controller_ + kYaw, sizeof a);
         pitch_limits(up, down);
@@ -411,6 +558,20 @@ public:
     }
 
 private:
+    // 007 First Light: the default view while the orbit camera's update runs (not in the front end or a load) and the
+    // game loop isn't paused, turned through the active orbit camera's angles; the mouse cursor gates it too.
+    EngineFrame read_look_frame(EngineFrame f) {
+        const bool live = look::live() && loop_running();
+        if (live != look_live_) {
+            look_live_ = live;
+            log("glacier: orbit camera %s", live ? "running" : "stopped (front end, load or pause)");
+        }
+        f.in_game = live;
+        f.view_id = live ? 1 : 0;
+        f.target = "orbit camera";
+        return f;
+    }
+
     static bool read_floats(uintptr_t at, float (&v)[2]) {
         return mem::guarded_copy(v, at, sizeof v) && std::isfinite(v[0]) && std::isfinite(v[1]);
     }
@@ -568,6 +729,8 @@ private:
         return paused_;
     }
 
+    bool loop_mode_ = false;  // no PeekMessage: the game loop's frame and the orbit camera (007 First Light)
+    bool look_live_ = false;
     bool searched_ = false;
     uintptr_t registry_ = 0;
     uintptr_t time_ = 0;

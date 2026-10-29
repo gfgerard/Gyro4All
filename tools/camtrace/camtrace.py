@@ -303,11 +303,12 @@ def find_cdb():
 
 def cmd_bp(p, a):
     at = addr(p, a.addr)
-    kind = "e1" if a.exec else f"w{a.len}"  # --exec: when that instruction runs (e.g. right after a getter returns)
+    # --exec: when that instruction runs (e.g. right after a getter returns); --read: reads too (cdb's r: read or write)
+    kind = "e1" if a.exec else f"r{a.len}" if a.read else f"w{a.len}"
     if not a.exec and at % a.len: sys.exit(f"a {a.len}-byte breakpoint needs a {a.len}-aligned address ({at:#x})")
     out = a.out or os.path.join(tempfile.gettempdir(), f"camtrace-bp-{p.pid}-{at:x}.txt")
     script = os.path.join(tempfile.gettempdir(), f"camtrace-bp-{p.pid}.cdb")
-    act = f'.echo CAMTRACE-HIT; r; kn 30; u @rip-0x{a.back:x} L{a.lines}; dq @rsp L40; .detach; q'
+    act = f'.echo CAMTRACE-HIT; r; kn 30; u @rip-0x{a.back:x} L{a.lines}; dq @rsp L40; bc *; .detach; q'
     if a.skip:  # writes from this code range (e.g. a mod's own DLL writing the same value) don't count
         lo, size = (int(x, 16) for x in a.skip.split(":"))
         act = f".if ((@rip >= 0x{lo:x}) & (@rip < 0x{lo + size:x})) {{gc}} .else {{{act}}}"
@@ -315,11 +316,21 @@ def cmd_bp(p, a):
         act = f".if ({a.cond}) {{{act}}} .else {{gc}}"
     with open(script, "w") as f:
         f.write("\n".join(["sxi *", "sxi ld", "sxi ud", "sxi ct", "sxi et", "sxi cpr", "sxi epr",
-                           f'ba {kind} {at:#x} "{act}"', "g", ".echo CAMTRACE-NOT-HIT", ".detach", "q", ""]))
-    print(f"breakpoint on {'execution of' if a.exec else 'writes to'} {p.name(at)} ({at:#x}); switch to the game (it"
-          f" fires on the next {'run' if a.exec else 'write'}, one hit, then the debugger detaches). Output: {out}", flush=True)
+                           f'ba {kind} {at:#x} "{act}"', "g", ".echo CAMTRACE-NOT-HIT", "bc *", ".detach", "q", ""]))
+    print(f"breakpoint on {'execution of' if a.exec else 'reads or writes of' if a.read else 'writes to'} {p.name(at)} ({at:#x}); switch to the game (it"
+          f" fires on the next {'run' if a.exec else 'access' if a.read else 'write'}, one hit, then the debugger detaches). Output: {out}", flush=True)
+    # Never kill cdb while it is attached: the hardware breakpoint stays in the game's debug registers and the next
+    # access crashes the game (007 First Light, 2026-10-29). On --timeout, break in instead (DebugBreakProcess): the
+    # script then goes on after "g", clears the breakpoint and detaches.
     with open(out, "w") as f:
-        r = subprocess.run([find_cdb(), "-pd", "-p", str(p.pid), "-cf", script], stdout=f, stderr=subprocess.STDOUT)
+        r = subprocess.Popen([find_cdb(), "-pd", "-p", str(p.pid), "-cf", script], stdout=f, stderr=subprocess.STDOUT)
+        try:
+            r.wait(timeout=a.timeout)
+        except subprocess.TimeoutExpired:
+            h = k32.OpenProcess(0x1FFFFF, False, p.pid)  # all access, for DebugBreakProcess's remote thread
+            if not h or not k32.DebugBreakProcess(h): print(f"can't break in (error {ctypes.get_last_error()}); waiting for cdb")
+            if h: k32.CloseHandle(h)
+            r.wait()
     text = open(out, errors="replace").read()
     # The marker on a line of its own: cdb also echoes the breakpoint command, which contains it.
     m = re.search(r"^CAMTRACE-HIT\s*$", text, re.M)
@@ -327,7 +338,7 @@ def cmd_bp(p, a):
     hit = text[m.end():]
     regs = dict(re.findall(r"\b(r[a-z0-9]{1,2})=([0-9a-f]{16})", hit))
     rip = int(regs.get("rip", "0"), 16)
-    print(f"HIT: {'at' if a.exec else 'written by'} {p.name(rip)}")
+    print(f"HIT: {'at' if a.exec else 'accessed by' if a.read else 'written by'} {p.name(rip)}")
     print("registers (exe-relative where they point into the exe):")
     print("  " + "  ".join(f"{k}={p.name(int(v, 16))}" for k, v in regs.items() if k != "rip"))
     print("call stack (return addresses):")
@@ -395,7 +406,9 @@ def main():
     s.add_argument("--len", type=int, choices=[1, 2, 4, 8], default=4); s.add_argument("--back", type=lambda x: int(x, 0), default=0x180); s.add_argument("--lines", type=int, default=110); s.add_argument("--out")
     s.add_argument("--skip", help="base:size (hex) of code whose writes are ignored, e.g. a mod DLL's")
     s.add_argument("--exec", action="store_true", help="break when the instruction at addr runs instead (read registers there)")
+    s.add_argument("--read", action="store_true", help="break on reads too (who uses a value), e.g. with --skip for its writer")
     s.add_argument("--cond", help="cdb expression: hits where it is false are let go (e.g. \"poi(@rcx+0x70) == 0x...\")")
+    s.add_argument("--timeout", type=float, default=120, help="seconds without a hit before breaking in, clearing the breakpoint and detaching (never kill cdb: the breakpoint would stay armed and crash the game)")
     s = sub.add_parser("refs", help="offline: code with RIP-relative refs into [lo, hi) RVAs"); s.add_argument("lo"); s.add_argument("hi")
     s = sub.add_parser("sig", help="offline: a code pattern's matches and the RVA each RIP-relative disp resolves to"); s.add_argument("pattern")
     s.add_argument("--disp", type=int, default=3); s.add_argument("--end", type=int, default=7)

@@ -19,6 +19,8 @@ game's files.
 | `write-test <addr> --add R` or `--yaw D` | Waits for the game in front, writes once, shows whether the game kept it | **Yes** |
 | `bp <addr>` | One-hit hardware write breakpoint through cdb (`-pd`), prints who wrote it, detaches | No (debugger) |
 | `bp <addr> --exec [--cond EXPR]` | The same when the instruction at addr runs (registers there, e.g. right after a getter returns); `--cond` lets hits go until a cdb expression holds (`"poi(@rcx+0x70) == 0x..."`) | No (debugger) |
+| `bp <addr> --read [--skip BASE:SIZE]` | The same on reads too (cdb `ba r`): who uses a value, e.g. a controller's stick in its device object; `--skip` its writer | No (debugger) |
+| `bp ... --timeout SECONDS` | Without a hit by then (default 120 s), breaks in, clears the breakpoint and detaches. **Never kill cdb (or wrap `bp` in `timeout`)**: the hardware breakpoint stays in the game's debug registers and the next access crashes the game | No (debugger) |
 | `refs <lo> <hi>` / `sig <pattern>` | Offline, the exe file: code referring to an address range; a signature's matches | No |
 
 Addresses are absolute hex, exe-relative (`exe+0x30021e0`) or pointer paths (`[[exe+0x1696ce0]+0x30]+0x9e0`).

@@ -59,6 +59,7 @@ ULONGLONG g_next_steam_check = 0;
 bool g_failed = false;
 
 ULONGLONG g_next_status = 0, g_next_ini_check = 0;
+constexpr ULONGLONG kStatusMs = 30000;  // the status block's interval in the log
 FILETIME g_ini_time{};
 double g_applied_yaw = 0, g_applied_pitch = 0;
 StickFallback g_stick_fallback;  // the gyro as right-stick input while the game undoes its camera writes
@@ -902,7 +903,7 @@ void frame() {
 
     const ULONGLONG now = GetTickCount64();
     if (now >= g_next_status) {
-        g_next_status = now + 10000;
+        g_next_status = now + kStatusMs;
         status();
         perf::report();
     }
