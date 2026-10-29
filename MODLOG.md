@@ -5061,3 +5061,68 @@ or gyro to stick.
   Actor.WorldInfo +0x198, WorldInfo.Pauser +0x670. Fix: a chunk-array candidate is rejected when two chunks that the
   sampled names use are the same pointer or null (module `find_names` and `ue3tool.py`). `ue3tool.py find` now works on
   ME3; module built, 674 checks pass. **Not yet verified in game** (needs redeploying and a run).
+- 2026-10-29 **Hitman 3: small hitches turning with the gyro (stick smooth) at a 100 FPS cap: uneven sensor time per frame.**
+  `MotionTrace=120` (1.9.0, DualSense USB, gyro-only sweeps at a wall). Gyro4All's frames are perfectly regular (3795 of
+  4394 at 10.0 ms; the rest 20 ms where the game ran at 50): the double `PeekMessageA` per frame is not the cause (the
+  0.5 ms throttle keeps one gyro frame per game frame). ~485 samples/s, sensor intervals 1.3-3.8 ms; SDL reads the reports
+  at `gl_update`, so every sample's arrival is the frame time (~13 us before it) and GyroLib's burst delivery (empty
+  updates only) never engages. The sensor time inside each 10 ms frame varies 8-12 ms (p5-p95), and the turn per frame
+  follows it: per-frame turn against its neighbours sd 0.19 (p5 0.71, p95 1.27), correlation 0.93 with the frame's sensor
+  span, 0.21 with its sample count. The stick turns by frame time, so it stays smooth.
+  - Offline replay of the trace (scratch script): playing each frame's output back in sensor time mapped to the host clock
+    (offset = lowest arrival-minus-sensor latency, no extra delay) halves that jitter (sd 0.24 -> 0.11 in the replay's
+    measure, which also counts the hand's own acceleration). Same fix as asked of GyroLib on 2026-10-09 (play back in
+    sensor time with a small delay); not engine-specific. Not implemented yet.
+  - **Implemented: sensor-time pacing in the core** (`src/core/sensor_pacer.hpp/.cpp`, wired in `host.cpp`; untested in
+    game). `SensorPacing=1` (default) / `SensorPacingDelayUs=-1` (automatic), both re-read when `Gyro4All.ini` or the
+    profile is saved. GyroLib's samples (observer) give sensor and arrival times; host time = sensor + the lowest
+    arrival-minus-sensor offset of the last 2 s. Each update's GyroLib turn becomes a segment of a timeline (from the
+    previous update's last report to this one's); each frame gets the turn up to (frame - delay), the last rate carried
+    forward past the last report (at most 10 ms). Automatic delay = median of the last report's lag behind the frame.
+    Per axis the frame's turn is what is owed, clamped to 0.5-1.5x of (rate at the target x frame time) with the sign of
+    the sensor motion: never a step back; an extrapolation the reports undercut is paid back while turning. A GyroLib
+    turn in an update without new reports (its burst delivery, BT pads like the Switch Pro) flushes what is owed and
+    leaves GyroLib's turn unpaced for 1 s after the last such update (no pacing on top of GyroLib's). The gate closing,
+    a 100 ms stall or a sensor clock restart drop what wasn't played back. Status line every 10 s: `sensor pacing:
+    delay, frames paced, % extrapolated, frames left to GyroLib's burst delivery`.
+  - Replay of the Hitman trace through the C++ class (scratch harness, same jitter measure): off 0.238, automatic
+    (settled at 1.95 ms) 0.090, delay 0 0.094, delay 5 ms 0.077; totals kept (-3.78 in, -3.79 out); no frame turned
+    against GyroLib's sign with automatic or 0. Better than the Python estimate (0.14) because the 0.5-1.5x clamp also
+    evens out the per-segment rate. Unit tests (6, synthetic uneven USB-like reports): steady 100 deg/s at 100 FPS worst
+    frame 43% off unpaced, 4.6% paced; VRR 100-165 FPS worst 3.5%; stop/restart and reversal keep the total; burst
+    passthrough; off untouched.
+  - **In game (user, DualSense USB, ~20 s of gyro sweeps at a wall, `SensorPacingDelayUs=0`):** the game ran at
+    ~160 FPS this time (6.3 ms frames, stretches of 13 ms), 3 reports per frame typically. Log: delay 0.00 ms, 100% of
+    frames extrapolated, nothing left to GyroLib's burst delivery. From the trace (F lines: GyroLib's turn vs the paced
+    one; same measure as above but on the turn rate, since frame times vary): raw 0.321 (worse than 0.238 at 100 FPS,
+    as expected: the same ~2 ms report jitter weighs more in shorter frames), paced 0.117; totals kept (yaw -13.30 vs
+    -13.24, pitch 14.70 vs 14.65), no frame against GyroLib's sign. The scratch replay of this trace through the class
+    reproduces the live output exactly; replayed with the automatic delay: 0.108, paced minus GyroLib cumulative p50
+    0.016 / p95 0.26 deg (0.078 / 0.55 with delay 0: mostly the intended lead of ~2 ms, not an error). Variants that
+    allow a zero turn while ahead (no 0.5x floor) left 10-16 frames nearly stalled mid-sweep: the floor stays. The
+    sweeps had no holds (direction changes only), so overshoot at a hard stop isn't measured yet.
+  - **Same test with the automatic delay (`SensorPacingDelayUs=-1`):** ~160 FPS again. Log: delay settled at 1.95-2.5 ms,
+    50-51% of frames extrapolated. Trace: raw 0.308, paced **0.082** (-73%); totals identical (yaw -16.65, pitch
+    -11.24); no frame against GyroLib's sign; paced minus GyroLib cumulative p50 0.013 / p95 0.22 deg. Replaying this
+    trace with delay 0: 0.088, p95 0.49 deg. On both traces the automatic delay is ~7% smoother than 0 and follows the
+    motion more closely; 0 is ~2 ms earlier. Default stays automatic.
+  - **Hard-stop test (automatic delay, ~30 fast wrist turns of 300-1800 deg/s at the camera, each stopped and held; user
+    noticed nothing odd).** At normal stops the paced camera matched GyroLib's within ~0.05 deg (no overshoot). Two
+    faults found in the trace, both fixed:
+    1. A **143 ms game stall** (a frame with 62 reports, GyroLib +13.5 deg in it): the stall reset kept the reports but
+       the frame's turn was capped by the 1.5x clamp over at most 50 ms of frame time, so 7.2 deg went out and the
+       rest trickled in over the next 100+ ms, plus a ~0.25 deg offset that lingered. Now a stall (frame or report
+       gap over 100 ms) sends what is owed and the update's turn at once and restarts the timeline from its last
+       report (the jump is already on screen). Counted in the status line (`S stalls`).
+    2. **Reports stopping for 12.6 ms in the middle of a ~950 deg/s turn** (two frames with no reports, then 25 deg in
+       one): the 10 ms extrapolation cap gave 6.8, 3.4, 11.7 deg; with the cap at 20 ms: 6.8, 6.8, 10.0, 7.8 (GyroLib
+       alone: 0, 0, 25.0). The traces have 70-77 frames without a report per 45-60 s (not all mid-turn).
+    Replay of this trace, before/after: paced minus GyroLib cumulative p50 0.25 -> 0.008 deg, 300 ms after a stop
+    mean 0.14 -> 0.03 deg (max 3.3 -> 0.5); jitter 0.153 -> 0.148 (raw 0.343: fast flicks). Unit test for the stall.
+  - **In game with the stall fix (automatic delay, 20 s of sweeps then fast turns; the user felt one frametime hitch).**
+    ~160 FPS. Sweeps/turns: raw 0.312 -> paced 0.109; totals kept (yaw -42.13/-42.07); no frame against GyroLib's
+    sign; at stops paced matches GyroLib (mean +0.04 deg, max 0.59; 300 ms after: max 0.22). The hitch: a **144.5 ms
+    game frame at t=44.3 s** in a 633 deg/s turn; the pacer counted it as a stall and turned GyroLib's 4.42 deg plus
+    the 0.57 owed in that frame, the next frames as GyroLib (-0.55/-0.59, -0.28/-0.20): no tail. Gyro4All's own frame
+    work in that 10 s window: max 0.61 ms (perf line), so the stall is the game's. Two more stalls (148 and 189 ms)
+    happened while the camera was still.

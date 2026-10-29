@@ -1,7 +1,9 @@
 // Unit tests for the parts of Gyro4All that need no game: the Unreal module's game profile (ue_profile.cpp), the
-// core's Match=Camera choice (camera_match.hpp), its stick fallback (stick_fallback.cpp, stick_response.cpp) and stick camera (stick_camera.cpp). Built with Gyro4All (target gyro4all_tests); run with
+// core's Match=Camera choice (camera_match.hpp), its stick fallback (stick_fallback.cpp, stick_response.cpp), stick camera (stick_camera.cpp) and sensor-time
+// pacing (sensor_pacer.cpp). Built with Gyro4All (target gyro4all_tests); run with
 // tools/test-gyro4all.sh.
 #include "camera_match.hpp"
+#include "sensor_pacer.hpp"
 #include "stick_camera.hpp"
 #include "stick_fallback.hpp"
 #include "ue_profile.hpp"
@@ -1106,6 +1108,172 @@ void test_stick_camera_invert_y() {
     CHECK(std::abs(r.pitch + 200) < 1e-3);
 }
 
+// Sensor-time pacing: a controller turning at `rate` deg/s (yaw) whose reports come at uneven intervals (as the
+// DualSense's over USB, MODLOG 2026-10-29) and are read at each frame, all stamped with the read time as SDL does;
+// GyroLib's turn for a frame = rate times the sensor time of the reports read in it.
+struct PacerRun {
+    SensorPacer pacer;
+    uint64_t sensor = 1'000'000'000, next_report = 0;  // host time of the next report's measurement
+    uint64_t now = 5'000'000'000, last_read_sensor = 0;
+    size_t step = 0;
+    double rate = 0, input = 0, output = 0;
+    std::vector<double> turns;  // yaw per frame
+    explicit PacerRun(SensorPacer::Settings s = {}) {
+        pacer.configure(s);
+        next_report = now;
+    }
+    // One frame of frame_ns: reports measured up to now - latency are read.
+    void frame(uint64_t frame_ns, bool burst_output = false) {
+        static constexpr uint64_t kIntervals[] = {1'300'000, 1'900'000, 2'500'000, 3'100'000, 1'300'000, 2'500'000, 1'900'000, 3'800'000};
+        static constexpr uint64_t kLatency[] = {300'000, 800'000, 1'500'000, 400'000, 2'200'000};
+        now += frame_ns;
+        double gl = 0;
+        while (next_report + kLatency[step % 5] <= now) {
+            const uint64_t interval = kIntervals[step % 8];
+            sensor += interval;
+            next_report += interval;
+            pacer.sample(sensor, now - 13'000);
+            if (last_read_sensor) gl += rate * double(sensor - last_read_sensor) * 1e-9;
+            last_read_sensor = sensor;
+            ++step;
+        }
+        if (burst_output) gl += 1.0;
+        input += gl;
+        double pitch = 0, yaw = gl;
+        pacer.frame(now, pitch, yaw);
+        output += yaw;
+        turns.push_back(yaw);
+    }
+    void frames(int n, uint64_t frame_ns) {
+        for (int i = 0; i < n; ++i) frame(frame_ns);
+    }
+    // Largest relative deviation of the last n turns from rate * frame time.
+    double worst(int n, uint64_t frame_ns) const {
+        double w = 0;
+        const double expect = rate * double(frame_ns) * 1e-9;
+        for (size_t i = turns.size() - n; i < turns.size(); ++i) w = std::max(w, std::abs(turns[i] / expect - 1));
+        return w;
+    }
+};
+
+void test_pacer_steady_turn_even() {
+    PacerRun off(SensorPacer::Settings{false, -1});
+    off.rate = 100;
+    off.frames(300, 10'000'000);
+    PacerRun r;
+    r.rate = 100;
+    r.frames(300, 10'000'000);
+    // Without pacing the turn per frame follows the reports read (here up to ~30% off); paced, within a few percent.
+    std::printf("sensor pacing, 100 deg/s at 100 FPS: worst frame off by %.0f%% unpaced, %.1f%% paced (delay %.2f ms)\n",
+                100 * off.worst(200, 10'000'000), 100 * r.worst(200, 10'000'000), r.pacer.delay_ms());
+    CHECK(off.worst(200, 10'000'000) > 0.15);
+    CHECK(r.worst(200, 10'000'000) < 0.05);
+    CHECK(r.pacer.delay_ms() > 0 && r.pacer.delay_ms() < 4);
+}
+
+void test_pacer_variable_frames() {
+    // VRR between 165 and 100 FPS: each frame turns by its own length.
+    PacerRun r;
+    r.rate = 200;
+    r.frames(200, 8'000'000);
+    double w = 0;
+    for (int i = 0; i < 300; ++i) {
+        const uint64_t frame_ns = (i % 3 == 0) ? 6'000'000 : (i % 3 == 1) ? 10'000'000 : 7'500'000;
+        r.frame(frame_ns);
+        if (i > 10) w = std::max(w, std::abs(r.turns.back() / (r.rate * double(frame_ns) * 1e-9) - 1));
+    }
+    std::printf("sensor pacing, 200 deg/s at 100-165 FPS: worst frame off by %.1f%%\n", 100 * w);
+    CHECK(w < 0.12);
+}
+
+void test_pacer_stop_keeps_total_no_step_back() {
+    PacerRun r;
+    r.rate = 150;
+    r.frames(200, 10'000'000);
+    r.rate = 0;
+    r.frames(50, 10'000'000);
+    bool back = false;
+    for (double t : r.turns) back |= t < 0;
+    CHECK(!back);
+    // Whatever an extrapolation overshot stays owed (paid back on the next motion): at most a few ms of motion.
+    CHECK(std::abs(r.output - r.input) < 150 * 0.005);
+    // Turning again the same way, the overshoot is paid back without a stop.
+    r.rate = 150;
+    r.frames(100, 10'000'000);
+    CHECK(std::abs(r.output - r.input) < 150 * 0.003);
+    bool stalled = false;
+    for (size_t i = r.turns.size() - 90; i < r.turns.size(); ++i) stalled |= r.turns[i] <= 0;
+    CHECK(!stalled);
+}
+
+void test_pacer_reverse() {
+    PacerRun r;
+    r.rate = 150;
+    r.frames(100, 10'000'000);
+    r.rate = -150;
+    r.frames(100, 10'000'000);
+    CHECK(r.worst(80, 10'000'000) < 0.05);
+    CHECK(std::abs(r.output - r.input) < 150 * 0.003);
+}
+
+void test_pacer_burst_passthrough_and_off() {
+    // GyroLib's turn without new reports (its burst delivery): what is owed goes out with it, and GyroLib's turn goes
+    // through unpaced for a second.
+    PacerRun r;
+    r.rate = 100;
+    r.frames(50, 10'000'000);
+    double pitch = 0.5, yaw = 1.0;
+    r.now += 100'000;
+    r.pacer.frame(r.now, pitch, yaw);
+    r.input += 1.0;
+    r.output += yaw;
+    // Owed (either way: the delay behind, an extrapolation ahead): at most a couple of ms of motion.
+    CHECK(pitch == 0.5 && std::abs(yaw - 1.0) < 100 * 0.002);
+    CHECK(std::abs(r.output - r.input) < 1e-9);
+    const double before = r.input;
+    r.frame(10'000'000);
+    CHECK(std::abs(r.turns.back() - (r.input - before)) < 1e-12);
+    uint32_t paced = 0, extrapolated = 0, bursts = 0, stalls = 0;
+    r.pacer.take_counts(paced, extrapolated, bursts, stalls);
+    CHECK(paced == 50 && bursts == 2);
+    // A second after the last of them, pacing again.
+    r.frames(110, 10'000'000);
+    r.pacer.take_counts(paced, extrapolated, bursts, stalls);
+    CHECK(paced > 0 && bursts > 90);
+    // Off: untouched.
+    SensorPacer off;
+    off.configure({false, -1});
+    off.sample(1'000'000, 2'000'000);
+    pitch = 0.25, yaw = -2;
+    off.frame(3'000'000, pitch, yaw);
+    CHECK(pitch == 0.25 && yaw == -2);
+}
+
+void test_pacer_stall_at_once() {
+    // A 140 ms stall in the middle of a turn: its turn (and what was owed) goes out in that frame, not spread over the
+    // next ones (MODLOG 2026-10-29: a stall's 13.5 deg took another 100+ ms to catch up).
+    PacerRun r;
+    r.rate = 100;
+    r.frames(100, 6'300'000);
+    r.frame(140'000'000);
+    CHECK(std::abs(r.output - r.input) < 1e-9);
+    uint32_t paced = 0, extrapolated = 0, bursts = 0, stalls = 0;
+    r.pacer.take_counts(paced, extrapolated, bursts, stalls);
+    CHECK(stalls == 1 && bursts == 0);
+    r.frames(100, 6'300'000);
+    CHECK(r.worst(90, 6'300'000) < 0.06);
+}
+
+void test_pacer_fixed_delay() {
+    SensorPacer::Settings s;
+    s.delay_ns = 4'000'000;
+    PacerRun r(s);
+    r.rate = 100;
+    r.frames(300, 10'000'000);
+    CHECK(std::abs(r.pacer.delay_ms() - 4) < 1e-9);
+    CHECK(r.worst(200, 10'000'000) < 0.05);
+}
+
 int main() {
     test_rewritten_helper();
     test_match_single_member();
@@ -1166,6 +1334,13 @@ int main() {
     test_stick_camera_edge_ramp();
     test_stick_camera_dt_cap();
     test_stick_camera_invert_y();
+    test_pacer_steady_turn_even();
+    test_pacer_variable_frames();
+    test_pacer_stop_keeps_total_no_step_back();
+    test_pacer_reverse();
+    test_pacer_burst_passthrough_and_off();
+    test_pacer_stall_at_once();
+    test_pacer_fixed_delay();
     std::printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

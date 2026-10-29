@@ -12,6 +12,7 @@
 #include "notify.hpp"
 #include "overlay.hpp"
 #include "perf.hpp"
+#include "sensor_pacer.hpp"
 #include "settings.hpp"
 #include "util.hpp"
 #include "writewatch.hpp"
@@ -70,6 +71,9 @@ bool g_native_flick = false;       // NativeFlickStick=1: flick stick through th
 bool g_stick_camera_on = false;
 StickCamera g_stick_camera;
 std::string g_stick_camera_state;  // this frame's state for the status line ("" = off)
+// Sensor-time pacing (SensorPacing=1, sensor_pacer.hpp): each frame gets the motion of its own length, not whatever
+// reports SDL read at gl_update. Read again when Gyro4All.ini or the game's profile is saved.
+SensorPacer g_pacer;
 FILETIME g_mod_ini_time{}, g_profile_ini_time{};
 // StickCameraPassButtons: held longer than kPassMs, the right stick goes to the game (a weapon wheel on R1).
 std::vector<int> g_pass_buttons;
@@ -243,7 +247,7 @@ struct Delivery {
 // to see where motion gets bunched (controller, transport, frame) and how GyroLib's burst delivery spreads it.
 //   S,sensor_ns,arrival_ns,gyro_x,gyro_y,gyro_z         every accepted sample (GyroLib sample observer)
 //   F,now_ns,new_samples,raw_yaw,raw_pitch,yaw,pitch     every frame while the gyro may turn the camera (raw = GyroLib
-//                                                        output, yaw/pitch = applied; equal since Gyro4All has no pacer)
+//                                                        output, yaw/pitch = applied: after SensorPacing)
 struct Trace {
     bool wanted = false, done = false;
     int seconds = 30;
@@ -254,6 +258,7 @@ struct Trace {
 void GL_CALL on_sample(void*, uint64_t, const gl_sample* sample) {
     if (!sample) return;
     g_delivery.on_sample(*sample);
+    g_pacer.sample(sample->sensor_ns, sample->arrival_ns);
     if (g_trace.file)
         std::fprintf(g_trace.file, "S,%llu,%llu,%.3f,%.3f,%.3f\n", (unsigned long long)sample->sensor_ns,
                      (unsigned long long)sample->arrival_ns, sample->gyro_dps.x, sample->gyro_dps.y, sample->gyro_dps.z);
@@ -384,6 +389,19 @@ bool start_gyro() {
     return true;
 }
 
+// At start (always logged) and when a settings file is saved (only a change).
+void load_pacer(const char* why, bool start) {
+    SensorPacer::Settings s;
+    s.on = settings::get(L"SensorPacing", 1) != 0;
+    const int delay_us = settings::get(L"SensorPacingDelayUs", -1);
+    s.delay_ns = delay_us < 0 ? -1 : int64_t(delay_us) * 1000;
+    if (s.on == g_pacer.settings().on && s.delay_ns == g_pacer.settings().delay_ns && !start) return;
+    g_pacer.configure(s);
+    if (!s.on) log("settings: SensorPacing=0 (%s): each frame turns by the reports read in it", why);
+    else if (s.delay_ns < 0) log("settings: SensorPacing=1 (%s): motion played back in sensor time, delay automatic", why);
+    else log("settings: SensorPacing=1 (%s): motion played back in sensor time, delay %.1f ms", why, s.delay_ns * 1e-6);
+}
+
 // A Gyro4All.ini number that may have decimals (settings::get reads integers only).
 double setting_number(const wchar_t* key, double fallback) {
     const std::string text = settings::get_string(key, L"");
@@ -434,10 +452,12 @@ void check_settings_file() {
     const ULONGLONG now = GetTickCount64();
     if (now < g_next_ini_check) return;
     g_next_ini_check = now + 1000;
-    if (g_stick_camera_on) {
+    {
         const bool mod = file_changed(settings::settings_path(), g_mod_ini_time);
         const bool profile = file_changed(settings::profile_path(), g_profile_ini_time);
-        if (mod || profile) load_stick_camera(mod ? "Gyro4All.ini saved" : "the game's profile saved");
+        const char* why = mod ? "Gyro4All.ini saved" : "the game's profile saved";
+        if (mod || profile) load_pacer(why, false);
+        if (g_stick_camera_on && (mod || profile)) load_stick_camera(why);
     }
     const char* path = gl_get_settings_path(g_gyro->get());
     if (!path || !*path) return;
@@ -518,6 +538,15 @@ void status() {
             "those without a new sample (GyroLib burst delivery)",
             m.samples / span, m.arrivals / span, m.updates / span, m.updates ? 100.0 * m.turned / m.updates : 0.0,
             m.turned ? 100.0 * m.spread / m.turned : 0.0);
+    if (g_pacer.settings().on) {
+        uint32_t paced = 0, extrapolated = 0, bursts = 0, stalls = 0;
+        g_pacer.take_counts(paced, extrapolated, bursts, stalls);
+        if (paced || bursts || stalls)
+            log("status: sensor pacing: delay %.2f ms%s, %u frames paced, %.0f%% past the last report (extrapolated), %u "
+                "left to GyroLib's burst delivery, %u stalls",
+                g_pacer.delay_ms(), g_pacer.settings().delay_ns < 0 ? " (automatic)" : "", paced,
+                paced ? 100.0 * extrapolated / paced : 0.0, bursts, stalls);
+    }
     m.samples = m.arrivals = m.updates = m.turned = m.spread = 0;
     m.since_ns = now_ns;
 }
@@ -791,13 +820,16 @@ void frame() {
     }
 
     double gyro_deg = 0;  // gyro rotation actually written this frame
-    const double pitch = out.pitch_degrees, yaw = out.yaw_degrees;
+    double pitch = out.pitch_degrees, yaw = out.yaw_degrees;
     {
         gl_gyro_state gs{};
         gl_get_gyro_state(g_gyro->get(), &gs);
         const bool camera = view && host.camera_allowed && gs.enabled;
         log_gyro_changes(host.focused, gs);
-        g_delivery.on_update(camera, gs.new_samples, yaw != 0 || pitch != 0);
+        // Played back in sensor time while the gyro may turn the camera; otherwise what wasn't played back is dropped.
+        if (camera && !g_engine->hold_gyro()) g_pacer.frame(now_ns, pitch, yaw);
+        else g_pacer.reset();
+        g_delivery.on_update(camera, gs.new_samples, out.yaw_degrees != 0 || out.pitch_degrees != 0);
         trace_frame(now_ns, camera, gs.new_samples, out, pitch, yaw);
     }
     // Stick fallback: when the game undoes the gyro's camera writes, its turn goes to the game as right-stick input;
@@ -930,12 +962,11 @@ void host_configure(Engine& engine) {
                                                                  : std::string("(unreadable: ignored, learnt again)");
         log("settings: StickFallbackLearned=%s %s", saved.c_str(), what.c_str());
     }
+    load_pacer("Gyro4All.ini, the game's profile overrides", true);
     g_stick_camera_on = settings::get(L"StickCamera", 0) != 0;
-    if (g_stick_camera_on) {
-        load_stick_camera("Gyro4All.ini, the game's profile overrides");
-        file_changed(settings::settings_path(), g_mod_ini_time);
-        file_changed(settings::profile_path(), g_profile_ini_time);
-    }
+    if (g_stick_camera_on) load_stick_camera("Gyro4All.ini, the game's profile overrides");
+    file_changed(settings::settings_path(), g_mod_ini_time);
+    file_changed(settings::profile_path(), g_profile_ini_time);
     // The game's own PlayStation reports: right-stick suppression for flick stick and the stick camera.
     nativepad::install(g_native_flick || g_stick_camera_on, settings::get(L"DualSenseAsDualShock4", 0) != 0,
                        settings::profile_setting(L"DualSenseAsDualShock4") == "1" &&

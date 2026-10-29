@@ -48,7 +48,7 @@ target_link_options(Gyro4All PRIVATE /DEBUG /PDBALTPATH:%_PDB% /OPT:REF /OPT:ICF
 
 # Unit tests of the parts that need no game (the Unreal profile's views, the core's Match=Camera choice):
 # tools/test-gyro4all.sh builds and runs them. Never shipped.
-add_executable(gyro4all_tests ../tests/profile_tests.cpp engines/unrealEngine/ue_profile.cpp core/settings.cpp core/log.cpp core/stick_fallback.cpp core/stick_response.cpp core/stick_camera.cpp)
+add_executable(gyro4all_tests ../tests/profile_tests.cpp engines/unrealEngine/ue_profile.cpp core/settings.cpp core/log.cpp core/stick_fallback.cpp core/stick_response.cpp core/stick_camera.cpp core/sensor_pacer.cpp)
 target_include_directories(gyro4all_tests PRIVATE core engines/unrealEngine "${MINHOOK_DIR}/src/hde")
 target_link_libraries(gyro4all_tests PRIVATE minhook)
 target_compile_definitions(gyro4all_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
