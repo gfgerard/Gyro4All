@@ -81,6 +81,8 @@ std::wstring find_cooked(const std::wstring& exe_path) {
 
 uintptr_t g_objects = 0;  // address of GObjects (TArray<UObject*>)
 uintptr_t g_names = 0;    // address of the name chunk array (BioWare) or of GNames (TArray<FNameEntry*>)
+// Name tables that fit but read Core.Object.Matrix's planes wrong (find_members): decoys, skipped by find_names.
+std::vector<uintptr_t> g_rejected_names;
 enum class Names { Chunks, Array } g_names_kind = Names::Chunks;
 uintptr_t g_name_text = 12;   // the text's offset in a name entry
 uintptr_t g_prop_offset = 0;  // UProperty field holding the property's offset in its struct
@@ -223,8 +225,12 @@ bool find_names() {
     }
     uint32_t value = 0;
     if (!class_class || !mem::rd(class_class + g_name, value)) return false;
-    // Most samples, not all: some objects have names that aren't identifiers (Mass Effect LE 1: "<uninitialized>").
+    // Most samples, not all, in every chunk in use: some objects have names that aren't identifiers (Mass Effect LE 1:
+    // "<uninitialized>"), and Mass Effect LE 3 has a decoy array whose chunk 0 is right and chunk 1 isn't (a third of its
+    // names still read as identifiers, so a count over all the samples let it through). GNames values are plain
+    // indices: one group.
     auto fits = [&](uintptr_t a, Names kind, uintptr_t text_at) {
+        if (std::find(g_rejected_names.begin(), g_rejected_names.end(), a) != g_rejected_names.end()) return false;
         if (name_text(a, kind, text_at, value) != "Class") return false;
         if (kind == Names::Chunks) {
             // Every chunk the names use must exist and be its own: a decoy array can repeat chunk 0 in slot 1 (Mass Effect
@@ -236,9 +242,13 @@ bool find_names() {
                 seen[slot] = chunk;
             }
         }
-        size_t good = 0;
-        for (uint32_t v : samples) good += identifier(name_text(a, kind, text_at, v));
-        if (good * 4 < samples.size() * 3) return false;
+        size_t good[8] = {}, total[8] = {};
+        for (uint32_t v : samples) {
+            ++total[(v >> 29) & 7];
+            good[(v >> 29) & 7] += identifier(name_text(a, kind, text_at, v));
+        }
+        for (int c = 0; c < 8; ++c)
+            if (good[c] * 4 < total[c] * 3) return false;
         g_names = a, g_names_kind = kind, g_name_text = text_at;
         return true;
     };
@@ -254,6 +264,8 @@ bool find_names() {
                     if (fits(a, Names::Array, text_at)) return true;
         }
     }
+    // Every table that fits was rejected: try them all again next time (more objects loaded, other samples).
+    g_rejected_names.clear();
     static bool logged = false;
     if (!logged) {
         logged = true;
@@ -342,7 +354,18 @@ bool find_members() {
         }
         if (all) g_prop_offset = field;
     }
-    if (!g_prop_offset) return false;
+    if (!g_prop_offset) {
+        // Core's Matrix is loaded before anything else, so its planes not reading back means the name table is wrong: a
+        // decoy whose first chunk is right (Mass Effect LE 3's, found before the real one 3 s after start, while no
+        // sampled object used the second chunk yet). The next try takes the next table that fits.
+        if (g_names) {
+            log("ue3: the name table at %s doesn't read Core.Object.Matrix's planes: a decoy, looking for another",
+                mem::module_offset(g_names).c_str());
+            g_rejected_names.push_back(g_names);
+            g_names = 0;
+        }
+        return false;
+    }
     if (!g_super_field) find_super_field(player_controller);
     g_engine = 0;
     for (uintptr_t e : engines)

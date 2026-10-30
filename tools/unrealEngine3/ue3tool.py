@@ -284,8 +284,14 @@ class UE3:
                 ptrs = [p.u64(a + 8 * s) for s in used]
                 if not all(ptrs) or len(set(ptrs)) != len(ptrs):
                     return False
-            # Most, not all: Mass Effect LE 1 has objects named "<uninitialized>".
-            return sum(1 for v in samples if ident.fullmatch(self._read_raw(v) or "?")) * 4 >= len(samples) * 3
+            # Most, not all, in every chunk in use: Mass Effect LE 1 has objects named "<uninitialized>", and Mass Effect
+            # LE 3 has a decoy array whose chunk 0 is right and chunk 1 isn't (a third of its names still read as
+            # identifiers, so a count over all the samples let it through).
+            good, total = collections.Counter(), collections.Counter()
+            for v in samples:
+                total[v >> 29] += 1
+                good[v >> 29] += bool(ident.fullmatch(self._read_raw(v) or "?"))
+            return all(good[c] * 4 >= total[c] * 3 for c in total)
 
         # Names: BioWare's chunk array (Mass Effect LE: 29-bit byte offset + 3-bit chunk, text at entry +12) or UE3's
         # GNames (TArray<FNameEntry*> indexed by the value), whichever reads "Class" for the class Class and identifiers
