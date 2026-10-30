@@ -62,6 +62,7 @@
 | Resident Evil Village (RE 8) | ✅ Works | RE Engine | Install next to `re8.exe` in the game's main folder. Gyro in free look; off in the pause menu, the inventory, cutscenes and scripted camera moments. The game doesn't read the DualSense: Gyro4All shows it as an Xbox controller (Xbox icons). Tested with REFramework installed (not known to be needed). The third-person mode (Gold Edition) is not supported yet. |
 | Returnal | ✅ Works | Unreal Engine 4.25.1 | Tip: in the settings panel, set the gyro to work only while L2/R2 is held. |
 | Severed Steel | ✅ Works (tested on the demo) | Unreal Engine 4 | DX11: the `F10` panel isn't verified in this game yet. Rename `MSVCP140.dll` and `MSVCP140_2.dll` in its `Binaries\Win64` folder (e.g. to `.bak`): it ships an old VC++ runtime that GyroLib can't use. Until you do, Gyro4All leaves the gyro off and tells you so on screen. |
+| Silent Hill 2 (remake) | ✅ Works (tested on the Steam version) | Unreal Engine 5 | Install in `SHProto\Binaries\Win64`. Needs the custom profile in `Gyro4All\profiles` dir |
 | Star Wars Jedi: Fallen Order | ✅ Works | Unreal Engine 4 | |
 | Terminator: resistance | ✅ Works | Unreal Engine 4 | DX11: the `F10` panel isn't verified in this game yet |
 | Titanfall 2 | ✅ Works (tested on the EA app version) | Source (Respawn) | Install in `bin\x64_retail`, **not** next to `Titanfall2.exe` (it never loads a `winmm.dll` from the main folder). Campaign only: never play multiplayer with it. |
