@@ -540,7 +540,7 @@ void watch() {
     for (;;) {
         if (import_passes > 0) {
             if (redirect_imports()) import_passes = 0;
-            else if (--import_passes == 0) log("xinput: protected exe: no xinput1_4 import slot in the exe (it imports XInput elsewhere)");
+            else if (--import_passes == 0) log("xinput: protected exe: no xinput1_4 import slot in the game modules (they import XInput elsewhere)");
         }
         uint32_t mask = 0;
         for (DWORD i = 0; real && i < XUSER_MAX_COUNT; ++i) {

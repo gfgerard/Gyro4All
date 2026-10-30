@@ -448,39 +448,42 @@ int verify() {
 
 int redirect_slots(const char* dll, std::span<const Redirect> redirects) {
     if (redirects.empty()) return 0;
-    const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
-    const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+    const std::vector<HMODULE> modules = loaded_game_modules();
     std::lock_guard lock(g_mutex);
     int patched = 0;
-    for (WORD s = 0; s < nt->FileHeader.NumberOfSections; ++s, ++section) {
-        if (section->Characteristics & IMAGE_SCN_MEM_EXECUTE) continue;
-        const uintptr_t begin = base + section->VirtualAddress, end = begin + section->Misc.VirtualSize;
-        // Region by region: a protector may leave parts of its sections unreadable.
-        for (uintptr_t at = begin; at < end;) {
-            MEMORY_BASIC_INFORMATION info{};
-            if (!VirtualQuery(reinterpret_cast<void*>(at), &info, sizeof info)) break;
-            const uintptr_t stop = std::min<uintptr_t>(end, reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize);
-            const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE;
-            if (info.State == MEM_COMMIT && (info.Protect & readable) && !(info.Protect & PAGE_GUARD)) {
-                for (auto* slot = reinterpret_cast<ULONGLONG*>((at + 7) & ~uintptr_t(7));
-                     reinterpret_cast<uintptr_t>(slot + 1) <= stop; ++slot) {
-                    const ULONGLONG value = *slot;
-                    for (const Redirect& r : redirects) {
-                        if (!r.target || value != reinterpret_cast<ULONGLONG>(r.target)) continue;
-                        DWORD old = 0;
-                        if (!VirtualProtect(slot, sizeof *slot, PAGE_READWRITE, &old)) break;
-                        *slot = reinterpret_cast<ULONGLONG>(r.replacement);
-                        VirtualProtect(slot, sizeof *slot, old, &old);
-                        g_patched.push_back({slot, r.replacement, r.function, dll});
-                        log("hooks: %s!%s slot at %s (the protector's import table) now points to Gyro4All", dll,
-                            r.function, describe(slot).c_str());
-                        ++patched;
-                        break;
+    for (HMODULE module : modules) {
+        const auto base = reinterpret_cast<uintptr_t>(module);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+        const IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt);
+        for (WORD s = 0; s < nt->FileHeader.NumberOfSections; ++s, ++section) {
+            if (section->Characteristics & IMAGE_SCN_MEM_EXECUTE) continue;
+            const uintptr_t begin = base + section->VirtualAddress, end = begin + section->Misc.VirtualSize;
+            // Region by region: a protector may leave parts of its sections unreadable.
+            for (uintptr_t at = begin; at < end;) {
+                MEMORY_BASIC_INFORMATION info{};
+                if (!VirtualQuery(reinterpret_cast<void*>(at), &info, sizeof info)) break;
+                const uintptr_t stop = std::min<uintptr_t>(end, reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize);
+                const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE;
+                if (info.State == MEM_COMMIT && (info.Protect & readable) && !(info.Protect & PAGE_GUARD)) {
+                    for (auto* slot = reinterpret_cast<ULONGLONG*>((at + 7) & ~uintptr_t(7));
+                         reinterpret_cast<uintptr_t>(slot + 1) <= stop; ++slot) {
+                        const ULONGLONG value = *slot;
+                        for (const Redirect& r : redirects) {
+                            if (!r.target || value != reinterpret_cast<ULONGLONG>(r.target)) continue;
+                            DWORD old = 0;
+                            if (!VirtualProtect(slot, sizeof *slot, PAGE_READWRITE, &old)) break;
+                            *slot = reinterpret_cast<ULONGLONG>(r.replacement);
+                            VirtualProtect(slot, sizeof *slot, old, &old);
+                            g_patched.push_back({slot, r.replacement, r.function, dll});
+                            log("hooks: %s!%s slot at %s (an import table of the game's own) now points to Gyro4All", dll,
+                                r.function, describe(slot).c_str());
+                            ++patched;
+                            break;
+                        }
                     }
                 }
+                at = stop;
             }
-            at = stop;
         }
     }
     return patched;

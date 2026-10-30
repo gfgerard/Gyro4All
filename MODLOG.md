@@ -5432,3 +5432,270 @@ or gyro to stick.
   per 10 s on slot 0, all answered with the controller, sticks and buttons moving. No crash with the Steam overlay.
   The Glacier hook (`glacier_xinput.cpp`) was installed too but had nothing to add (the real check already said yes).
   Not tested yet: Battlefield 4 with this build, an 8BitDo/generic DirectInput pad, a Bluetooth Pro controller.
+- 2026-10-29 **Control (Steam 870780, Ultimate Edition, March 2025 build): recon, and a Northlight engine module that only
+  detects it** (`src/engines/northlight/`, plan in `games/Control/MODDING_PLAN.md`). Builds and unit tests pass; not run
+  in game yet (the game itself has never been started on this machine).
+  - Northlight (Remedy), native x64, no packer, no anti-cheat. `Control.exe` (90 KB, .NET) is the launcher that starts
+    `Control_DX12.exe` (PE timestamp `0x67e06bf2`) or `Control_DX11.exe` (`0x67e06e49`); `um scan` calls the game ".NET"
+    because of it. Modular build: the engine is in `<module>_rmdwin10_f.dll` (DX12) / `<module>_rmdwin7_f.dll` (DX11):
+    `rl_`, `app_`, `input_`, `coregame_`, `coreshared_`, `renderer_`, `d3d_`, `physics_`, `ui_`, ... with **decorated
+    C++ exports** (coregame 8192, rl 6678) and RTTI.
+  - Camera classes: `CameraComponentState@coregame` (exports `getRotation` -> `Matrix3Template<float>`, `getMatrix` ->
+    `Matrix4x3Template<float>`, `getInterpolatedTransform`, `getView` -> `PerspectiveView`, `getInterpolatedFOVInRad`,
+    vtable `??_7CameraComponentState@coregame@@6B@`), `UpdateCamera@coregame`, `CameraEntity@content`,
+    `PlayerCameraComponent(State)`, `TailCameraComponent(State)`, `GamePlayerCameraMovementComponent(State)`,
+    `FPSCameraComponent`, `FreeCameraComponent`, `PhotoModeCameraComponent`, `CameraManComponent`.
+  - Window messages: `PeekMessageW`/`GetMessageW`/`GetRawInputData` are imported by `app_rmdwin10_f.dll`; the exe
+    imports two USER32 functions only. The module returns `module_prefix` `app_rmdwin`, so that DLL is hooked like the
+    exe (to verify: the core's per-frame hook fires).
+  - Pads: `rl_rmdwin10_f.dll` wraps XInput (`rmdXInputGetState`/`SetState`) and loads it at run time (strings
+    `xinput1_4.dll`, `xinput1_3.dll`, `XInput9_1_0.dll`, `XInputGetState`): no import slot, so the core's XInput hooks
+    won't see it and the stick fallback this module reports (`no_camera`) can't reach the game yet. Open: inline hooks
+    (`inline_hooks()`, as for protected exes) or a `GetProcAddress` hook. No libScePad, no HID: no native DualSense path.
+  - Proxy: `winmm.dll` is imported by `bink2w64.dll`, `navigation_rmdwin10_f.dll` and `wtf.dll` (should load; to
+    verify); `version.dll` only by `nvngx_dlss.dll`. reg2k's old Control Plugin Loader used `xinput1_4.dll`.
+  - Module: `detect` = `coregame_rmdwin10_f.dll` or `coregame_rmdwin7_f.dll` next to the exe; `is_launcher` =
+    `Control.exe`; `read_frame` = the default view with `no_camera` (gyro as right stick) and the mouse cursor as the
+    only menu signal; `apply` writes nothing.
+  - Next: install, check the log (engine `Northlight`, the pump hook, XInput polls), then the XInput route, then the
+    camera (exports/RTTI first, `tools/camtrace/` as soon as that stalls).
+- 2026-10-29 **CONTROL Resonant (Steam 3669870, Northlight): recon, and detected by the Northlight module** (read-only;
+  builds and unit tests pass; not run in game with Gyro4All).
+  - One exe, `CONTROLResonant.exe` (99 470 256 bytes, PE timestamp `0x6ac4318a`), DX12 only, not packed (`.text .rdata
+    .data .pdata _RDATA .rsrc .reloc`, normal entropy); no Denuvo (press, launch build), no anti-cheat found,
+    single-player (`nakama-sdk.dll` and `steam_api64.dll` imported; Nakama's role unknown). 650 decorated exports
+    (content/Lua timeline types), RTTI present. Data: `data_pack2\generic|pc\*.rmdtoc/*.rmdblob` (Control:
+    `data_packfiles\*.rmdp`). Config: `%LOCALAPPDATA%\Remedy\CONTROLResonant\renderer.ini`.
+  - The exe imports `PeekMessageW`/`GetMessageW` (module_prefix "", unlike Control), `WINMM.dll` (`timeGetTime`,
+    `timeBeginPeriod`...: the `winmm.dll` proxy loads with the exe), `VERSION.dll`, `XINPUT1_4.dll` ordinal 2 only
+    (XInputGetState), `HID.DLL` (11) and `SETUPAPI.dll` (6). Strings: `libScePad_static` ("Failed to initialize the
+    libScePad_static library for PlayStation controller support": Sony's pad library linked in, over the exe's HID
+    imports, so the core's nativepad HID hooks should see it), `GameInput.dll`/`GameInputCreate` (run time), Wwise 2024.1
+    motion sinks (ScePad haptics/rumble, GameInput, XInput rumble). Press: native DualSense on PC with haptics.
+  - Camera classes (RTTI): `PlayerCameraComponent`, `TailCameraComponent`, `FPSCameraComponent`, `FreeCameraComponent`,
+    `PhotoModeCameraComponent`, `CameraManComponent`, `CameraComponent` (content); `CameraInputComponent`,
+    `CameraLockOnComponent`, `CameraSetComponent`, `CameraSetDatabaseComponent`, `CameraSetStateZoneComponent`,
+    `CameraConversationComponent`, `CameraClipPlayerComponent` (contentgame). The engine is now ECS (`ecs::system`,
+    `heron::*` systems).
+  - **The game has a gyro system:** `coregame::gyro_input::gravity_vector::system(GravityVector&, const env::Input&,
+    const VariableTime&)` and the global `sg_gyroInput`. Only a gravity vector is named (tilt, not obviously aiming);
+    no menu strings found for gyro aiming and no press mention of PC gyro. To check in game: does the options menu
+    offer gyro aiming with a DualSense? If it does, Gyro4All must stay off (doubled motion) or replace it.
+  - Already in the folder (user's own): ReShade (`dxgi.dll`, RenoDX addons `renodx-controlresonant.addon64`,
+    `renodx-mfgunlock.addon64`), SCSKiller (`d3d12.dll` proxy). Watch the overlay's Present hook with both.
+  - Module: detects `data_pack2\pc\*.rmdtoc` next to the exe; module_prefix "" there (`app_rmdwin` only when Control's
+    modules are next to the exe); `is_launcher` only for `Control.exe` in a Control folder.
+
+- 2026-10-29 **Ghostrunner: a player's DualSense buttons didn't reach the game; not reproduced.** The player (store,
+  connection and log unknown) turned Steam Input on to get the buttons, and saw no "DualShock 4 / restart" notice.
+  Retest on the Epic build (`Ghostrunner-Win64-Shipping.exe`, UE 4.26, Gyro4All 1.9.0, first run: fresh `Gyro4All.ini`,
+  no profile), DualSense over Bluetooth, Steam Input not involved: no Sony pad library and no HID native sign
+  (no `native` / `nativepad:` lines; the folder has no `libScePad*.dll`). The game polls `XINPUT1_3!XInputGetState`
+  (re-hooked after `EOSOVH-Win64-Shipping.dll` rewrote the import), and 2.2 s after it starts polling Gyro4All shows the
+  DualSense as XInput controller 0; buttons and sticks work. The DualShock 4 learning path never runs on this build,
+  and USB vs Bluetooth makes no difference to that. Still open: the player's `Gyro4All.log` and store build. If that
+  build has a Sony library that never opens, reads, or closes the DualSense, auto mode stays on "native support"
+  forever: `sony_sign_holds` is always true with a Sony library, and `dualsense_closed_unread` needs an open and a close.
+- 2026-10-29 **Control: first run with the Northlight module: the proxy loads, the engine is detected, but no gyro frame
+  ran.** Log: `engine: Northlight (detected)`, `hooks: game modules prefix 'app_rmdwin', 2 loaded`, then `PeekMessageW on
+  thread 33976, called from app_rmdwin10_f.dll+0x548F` (about 580 calls/s, almost all empty) while the game thread was
+  the DllMain thread 22976, which never pumps. The game window `AppWindowClass` ("Control") belongs to thread 33976
+  (also `MSCTFIME UI`/`IME`); `DXGIWatchdogThreadWindow` on another. Fix: `pump_window_class()`/`window_class()` =
+  `AppWindowClass` for Control (not Resonant, unseen yet). Built; to verify after redeploying (the log should show
+  `thread ... pumps the game window (class AppWindowClass) and becomes the game thread`, then GyroLib starting).
+- 2026-10-29 **Control, second run (pump_window_class AppWindowClass): the game thread is adopted and GyroLib runs, but the
+  game never polls our XInput.** Log: `thread 34796 pumps the game window (class AppWindowClass) and becomes the game
+  thread`, GyroLib ABI 1 / SDK 1.3.1, SDL reader, DualSense (connection not recorded) `shown as XInput controller 0`,
+  motion 545-555 samples/s; `game polls per slot 0/0/0/0` every 10 s (rl_rmdwin10_f.dll's GetProcAddress'd
+  XInputGetState bypasses the import hooks, as expected). The Steam Input reader found no public Input exports in
+  Control's old steam_api64.dll. The mouse cursor read as shown the whole run (`view=menu (cursor)`, gyro off), also
+  while the user was in game: unclear whether Control hides it some other way; the cursor line now logs flags, handle
+  and position. Change: `inline_hooks()` for Control (system exports hooked inline, the path that handles Titanfall 2's
+  run-time xinput1_3 load). Built; not run yet.
+- 2026-10-29 **Control, third run (inline hooks): every XInput export hooked (MH_OK), still 0 game polls: the Steam
+  overlay hooks xinput1_4 on top of ours.** In the running game `xinput1_4!XInputGetState`/`XInputSetState` jump to
+  `gameoverlayrenderer64.dll+0xd9c00`/`+0xd9d90` (a trampoline then Steam's code), while `xinput1_3` and `xinput9_1_0`
+  still jump to Gyro4All (`WINMM.dll+0x433c0`/`+0x43a90`). Control's `rl_rmdwin10_f.dll` tries xinput1_4 first, so its
+  polls end in Steam's hook, which doesn't call through (Steam Input answering for the pad, presumably). Only Gyro4All
+  had loaded the three XInput DLLs; the dinput8 HID opens and the WMI `IG_` check came from GyroLib's SDL, not the game.
+  Other facts from this run: the DualSense reports were 78 bytes (Bluetooth); `PeekMessageW` now reaches the hook through
+  `gameoverlayrenderer64.dll+0xB1E26` (Steam's PeekMessage hook) and the adoption by window class still picked the right
+  thread (33732); the cursor reads `flags 1, cursor 0x10003` (arrow) in menus and `flags 0, cursor 0` in gameplay (gyro
+  turned on at 23:12:34), so the cursor gate works. Next: the same run with Steam Input off for Control (does Steam's
+  hook then call through?); if Steam still keeps the pad, re-hook xinput1_4 after the overlay or hook rl's own import.
+- 2026-10-29 **Control: where the game's XInput calls go, and the fix (not caused by the DirectInput/WMI change of
+  880581d).** Steam Input was off for this run. A scan of the running game's writable memory for the XInput exports'
+  addresses: `rl_rmdwin10_f.dll+0x3a28a0` = `xinput1_4!XInputGetState`, `+0x3a2898` = `xinput1_4!XInputSetState` (rl's
+  data: the GetProcAddress results of `r::RmdXinput`); `snd_rmdwin10_f.dll+0x2b2db8/+0x2b2dc0` = xinput9_1_0
+  GetCapabilities/SetState (Wwise rumble); the rest in heaps, SDL3 and our own winmm.dll. So the game calls the export,
+  which the Steam overlay hooks in front of ours and answers itself, as in Mass Effect LE (MODLOG: the protector's
+  xinput1_4 import slots redirected). That fix searched the exe only (`no xinput1_4 import slot in the exe`). 880581d
+  only changed XInputGetCapabilities for a listed, not yet shown controller and added the WMI check; neither decides
+  whether XInputGetState calls arrive.
+  - Change: `hooks::redirect_slots` searches the non-executable sections of every game module, not only the exe (no
+    change for Frostbite/Source, which have no module prefix); Northlight's Control prefix is now `rl_rmdwin` (the
+    inline PeekMessageW hook catches app_'s pump without it). Built, 695 checks pass; not run yet. Expected log:
+    `hooks: xinput1_4.dll!XInputGetState slot at rl_rmdwin10_f.dll+0x3A28A0 (an import table of the game's own) now
+    points to Gyro4All`, then nonzero game polls on slot 0.
+- 2026-10-29 **Control: XInput translation and gyro as right stick work, user-verified** (DualSense over Bluetooth,
+  78-byte reports; Steam Input off; the Steam overlay running). The game polls slot 0 about 650-740 times/s, all
+  answered with the translated controller; `gyro stick up to 1.00` while turning. Sticks and buttons reach the game.
+  The cursor gate switches the gyro on in gameplay (`flags 0, cursor 0`) and off in menus (arrow cursor). Next: the
+  camera (module exports/RTTI first: `CameraComponentState@coregame`, `GamePlayerCameraMovementComponent`).
+- 2026-10-29 **Control: camera objects found from exports and RTTI (read-only), and the first write test.**
+  - `coregame_rmdwin10_f.dll` exports: `CameraComponentState::getView` = `this+0xC0` (`PerspectiveView`);
+    `getRotation`/`getPosition` call `r::GameObjectState::getComponentByTypeId([this+0x28], <lazily registered type
+    id>)` (rl import) and read a quaternion at +0xC0 / the position at +0xD0 of that component (the object's transform).
+    `getInterpolatedFOVInRad` blends `this+0x80`/`+0x8c` by the frame fraction.
+  - Vtables from RTTI (2025 DX12 build): `CameraComponentState` coregame+0x5d6988; in the exe `PlayerCameraComponentState`
+    +0xe45100 (second vtable +0xe450d8 at this+0x40), `TailCameraComponentState` +0xe56ad0,
+    `GamePlayerCameraMovementComponentState` +0xe2b068, `FPSCameraComponentState` +0xe1db50, `FreeCameraComponentState`
+    +0xe1e158, `PhotoModeCameraComponentState` +0xde54b8, `CameraManComponentState` +0xdfe7c8. In game: 59
+    `CameraComponentState`, one of each special camera (each right after its own `CameraComponentState`, 0x3C0 bytes:
+    one entity per camera), two `GamePlayerCameraMovementComponentState`.
+  - Conventions (snapshots before/after the user turned about 70 deg right and looked up): world +Y up; the camera looks
+    along its local +Z, no roll. Every camera state's `+0x40` is the view quaternion (x, y, z, w), `+0x50` the camera
+    position. `GamePlayerCameraMovementComponentState+0x40` (copies +0x60, +0xB8; the second instance at +0x4E0/+0x7C0) is
+    the unit look direction (= the quaternion's +Z); `+0x2E0`/`+0x540`/`+0x820` is a world point about 120 units along it
+    (aim/look target); `+0x500` and `+0x740`/`+0x7A0` positions (pivot, camera). **No yaw/pitch angles** changed in any of
+    these objects (searched for -70 deg / +38 deg in degrees and radians).
+  - `camtrace write-test GPCMovement+0x40 --yaw 20`: undone within 30 ms (a copy rebuilt every frame). `find-vec` of the
+    direction: hundreds of heap copies (render buffers, stride-4 matrix rows): not worth write-testing one by one.
+    Next: one-hit write breakpoint (`camtrace bp`) on `GamePlayerCameraMovementComponentState+0x40` to find its writer
+    (with the user's OK; anti-debugging unknown: the exe calls `r::isDebuggerPresent`).
+- 2026-10-29 **Control: the camera's look direction found, user-verified: `GamePlayerCameraMovementComponentState+0xB8`**
+  (vtable exe+0xe2b068 in the 2025 DX12 build; a unit 3-vector, world +Y up, the camera's local +Z).
+  - `camtrace bp` (one-hit write breakpoint, cdb `-pd`, the user saved first; detached cleanly, game kept running) on
+    `+0x40`: written at `exe+0x3e4165` in the component's per-frame update: `+0x40` = normalize(`+0xB8`), stored only if
+    it changed (then `exe+0x6a440` with `r::FlowConnectionManager::sm_pInstance`, a change notification), then `+0x60` from
+    `exe+0x3e4210`. Earlier in the same function the stick input (`[rbp+38h]`/`[rbp+3Ch]`), scaled by `[r10+1E0h]`, goes to
+    `exe+0x3e4630(this, &input, xmm2, xmm3, dt)`, then `exe+0x3e4aa0`, `exe+0x3e4d20` (the turn of `+0xB8`, presumably);
+    another branch writes the scaled input to `+0xF4`/`+0xF8`. Call stack: exe+0x517853, +0x5144f9, +0x383a6f, +0x383d96,
+    then rl_rmdwin10_f.dll.
+  - `write-test +0xB8 --yaw 20`: **kept** (heading -174.9 -> -154.9 for 1 s), `+0x40` and the player camera state's view
+    quaternion followed in the same frame, and the user saw the view jump 20 deg. The source for the gyro: rotate this
+    vector every frame (yaw about +Y, pitch about the camera's right axis).
+  - Two instances exist in game; the one written (0x...31b0 in this session) is the one whose `+0x40` tracks the view.
+    Next: Northlight module: find the component by vtable (background heap scan, as Swarm), pick the live instance,
+    apply = rotate `+0xB8`, pitch limits, gate by the active camera (not photo mode / free camera / cinematics).
+- 2026-10-29 **Bug (user): DOOM (2016) Vulkan, the F10 / pad-shortcut panel invisible in game but capturing mouse and
+  keyboard; in the front end it shows, with its top cut off** (user's log: 1.8.3, `DOOMx64vk.exe`, swapchain and window
+  3200x1800 on a 3840x2160 desktop, **AMD GPU** (memory types with `DEVICE_COHERENT_AMD` flags); Steam Input state not
+  recorded). Not reproduced here with 1.9.0 (NVIDIA, 3840x2160): panel shown in front end and game.
+  - Log: one swapchain and window for the whole session, no present on another swapchain, no Vulkan error, no `no frame
+    presented`. In the front end the panel worked (`gyrolib.ini changed, reloaded`). After the level load, F10 opened
+    it (ImGui window focused, nav active, DirectInput mouse/keyboard idled) and the user closed it again unseen.
+  - Suspected cause (not confirmed: the log didn't record the present's queue): gyro4all.dll's Vulkan renderer took the
+    queue and family of the first present (`init`) and submitted every later panel draw there, whatever queue the game
+    presented from. On a later present from another queue (DOOM's async compute on AMD) that is (1) another thread's
+    queue used without its external synchronisation and (2) drawing into an image owned by another queue family with no
+    ownership transfer, undefined on AMD (lost drawing); NVIDIA tolerates it.
+  - Fix (`src/panel/panel_vk.cpp` `present`, to test on AMD): the panel submits on the queue being presented; a new
+    family rebuilds the frames (command pools are per family) and re-uploads ImGui's textures (exclusive images); a
+    family without graphics skips the panel and, with no present seen, the panel closes after 250 ms instead of
+    capturing input unseen. Logs `Vulkan: the game presents from queue ... (family N) now, not ...` (first 5 changes)
+    and `the panel's last submissions not done after 100 ms` (first 3; that path was silent). Built, 695 checks pass.
+  - The front end's cut-off top isn't explained by the log (ImGui display, client and swapchain all 3200x1800).
+  - Also in the log: `motion source 0 ... the controller was reopened` every few seconds, often with cursor/menu changes.
+- 2026-10-29 **Control: the gyro turns the camera through the look direction (first run of the camera build).** Log:
+  `GamePlayerCameraMovementComponentState vtable Control_DX12.exe+0xE2B068 (16 ms)` (RTTI at run time matches the
+  offline one); the scan found 4 objects with that vtable: two on a thread stack (fail: vtable/length 0), the live one
+  (`0x208d363bb90`) and a second heap instance whose `+0x40` isn't its `+0xB8` (`copy differs (dot 0.000)`, an unused
+  one); the live one was picked about 45 s in (once gameplay began). `applied yaw=19.7 pitch=4.7`, then 11.2/67.8 deg:
+  the gyro writes went through (user's feel not recorded yet). Bug: the per-frame check used the scan's full test, which
+  fails for a frame after a gyro write or while turning fast (`+0x40` and the view quaternion trail `+0xB8`), so the
+  component was dropped every 1-10 s (8 times in 30 s) and the gyro stayed off until the next 5 s rescan. Fix: the frame
+  only checks the vtable and the look vector's length (the scan keeps the full test). Built; not deployed yet (game
+  running).
+  - Same day, no regression on NVIDIA (user: DOOM 2016 Vulkan, 3840x2160, panel opened three times, front end and
+    game): no `presents from queue` line, so there every present comes from the queue of the first one. Waiting for
+    the AMD user's test and log.
+- 2026-10-30 **Control: freeze fix verified in the log** (DualSense Bluetooth, Steam Input off, the user's gyro
+  activation on L2/L1 press). 6 min of play with the camera build: the component was dropped once (23:56:58), when the
+  game replaced it (a new pair from 23:57:03, its `+0x40` still unfilled for a scan; the new live one picked at
+  23:57:08: the user died, so a respawn replaces the camera entity); no other drops while turning or aiming (before the fix: 8 in 30 s). Status
+  lines every 30 s show the gyro on with pitch -12.9..+6.9 and heading moving. The 5 s rescan interval leaves up to 5 s
+  without gyro after such a reload.
+- 2026-10-30 **Control: rescan every 1 s (was 5 s) while there is no camera movement component**, so the gyro returns
+  about a second after the respawn's new component is filled in (it was up to 10 s). Built (695 checks) and deployed;
+  not run yet.
+- 2026-10-30 **Control: the gyro judders, the stick doesn't: measured, and the cause** (read-only sampler of the
+  component's `+0x40`, the game's once-per-update copy, during a steady pan; DualSense Bluetooth, Steam Input off).
+  - Gyro pan, 8 s: 135 updates/s (intervals 5-10 ms as sampled), `+0xB8` written 391 times/s (about 3 per update);
+    heading steps median 0.436 deg, 274 of 1079 updates under half the median and 239 over 1.7x.
+  - Stick pan, 8 s: 137 updates/s, `+0xB8` written once per update; steps 0.124-0.152 deg throughout (2 of 1097 under
+    half, 0 over 1.7x), frame-to-frame jitter median 0.10: the game turns by about the same angle every update.
+  - Cause: the update (`exe+0x3e3be0`, in the job system: `r::experimental::JobSystem::executeNextJob` ->
+    `r::FlowUpdateGraph::update` -> exe+0x383d96 -> ... -> exe+0x517853) runs on a worker thread, not the pump thread
+    that writes the gyro (about twice per frame there: 248 camera updates/s at about 123 presents/s). So 0-3 gyro steps
+    reach each game update, and a write between the update's read and write of `+0xB8` is lost. Not Bluetooth (591-614
+    samples/s, even) and not the sensor pacing (it keeps the motion right over time; the steps reach the game out of
+    step with its frames).
+  - Fix: hook the update (found by its unique `+0xB8` -> `+0x40` copy code, `48 8D 57 40 0F 28 C4 0F C2 02 00 0F 50 C0 83
+    F8 0F 74 ?? 0F 11 22` at exe+0x3e4152, and its unwind entry; one argument, rcx = the component; frame time from a
+    global): `apply` adds the turn, the hook applies it to the live component right before the game's own update (a turn
+    untaken for 100 ms is dropped: pause, loading). Without the code, the old direct write. Built (695 checks); not run.
+- 2026-10-30 **Control with the update hook: user: "much smoother now, similar to the stick", but still uneven steps,
+  "as if accumulating then applying".** Log: `camera movement update hooked at Control_DX12.exe+0x3E3BE0`. Sampler, gyro
+  pan 8 s: 124 updates/s, `+0xB8` changed 131/s (one write per update now), 0 updates without a step (was: several), but
+  steps / median p10 0.46, p25 0.74, p75 1.40, p90 2.09 and jitter median 0.24 (stick: 0.10): each update took the
+  gyro frames added since the last one, one or two of them (the pump thread's frames come about 1.8 per update, out of
+  step). The sensor pacing can't fix that: it shapes each gyro frame's motion in sensor time, on the pump thread's clock,
+  and the game samples that signal on its own.
+  - Fix: the gyro frames keep running totals with QueryPerformanceCounter times; the hook takes the totals at its own
+    time (the newest plus the rate over the last ~10 ms of frames for the time since, at most 20 ms) minus what it has
+    applied, so a wrong guess evens out at the next update. Built (695 checks); not deployed yet (game running).
+- 2026-10-30 **Control with the update hook and the resampled totals: gyro pans as even as the stick's** (sampler, gyro
+  pan 8 s, DualSense Bluetooth, Steam Input off): 100 updates/s, `+0xB8` written once per update; frame-to-frame jitter
+  median 0.13, p90 0.47 (stick 0.10 / 0.42; hook alone 0.24 / 0.59). A fast stretch: steps -1.086, -1.116, -1.074, -1.134,
+  -1.095, -1.061, -1.065, -1.112 deg (within about 5%) while the sampled update intervals swung 5-10 ms. The overall step
+  spread (p10 0.23, p90 2.91) is the pan slowing from 1.1 to 0.27 deg per update, not jitter. User's feel and a possible
+  bounce when stopping (the guess ahead is at most 20 ms of motion, undone at the next update): not reported yet.
+- 2026-10-30 **Control: the "uncontrolled" gyro after the update hook was the core's stick fallback, not the resampling.**
+  User: frames smooth, but the gyro "jumps and moves with no control, similar to a gyro to stick with broken
+  deadzones/acceleration"; the first (direct-write) build was fine. Log: `stick fallback: the game undid the gyro's camera
+  writes 8 frames in a row: gyro as right-stick input` and `stick fallback off: the game keeps the gyro's writes again`
+  every 1-3 s, learning stick models from the mixed motion (yaw 52-62 deg/s, curves 1.00-2.25, "10 frames late") and
+  saving `StickFallbackLearned=radial,0.000,2.25,56.1,38.5,10` to the game folder's `profiles\Control_DX12.ini`. Cause:
+  with the hook, `apply` only queues the turn, so `view_angles` read right after it showed the camera unmoved, which the
+  fallback takes for the game undoing the write; the gyro then turned the camera twice (writes + right stick). Likely
+  also behind part of the "jumps" with the hook-only build. Fix: `view_angles` adds the queued, not yet applied turn
+  while the hook is in use. Built (695 checks); not deployed yet (game running). The saved stick model is wrong (learnt
+  from mixed motion) and should be removed from that profile.
+  - Deployed the view_angles fix and removed the bad `StickFallbackLearned=` line from the game folder's
+    `profiles\Control_DX12.ini` (with the user's OK); no other saved stick model in `Gyro4All.ini` or the profiles.
+- 2026-10-30 **Control with the view_angles fix: no stick fallback** (0 `the game undid the gyro's camera writes` since
+  the start). Sampler, gyro pan 8 s: 109 updates/s, one write per update (122/s); steps ramp smoothly as the hand speeds
+  up (-0.089, -0.131, -0.180, -0.215, -0.268, ... -1.207 deg), jitter median 0.15 (stick 0.10); one 246 ms update gap in
+  the sample (a game hitch). User's feel: pending.
+- 2026-10-30 **Control: the remaining gyro jitter is the job system's scheduling, which the stick doesn't show.** User:
+  stick fallback fixed, "better than before but still notice some jitter". From the samplers' recordings (median
+  relative change of each update's step, and of its rate per real time, against the mean of its 2+2 neighbours, while
+  turning): stick step 0.024, rate 0.102: the game moves the camera by an even step per update (its frame time is smoothed
+  or fixed: `coregame::global::VariableTime`, read from a global at the update's start) although the update jobs start
+  5-10 ms apart. Gyro (resampled at the update's real time, fallback fixed) step 0.204, rate 0.150: the gyro's steps
+  followed the jobs' start times, plus noise from the up-to-20 ms guess ahead. (gyro3's better 0.036 was the stick
+  fallback mixing in stick motion.)
+  - Change: the hook reads the totals at a frame clock of its own: advanced by the average update interval (EMA 0.1),
+    pulled 10% per update toward real time minus 6 ms, never backwards, reset after 100 ms without updates or 50 ms off;
+    the totals are interpolated between the gyro frames there (about every 4 ms, so no guess ahead; the old guess only
+    if a frame is later than 6 ms). Costs about 6 ms of latency. Built (695 checks); not deployed (game running).
+- 2026-10-30 **Control with the frame clock: per-update gyro steps as even as the stick's** (sampler, gyro pan; the game
+  at 77 updates/s this time, 11-15 ms apart): step variation median 0.038 (stick 0.024; the previous build 0.204), rate
+  variation 0.140; steps ramp evenly (-0.232, -0.406, -0.566, -0.724, -0.827, -0.977, -1.088, -1.277 deg).
+  - Still 2 stick fallback switches (01:01:15, 01:01:20), with the queued turn counted in `view_angles`: the first while
+    the user's right stick moved hard (RX -32511..32767), the second with the stick at rest, buttons 0x1313 (combat,
+    presumably): the game itself turned the camera against the gyro for 8 frames in a row (aim assist, collision?), which
+    the core's check reads as the write undone. It saved another wrong stick model
+    (`StickFallbackLearned=axial,0.175,1.75,346.8,158.4,7`) to the game folder's profile.
+  - Change: `view_angles` returns false while the update is hooked (the stick fallback is its only user): the hook's
+    writes are part of the game's own update, so the fallback has nothing to rescue there; without the hook (another
+    build, direct writes), the angles and the fallback stay. Built (695 checks); not deployed (game running).
+  - Deployed; the second bad `StickFallbackLearned=` line removed from the game folder's `profiles\Control_DX12.ini`
+    (user's OK). Expected in the next log: no `stick fallback` lines while the hook is in use.
+- 2026-10-30 **Control: gyro aiming user-verified: "feels right"** (DualSense Bluetooth, Steam Input off, the user's
+  activation on L2/L1 press; the update hook, the frame clock and no stick fallback while hooked). Log of the session
+  (01:09:35 on): 0 `stick fallback` lines; the camera movement component replaced twice (01:11:10 -> picked 01:11:20,
+  01:12:15 -> 01:12:23; respawns or loads), each new one picked once its `+0x40` and view quaternion were filled in.
+  Not covered yet: photo mode, the free camera and cutscenes (only the mouse cursor gates the gyro), CONTROL Resonant
+  (detection and right stick only), the DX11 exe, USB.

@@ -37,9 +37,11 @@ int verify();
 bool hook_function(void* target, void* replacement, void** original);
 
 // Protected exes: the protector fills an import table of its own after DllMain, which the PE headers don't describe.
-// Every pointer-aligned slot in the exe's non-executable sections that holds a redirect's target (dll!function's
-// export) is pointed at its replacement and kept like an import slot (verify()); one sweep for all of them. Game thread
-// or the watcher, once the game runs. Returns how many slots were patched now (0 if none hold a target yet).
+// Likewise a game module that keeps GetProcAddress results in its data (Control's rl_rmdwin10_f.dll). Every
+// pointer-aligned slot in the non-executable sections of the exe and the other game modules that holds a redirect's
+// target (dll!function's export) is pointed at its replacement and kept like an import slot (verify()); one sweep for
+// all of them. Game thread or the watcher, once the game runs. Returns how many slots were patched now (0 if none hold a
+// target yet).
 struct Redirect {
     const char* function;
     void* target;

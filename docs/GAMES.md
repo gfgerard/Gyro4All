@@ -12,8 +12,10 @@
 
 | Game | Status | Engine | What to know |
 |---|---|---|---|
+| 007 First Light | ✅ Works (tested on the Steam version) | Glacier 2 | Install in `Retail`, next to `007FirstLight.exe`. |
 | Battlefield 4 | ✅ Works (tested on the EA app version, Game Pass) | Frostbite 3 | Install next to `bf4.exe` in the game's main folder. Turn off the EA app's in-game overlay for the game (it freezes on start otherwise). Move the right stick once in game to start the gyro. On foot only so far (vehicles not tested). Campaign only: never play multiplayer with it (PunkBuster). |
 | Battlefield Hardline | ✅ Works (tested on the EA app version, Game Pass) | Frostbite 3 | Install next to `bfh.exe` in the game's main folder. Move the right stick once in game to start the gyro (again after cutscenes). Off in vehicles. Campaign only: never play multiplayer with it (PunkBuster). |
+| Control (2019, Ultimate Edition) | ✅ Works (tested on the Steam version, DX12) | Northlight | Install next to `Control_DX12.exe` in the game's main folder. DX11 (`Control_DX11.exe`) not tested. |
 | Cronos: The New Dawn | ✅ Works | Unreal Engine 5.5.4 | |
 | Crysis (2007) | ✅ Works (tested on the EA app version, 1.2.1, 64-bit) | CryEngine 2 | Install in `Bin64`, next to `Crysis64.exe`. 64-bit only. |
 | Crysis Remastered | ✅ Works | CryEngine | Install in `Bin64`, next to `CrysisRemastered.exe`. Rename `MSVCP140.dll`.|
@@ -28,6 +30,7 @@
 | Ghostrunner | ✅ Works | Unreal Engine 4.26.2 | |
 | Ghostrunner II | ✅ Works | Unreal Engine 4.27.2 | |
 | Ghostwire: Tokyo | ✅ Works | Unreal Engine 4.27.2 | |
+| Hitman 3 (World of Assassination) | ✅ Works (tested on the Epic version) | Glacier 2 | Install in `Retail`, next to `HITMAN3.exe`. Offline / single-player only: never play the online modes with it. |
 | Hogwarts Legacy | ✅ Works | Unreal Engine 4 | Needs custom profile |
 | Indiana Jones and the Great Circle | ✅ Works (tested on the Game Pass / Microsoft Store version) | Motor (id Tech 7 based) | Install next to `TheGreatCircle.exe` |
 | Kena: Bridge of Spirits | ✅ Works | Unreal Engine 4 | DX12 tested |
@@ -72,12 +75,9 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 
 | Game | Engine | Year | Notes |
 |---|---|---|---|
-| Hitman 3 | Glacier 2 | 2021 |
-| 007 First Light | Glacier 2 | 2026 |
 | Halo: The Master Chief Collection | Blam! / Saber 3D / Halo | 2014 |
 | Halo: Campaign Evolved | Unreal Engine 5 | 2026 |
 | Alan Wake Remastered | Northlight | 2021 |
-| Control | Northlight | 2019 |
 | Alan Wake 2 | Northlight | 2023 |
 | Borderlands 3 | Unreal Engine 4 | 2019 |
 | Borderlands 4	| Unreal Engine 5 | 2025 |
