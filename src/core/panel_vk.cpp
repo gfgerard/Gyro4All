@@ -19,6 +19,10 @@
 //   images the game gets for it, if they differ from the ones read at creation.
 // - vkQueuePresentKHR: for that swapchain, gyro4all.dll records and submits the panel's draw, waiting on the game's
 //   semaphores, and the present then waits on gyro4all.dll's semaphore instead.
+// - A present from a queue that can't draw (DOOM 2016 on AMD presents from its compute queue): gyro4all.dll draws on
+//   the first graphics queue the game got (g4a_vk_present::draw_queue). The game may use that queue on another thread,
+//   so vkQueueSubmit/vkQueueSubmit2(KHR)/vkQueueBindSparse/vkQueueWaitIdle on it and vkDeviceWaitIdle on its device
+//   take g_draw_lock, as gyro4all.dll does around its own submission there (lock_queue).
 // - vkGetInstanceProcAddr / vkGetDeviceProcAddr: return these hooks for the same names, for games that fetch them.
 #include "panel_vk.hpp"
 
@@ -58,6 +62,12 @@ struct Originals {
     PFN_vkDestroySwapchainKHR destroy_swapchain = nullptr;
     PFN_vkGetSwapchainImagesKHR get_swapchain_images = nullptr;
     PFN_vkQueuePresentKHR queue_present = nullptr;
+    PFN_vkQueueSubmit queue_submit = nullptr;
+    PFN_vkQueueSubmit2 queue_submit2 = nullptr;
+    PFN_vkQueueSubmit2 queue_submit2_khr = nullptr;
+    PFN_vkQueueBindSparse queue_bind_sparse = nullptr;
+    PFN_vkQueueWaitIdle queue_wait_idle = nullptr;
+    PFN_vkDeviceWaitIdle device_wait_idle = nullptr;
     PFN_vkGetInstanceProcAddr get_instance_proc = nullptr;
     PFN_vkGetDeviceProcAddr get_device_proc = nullptr;
 };
@@ -68,17 +78,44 @@ struct Swapchain {
     VkDevice device = VK_NULL_HANDLE;
     std::vector<uint64_t> images;
     uint32_t format = 0, width = 0, height = 0;
-    int path = kLoader;  // the one that made it
+    int path = kLoader;       // the one that made it
+    bool concurrent = false;  // VK_SHARING_MODE_CONCURRENT images
 };
 
 std::mutex g_mutex;  // the maps below; creation and destruction calls come from any game thread
 VkInstance g_instance = VK_NULL_HANDLE;
 uint32_t g_api_version = VK_API_VERSION_1_0;
 std::unordered_map<VkDevice, VkPhysicalDevice> g_devices;
+std::unordered_map<VkDevice, std::vector<VkQueueFlags>> g_family_flags;  // per device, by queue family
 std::unordered_map<VkQueue, std::pair<VkDevice, uint32_t>> g_queues;
+std::unordered_map<VkDevice, std::pair<VkQueue, uint32_t>> g_draw_queues;  // the first graphics queue the game got
 std::unordered_map<uint64_t, HWND> g_surfaces;
 VkSwapchainKHR g_target = VK_NULL_HANDLE;  // the panel's swapchain
 Swapchain g_target_info;
+
+// The queue gyro4all.dll draws on when the present's can't (see the top), once it differs from the present's, and its
+// lock. Recursive: a hooked call on that queue may reach another hooked one on the same thread (a layer, the interposer).
+std::atomic<VkQueue> g_lock_queue{VK_NULL_HANDLE};
+std::atomic<VkDevice> g_lock_device{VK_NULL_HANDLE};
+std::recursive_mutex g_draw_lock;
+
+void lock_queue(void* queue, int32_t lock) {
+    if (!queue || VkQueue(queue) != g_lock_queue.load()) return;
+    if (lock) g_draw_lock.lock();
+    else g_draw_lock.unlock();
+}
+
+// Held around a game call on the draw queue (or a wait on its whole device).
+struct QueueLock {
+    const bool held;
+    explicit QueueLock(bool on) : held(on) {
+        if (held) g_draw_lock.lock();
+    }
+    ~QueueLock() {
+        if (held) g_draw_lock.unlock();
+    }
+};
+bool is_draw_queue(VkQueue queue) { return queue && queue == g_lock_queue.load(); }
 
 // Hooked calls this thread is inside of: a hook entered with one already running is nested.
 thread_local int t_depth = 0;
@@ -129,9 +166,32 @@ VkResult VKAPI_CALL hk_create_device(VkPhysicalDevice physical, const VkDeviceCr
     const auto fn = real<P>(&Originals::create_device, "vkCreateDevice");
     const VkResult r = fn ? fn(physical, info, alloc, device) : VK_ERROR_INITIALIZATION_FAILED;
     if (r == VK_SUCCESS && device) {
+        // Which families can draw: from the loader's instance functions, beneath any interposer.
+        VkInstance instance = VK_NULL_HANDLE;
+        {
+            std::lock_guard lock(g_mutex);
+            instance = g_instance;
+        }
+        const auto get_proc = real<kLoader>(&Originals::get_instance_proc, "vkGetInstanceProcAddr");
+        const auto props = get_proc && instance ? reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+                                                      get_proc(instance, "vkGetPhysicalDeviceQueueFamilyProperties"))
+                                                : nullptr;
+        std::vector<VkQueueFlags> flags;
+        if (props) {
+            uint32_t n = 0;
+            props(physical, &n, nullptr);
+            std::vector<VkQueueFamilyProperties> families(n);
+            props(physical, &n, families.data());
+            for (const VkQueueFamilyProperties& family : families) flags.push_back(family.queueFlags);
+        }
+        std::string list;
+        for (size_t i = 0; i < flags.size(); ++i)
+            list += (i ? " " : "") + std::to_string(i) + ":" + std::to_string(flags[i]);
         std::lock_guard lock(g_mutex);
         g_devices[*device] = physical;
-        log("panel: Vulkan device %p through %s", static_cast<void*>(*device), kPathName[P]);
+        g_family_flags[*device] = std::move(flags);
+        log("panel: Vulkan device %p through %s (queue families, index:flags: %s)", static_cast<void*>(*device),
+            kPathName[P], list.empty() ? "unknown" : list.c_str());
     }
     return r;
 }
@@ -143,6 +203,12 @@ void VKAPI_CALL hk_destroy_device(VkDevice device, const VkAllocationCallbacks* 
         if (const g4a_api* a = panel_host::api(); a && device) a->vk_device_destroyed(device);
         std::lock_guard lock(g_mutex);
         g_devices.erase(device);
+        g_family_flags.erase(device);
+        g_draw_queues.erase(device);
+        if (g_lock_device.load() == device) {
+            g_lock_queue = VK_NULL_HANDLE;
+            g_lock_device = VK_NULL_HANDLE;
+        }
         for (auto it = g_queues.begin(); it != g_queues.end();)
             it = it->second.first == device ? g_queues.erase(it) : std::next(it);
         if (g_target_info.device == device) {
@@ -157,6 +223,10 @@ void add_queue(VkDevice device, uint32_t family, VkQueue queue) {
     if (!queue) return;
     std::lock_guard lock(g_mutex);
     g_queues[queue] = {device, family};
+    const auto flags = g_family_flags.find(device);
+    if (flags != g_family_flags.end() && family < flags->second.size() &&
+        (flags->second[family] & VK_QUEUE_GRAPHICS_BIT) && !g_draw_queues.count(device))
+        g_draw_queues[device] = {queue, family};
 }
 
 template <int P>
@@ -224,6 +294,7 @@ VkResult VKAPI_CALL hk_create_swapchain(VkDevice device, const VkSwapchainCreate
     sc.width = info->imageExtent.width;
     sc.height = info->imageExtent.height;
     sc.path = P;
+    sc.concurrent = info->imageSharingMode == VK_SHARING_MODE_CONCURRENT;
     // Through the path that made it: the interposer may hand the game other images than the driver's.
     if (const auto get_images = real<P>(&Originals::get_swapchain_images, "vkGetSwapchainImagesKHR")) {
         uint32_t n = 0;
@@ -332,6 +403,21 @@ VkResult VKAPI_CALL hk_queue_present(VkQueue queue, const VkPresentInfoKHR* info
         p.format = g_target_info.format;
         p.width = g_target_info.width;
         p.height = g_target_info.height;
+        p.concurrent = g_target_info.concurrent ? 1 : 0;
+        p.lock_queue = &lock_queue;
+        if (const auto dq = g_draw_queues.find(g_target_info.device); dq != g_draw_queues.end()) {
+            p.draw_queue = dq->second.first;
+            p.draw_queue_family = dq->second.second;
+            // The game's calls on that queue take the lock from now on (only needed when it isn't the present's).
+            if (dq->second.first != queue && g_lock_queue.load() != dq->second.first) {
+                g_lock_device = g_target_info.device;
+                g_lock_queue = dq->second.first;
+                log("panel: Vulkan presents from queue %p (family %u); the panel can draw on queue %p (family %u), "
+                    "its use serialised with the game's",
+                    static_cast<void*>(queue), q->second.second, static_cast<void*>(dq->second.first),
+                    dq->second.second);
+            }
+        }
     }
     for (uint32_t i = 0; i < info->waitSemaphoreCount; ++i) waits.push_back(uint64_t(info->pWaitSemaphores[i]));
     p.image_count = uint32_t(images.size());
@@ -344,6 +430,48 @@ VkResult VKAPI_CALL hk_queue_present(VkQueue queue, const VkPresentInfoKHR* info
     changed.waitSemaphoreCount = 1;
     changed.pWaitSemaphores = &panel;
     return fn(queue, &changed);
+}
+
+template <int P>
+VkResult VKAPI_CALL hk_queue_submit(VkQueue queue, uint32_t count, const VkSubmitInfo* submits, VkFence fence) {
+    const auto fn = real<P>(&Originals::queue_submit, "vkQueueSubmit");
+    const QueueLock lock(is_draw_queue(queue));
+    return fn ? fn(queue, count, submits, fence) : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+template <int P>
+VkResult VKAPI_CALL hk_queue_submit2(VkQueue queue, uint32_t count, const VkSubmitInfo2* submits, VkFence fence) {
+    const auto fn = real<P>(&Originals::queue_submit2, "vkQueueSubmit2");
+    const QueueLock lock(is_draw_queue(queue));
+    return fn ? fn(queue, count, submits, fence) : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+template <int P>
+VkResult VKAPI_CALL hk_queue_submit2_khr(VkQueue queue, uint32_t count, const VkSubmitInfo2* submits, VkFence fence) {
+    const auto fn = real<P>(&Originals::queue_submit2_khr, "vkQueueSubmit2KHR");
+    const QueueLock lock(is_draw_queue(queue));
+    return fn ? fn(queue, count, submits, fence) : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+template <int P>
+VkResult VKAPI_CALL hk_queue_bind_sparse(VkQueue queue, uint32_t count, const VkBindSparseInfo* binds, VkFence fence) {
+    const auto fn = real<P>(&Originals::queue_bind_sparse, "vkQueueBindSparse");
+    const QueueLock lock(is_draw_queue(queue));
+    return fn ? fn(queue, count, binds, fence) : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+template <int P>
+VkResult VKAPI_CALL hk_queue_wait_idle(VkQueue queue) {
+    const auto fn = real<P>(&Originals::queue_wait_idle, "vkQueueWaitIdle");
+    const QueueLock lock(is_draw_queue(queue));
+    return fn ? fn(queue) : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+template <int P>
+VkResult VKAPI_CALL hk_device_wait_idle(VkDevice device) {
+    const auto fn = real<P>(&Originals::device_wait_idle, "vkDeviceWaitIdle");
+    const QueueLock lock(device && device == g_lock_device.load());
+    return fn ? fn(device) : VK_ERROR_INITIALIZATION_FAILED;
 }
 
 template <int P>
@@ -368,6 +496,12 @@ PFN_vkVoidFunction hook_for(const char* name) {
         {"vkDestroySwapchainKHR", reinterpret_cast<PFN_vkVoidFunction>(&hk_destroy_swapchain<P>)},
         {"vkGetSwapchainImagesKHR", reinterpret_cast<PFN_vkVoidFunction>(&hk_get_swapchain_images<P>)},
         {"vkQueuePresentKHR", reinterpret_cast<PFN_vkVoidFunction>(&hk_queue_present<P>)},
+        {"vkQueueSubmit", reinterpret_cast<PFN_vkVoidFunction>(&hk_queue_submit<P>)},
+        {"vkQueueSubmit2", reinterpret_cast<PFN_vkVoidFunction>(&hk_queue_submit2<P>)},
+        {"vkQueueSubmit2KHR", reinterpret_cast<PFN_vkVoidFunction>(&hk_queue_submit2_khr<P>)},
+        {"vkQueueBindSparse", reinterpret_cast<PFN_vkVoidFunction>(&hk_queue_bind_sparse<P>)},
+        {"vkQueueWaitIdle", reinterpret_cast<PFN_vkVoidFunction>(&hk_queue_wait_idle<P>)},
+        {"vkDeviceWaitIdle", reinterpret_cast<PFN_vkVoidFunction>(&hk_device_wait_idle<P>)},
         {"vkGetInstanceProcAddr", reinterpret_cast<PFN_vkVoidFunction>(&hk_get_instance_proc<P>)},
         {"vkGetDeviceProcAddr", reinterpret_cast<PFN_vkVoidFunction>(&hk_get_device_proc<P>)},
     };
@@ -429,6 +563,12 @@ std::vector<Hook> hooks_of() {
         hook<P>("vkDestroySwapchainKHR", &hk_destroy_swapchain<P>, &Originals::destroy_swapchain),
         hook<P>("vkGetSwapchainImagesKHR", &hk_get_swapchain_images<P>, &Originals::get_swapchain_images),
         hook<P>("vkQueuePresentKHR", &hk_queue_present<P>, &Originals::queue_present),
+        hook<P>("vkQueueSubmit", &hk_queue_submit<P>, &Originals::queue_submit),
+        hook<P>("vkQueueSubmit2", &hk_queue_submit2<P>, &Originals::queue_submit2),
+        hook<P>("vkQueueSubmit2KHR", &hk_queue_submit2_khr<P>, &Originals::queue_submit2_khr),
+        hook<P>("vkQueueBindSparse", &hk_queue_bind_sparse<P>, &Originals::queue_bind_sparse),
+        hook<P>("vkQueueWaitIdle", &hk_queue_wait_idle<P>, &Originals::queue_wait_idle),
+        hook<P>("vkDeviceWaitIdle", &hk_device_wait_idle<P>, &Originals::device_wait_idle),
         hook<P>("vkGetInstanceProcAddr", &hk_get_instance_proc<P>, &Originals::get_instance_proc),
         hook<P>("vkGetDeviceProcAddr", &hk_get_device_proc<P>, &Originals::get_device_proc),
     };

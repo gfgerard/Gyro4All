@@ -14,9 +14,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 
 namespace gyro4all::dinputpad {
 namespace {
@@ -27,13 +29,16 @@ using GetCapabilities_t = HRESULT(STDMETHODCALLTYPE*)(void*, LPDIDEVCAPS);
 using GetProperty_t = HRESULT(STDMETHODCALLTYPE*)(void*, REFGUID, LPDIPROPHEADER);
 using GetDeviceState_t = HRESULT(STDMETHODCALLTYPE*)(void*, DWORD, LPVOID);
 using GetDeviceData_t = HRESULT(STDMETHODCALLTYPE*)(void*, DWORD, LPDIDEVICEOBJECTDATA, LPDWORD, DWORD);
+using Acquire_t = HRESULT(STDMETHODCALLTYPE*)(void*);
+using SetCooperativeLevel_t = HRESULT(STDMETHODCALLTYPE*)(void*, HWND, DWORD);
 
 // COM vtable slots: IDirectInput8 CreateDevice; IDirectInputDevice8 (A and W alike) GetCapabilities, GetProperty,
-// GetDeviceState, GetDeviceData.
-constexpr int kCreateDevice = 3, kGetCapabilities = 3, kGetProperty = 5, kGetDeviceState = 9, kGetDeviceData = 10;
+// Acquire, Unacquire, GetDeviceState, GetDeviceData, SetCooperativeLevel.
+constexpr int kCreateDevice = 3, kGetCapabilities = 3, kGetProperty = 5, kAcquire = 7, kUnacquire = 8,
+              kGetDeviceState = 9, kGetDeviceData = 10, kSetCooperativeLevel = 13;
 
 Create_t g_create = nullptr;
-VtableHook g_create_device, g_get_state, g_get_data;
+VtableHook g_create_device, g_get_state, g_get_data, g_acquire, g_cooperative;
 std::atomic<ReadFn> g_on_read{nullptr};
 std::atomic<CreateFn> g_on_create{nullptr};
 
@@ -53,10 +58,15 @@ constexpr int kMaxPads = 16;
 Pad g_pads[kMaxPads];
 
 // The game's DirectInput mice and keyboards: idle while the settings panel captures them (DOOM 2016 reads both this
-// way, so the panel's clicks and the mouse's motion also turned and fired in the game behind it).
+// way, so the panel's clicks and the mouse's motion also turned and fired in the game behind it). An exclusive one is
+// also let go (Unacquire) while captured: Windows neither moves the cursor nor sends mouse messages while a game holds
+// the mouse exclusively, so the panel saw no motion (DOOM 2016 on AMD, in game); it is acquired again on the game's
+// first read after the panel lets go. Only on the game's own thread, inside its reads and Acquire calls.
 struct Desktop {
     std::atomic<void*> device{nullptr};
     bool mouse = false;
+    std::atomic<DWORD> level{0};          // the game's SetCooperativeLevel flags (0 = not set yet)
+    std::atomic<bool> released{false};    // unacquired by us while captured
 };
 constexpr int kMaxDesktop = 8;
 Desktop g_desktop[kMaxDesktop];
@@ -90,6 +100,30 @@ Desktop* find_desktop(void* device) {
 
 bool captured(const Desktop& d) {
     return (d.mouse ? g_capture_mouse : g_capture_keyboard).load(std::memory_order_relaxed);
+}
+
+const char* desktop_name(const Desktop& d) { return d.mouse ? "mouse" : "keyboard"; }
+
+// On the game's read of a mouse or keyboard: true while an exclusive one is let go for the panel (the read returns
+// idle without reaching DirectInput). The first read after the panel lets go acquires it again.
+bool let_go(void* device, Desktop& d) {
+    const bool exclusive = (d.level.load(std::memory_order_relaxed) & DISCL_EXCLUSIVE) != 0;
+    if (exclusive && captured(d)) {
+        if (!d.released.exchange(true)) {
+            const HRESULT hr = reinterpret_cast<Acquire_t>(method(device, kUnacquire))(device);
+            log("dinputpad: the game's exclusive DirectInput %s let go while the settings panel captures it (0x%08lX)",
+                desktop_name(d), static_cast<unsigned long>(hr));
+        }
+        return true;
+    }
+    if (d.released.exchange(false)) {
+        auto acquire = reinterpret_cast<Acquire_t>(g_acquire.original_for(device));
+        if (!acquire) acquire = reinterpret_cast<Acquire_t>(method(device, kAcquire));
+        const HRESULT hr = acquire(device);
+        log("dinputpad: the game's exclusive DirectInput %s acquired again (0x%08lX)", desktop_name(d),
+            static_cast<unsigned long>(hr));
+    }
+    return false;
 }
 
 // Buffered events of a captured mouse or keyboard: only releases go through (a button or key held when the panel
@@ -185,8 +219,14 @@ void add_stick(void* device, Pad& pad, DWORD size, DIJOYSTATE* js, float x, floa
 HRESULT STDMETHODCALLTYPE hk_get_state(void* device, DWORD size, LPVOID data) {
     const void* caller = _ReturnAddress();
     auto real = reinterpret_cast<GetDeviceState_t>(g_get_state.original_for(device));
+    Desktop* desktop = find_desktop(device);
+    if (desktop && let_go(device, *desktop)) {
+        if (data) std::memset(data, 0, size);
+        g_desktop_idled.fetch_add(1, std::memory_order_relaxed);
+        return DI_OK;
+    }
     const HRESULT hr = real ? real(device, size, data) : E_FAIL;
-    if (const Desktop* d = find_desktop(device)) {
+    if (const Desktop* d = desktop) {
         // Immediate state: nothing pressed, no motion (both formats are all relative axes and buttons).
         if (SUCCEEDED(hr) && data && captured(*d)) {
             std::memset(data, 0, size);
@@ -235,8 +275,13 @@ HRESULT STDMETHODCALLTYPE hk_get_data(void* device, DWORD object_size, LPDIDEVIC
                                       DWORD flags) {
     const void* caller = _ReturnAddress();
     auto real = reinterpret_cast<GetDeviceData_t>(g_get_data.original_for(device));
+    Desktop* desktop = find_desktop(device);
+    if (desktop && let_go(device, *desktop)) {
+        if (count) *count = 0;
+        return DI_OK;
+    }
     const HRESULT hr = real ? real(device, object_size, data, count, flags) : E_FAIL;
-    if (const Desktop* d = find_desktop(device)) {
+    if (const Desktop* d = desktop) {
         if (SUCCEEDED(hr) && data && count && object_size >= 2 * sizeof(DWORD) && captured(*d))
             keep_releases(*d, object_size, data, count);
         return hr;
@@ -246,6 +291,23 @@ HRESULT STDMETHODCALLTYPE hk_get_data(void* device, DWORD object_size, LPDIDEVIC
     note_read(*pad, "GetDeviceData");
     if (SUCCEEDED(hr) && data) note_call(*pad, false, caller, data, object_size);
     if (SUCCEEDED(hr) && count && !(flags & DIGDD_PEEK) && g_neutral.load(std::memory_order_relaxed)) *count = 0;
+    return hr;
+}
+
+// The game acquiring a mouse or keyboard we let go for the panel: left unacquired, reported done.
+HRESULT STDMETHODCALLTYPE hk_acquire(void* device) {
+    auto real = reinterpret_cast<Acquire_t>(g_acquire.original_for(device));
+    if (const Desktop* d = find_desktop(device); d && d->released.load() && captured(*d)) return DI_OK;
+    return real ? real(device) : E_FAIL;
+}
+
+HRESULT STDMETHODCALLTYPE hk_cooperative(void* device, HWND window, DWORD flags) {
+    auto real = reinterpret_cast<SetCooperativeLevel_t>(g_cooperative.original_for(device));
+    const HRESULT hr = real ? real(device, window, flags) : E_FAIL;
+    if (Desktop* d = find_desktop(device); d && SUCCEEDED(hr) && d->level.exchange(flags) != flags)
+        log("dinputpad: the game's DirectInput %s: cooperative level 0x%lX (%s, %s)", desktop_name(*d),
+            static_cast<unsigned long>(flags), flags & DISCL_EXCLUSIVE ? "exclusive" : "non-exclusive",
+            flags & DISCL_BACKGROUND ? "background" : "foreground");
     return hr;
 }
 
@@ -262,6 +324,8 @@ HRESULT STDMETHODCALLTYPE hk_create_device(void* input, REFGUID guid, void** out
     if (type == DI8DEVTYPE_MOUSE || type == DI8DEVTYPE_KEYBOARD) {
         g_get_state.patch(device, kGetDeviceState, reinterpret_cast<void*>(&hk_get_state));
         g_get_data.patch(device, kGetDeviceData, reinterpret_cast<void*>(&hk_get_data));
+        g_acquire.patch(device, kAcquire, reinterpret_cast<void*>(&hk_acquire));
+        g_cooperative.patch(device, kSetCooperativeLevel, reinterpret_cast<void*>(&hk_cooperative));
         for (Desktop& d : g_desktop) {
             if (d.device.load() == device) return hr;
             void* expected = nullptr;
@@ -348,9 +412,19 @@ void set_capture(bool mouse, bool keyboard) {
     const bool any = std::any_of(std::begin(g_desktop), std::end(g_desktop),
                                  [](const Desktop& d) { return d.device.load() != nullptr; });
     const bool was_mouse = g_capture_mouse.exchange(mouse), was_keyboard = g_capture_keyboard.exchange(keyboard);
-    if (any && (was_mouse != mouse || was_keyboard != keyboard))
-        log("dinputpad: the game's DirectInput mouse %s, keyboard %s (%u reads idled so far)",
-            mouse ? "idle" : "passed through", keyboard ? "idle" : "passed through", g_desktop_idled.load());
+    if (any && (was_mouse != mouse || was_keyboard != keyboard)) {
+        std::string levels;  // what the game asked for each device (0 = not set yet)
+        for (const Desktop& d : g_desktop)
+            if (d.device.load()) {
+                char one[48];
+                std::snprintf(one, sizeof(one), "%s%s 0x%lX%s", levels.empty() ? "" : ", ", desktop_name(d),
+                              static_cast<unsigned long>(d.level.load()), d.released.load() ? " let go" : "");
+                levels += one;
+            }
+        log("dinputpad: the game's DirectInput mouse %s, keyboard %s (%u reads idled so far; cooperative levels: %s)",
+            mouse ? "idle" : "passed through", keyboard ? "idle" : "passed through", g_desktop_idled.load(),
+            levels.c_str());
+    }
 }
 
 void set_stick(float x, float y) {

@@ -18,6 +18,7 @@
 #include <d3d10_1.h>
 #include <d3d11.h>
 #include <dxgi.h>
+#include <windowsx.h>
 
 #include <imgui.h>
 #include <imgui_impl_win32.h>
@@ -56,6 +57,12 @@ std::atomic<uint32_t> g_bb_width{0}, g_bb_height{0};
 std::atomic<bool> g_bb_scale{false};  // the renderer honours ImDrawData::FramebufferScale (DX10, DX11)
 bool g_has_frame = false;             // under g_lock: ImGui::GetDrawData() is the panel's last complete frame
 ULONGLONG g_opened_at = 0;            // owner thread
+// Mouse input seen in this opening, for log_input_state (under g_lock): the window's mouse messages (DOOM 2016 on AMD:
+// ImGui had no mouse position in game) and how often the OS cursor moved between frames.
+struct MouseSeen {
+    uint32_t messages = 0, move = 0, leave = 0, nc_move = 0, nc_leave = 0, input = 0, buttons = 0, cursor_moves = 0;
+    POINT last_move{-1, -1}, last_cursor{-1, -1};
+} g_seen;
 int32_t g_last_result = 0;            // owner thread: gl_panel_last_result, logged on change
 
 constexpr ULONGLONG kHeartbeatMs = 250;
@@ -142,6 +149,42 @@ void log_input_state(const ImGuiIO& io, const g4a_gamepad* pad, ULONGLONG since_
         pad && pad->connected ? 1 : 0, pad ? pad->buttons : 0, ImGui::IsAnyItemActive(), ImGui::IsWindowFocused(ImGuiFocusedFlags_AnyWindow),
         ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow), io.NavActive, io.NavVisible, io.WantCaptureMouse,
         io.DisplaySize.x, io.DisplaySize.y);
+    // ImGui's Win32 backend takes the mouse position from WM_MOUSEMOVE, or polls GetCursorPos when the foreground
+    // window is exactly its own and it tracks no mouse area (after a WM_MOUSELEAVE).
+    const MouseSeen& s = g_seen;
+    log("input +%llums: since opening %u window messages: WM_MOUSEMOVE %u (last at %ld,%ld), WM_MOUSELEAVE %u, "
+        "WM_NCMOUSEMOVE %u, WM_NCMOUSELEAVE %u, WM_INPUT %u, button messages %u; OS cursor moved in %u frames; the "
+        "foreground window is the panel's %d",
+        static_cast<unsigned long long>(since_open), s.messages, s.move, s.last_move.x, s.last_move.y, s.leave,
+        s.nc_move, s.nc_leave, s.input, s.buttons, s.cursor_moves, GetForegroundWindow() == g_hwnd);
+}
+
+// Owner thread, under g_lock: one panel frame's cursor (log_input_state).
+void note_cursor() {
+    POINT cursor{};
+    if (!GetCursorPos(&cursor)) return;
+    if (g_seen.last_cursor.x != -1 && (cursor.x != g_seen.last_cursor.x || cursor.y != g_seen.last_cursor.y))
+        ++g_seen.cursor_moves;
+    g_seen.last_cursor = cursor;
+}
+
+// Under g_lock, while the panel is open.
+void note_message(uint32_t message, int64_t lparam) {
+    ++g_seen.messages;
+    switch (message) {
+        case WM_MOUSEMOVE:
+            ++g_seen.move;
+            g_seen.last_move = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            break;
+        case WM_MOUSELEAVE: ++g_seen.leave; break;
+        case WM_NCMOUSEMOVE: ++g_seen.nc_move; break;
+        case WM_NCMOUSELEAVE: ++g_seen.nc_leave; break;
+        case WM_INPUT: ++g_seen.input; break;
+        default:
+            if (message >= WM_LBUTTONDOWN && message <= WM_MOUSELAST && message != WM_MOUSEWHEEL &&
+                message != WM_MOUSEHWHEEL)
+                ++g_seen.buttons;
+    }
 }
 
 // Owner thread: the panel stopped drawing (closed by GyroLib, by us, or never shown).
@@ -244,6 +287,13 @@ int32_t api_frame(const g4a_gamepad* pad) {
         io.ClearEventsQueue();
         io.ClearInputKeys();
         io.ClearInputMouse();
+        // ImGui's Win32 backend stops polling GetCursorPos once a WM_MOUSEMOVE reached it, until a WM_MOUSELEAVE; that
+        // one comes while the panel is closed and isn't passed on. Opened again where the game gets no WM_MOUSEMOVE
+        // (DOOM 2016 in game, after the mouse was used on the panel in the front end), ImGui had no mouse position and
+        // drew no cursor. Both leaves end its tracking: it polls from the first frame.
+        ImGui_ImplWin32_WndProcHandler(g_hwnd, WM_MOUSELEAVE, 0, 0);
+        ImGui_ImplWin32_WndProcHandler(g_hwnd, WM_NCMOUSELEAVE, 0, 0);
+        g_seen = {};
         g_escape = false;
         g_open = true;
         log("panel open");
@@ -266,6 +316,7 @@ int32_t api_frame(const g4a_gamepad* pad) {
         io.DisplayFramebufferScale = ImVec2(float(bw) / io.DisplaySize.x, float(bh) / io.DisplaySize.y);
     feed_gamepad(io, pad);
     poll_mouse_buttons(io);
+    note_cursor();
     // The game hides the OS cursor in gameplay (Mortal Shell: the panel answered the mouse with no cursor on screen):
     // then ImGui draws its own, and the game's cursor state is left alone.
     CURSORINFO cursor{sizeof(cursor)};
@@ -312,6 +363,7 @@ uint32_t api_window_message(void* hwnd, uint32_t message, uint64_t wparam, int64
     if (!g_open) return 0;
     {
         Lock lock;
+        if (g_open) note_message(message, lparam);
         if (g_open && !mouse_button(ImGui::GetIO(), message, wparam))
             ImGui_ImplWin32_WndProcHandler(static_cast<HWND>(hwnd), message, WPARAM(wparam), LPARAM(lparam));
     }

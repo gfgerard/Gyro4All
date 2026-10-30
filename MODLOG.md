@@ -5884,3 +5884,85 @@ or gyro to stick.
   `PlayerInputReader`, vtable `exe+0x7694b8`, method at vtable+0xc8, called from `exe+0x180535` with rbx the Character).
 - **User-verified in game: "perfecto"** (DualSense Wireless shown as XInput controller 0, Epic build; log: `look turn
   hooked at Game_f_x64_EOS.exe+0x29F1B0`, `look direction` found on entering play). Built, 695 checks pass.
+- 2026-10-30 **DOOM (2016) on AMD with the ABI 5 build (user): the panel shows in game now, but the mouse doesn't move
+  it, no cursor.** No new log yet. The same was in the first AMD log (1.8.3): in game `imgui mouse (-FLT_MAX,...)`,
+  `hovered 0`, OS cursor fixed (1614,939) through the opening; in the front end the mouse worked.
+  - Suspected cause (not confirmed: the cooperative level wasn't logged): in game DOOM holds its DirectInput mouse
+    exclusively (`DISCL_EXCLUSIVE`); then Windows neither moves the cursor nor sends mouse messages, so neither ImGui's
+    `WM_MOUSEMOVE` nor its `GetCursorPos` fallback see motion. dinputpad only idled the game's reads.
+  - Change (`src/core/dinputpad.cpp`): the game's mice and keyboards also get `SetCooperativeLevel` (logged: `cooperative
+    level 0x.. (exclusive|non-exclusive, foreground|background)`) and `Acquire` hooked. While the panel captures an
+    exclusive one, the game's first read unacquires it (`let go while the settings panel captures it`), its reads
+    return idle without reaching DirectInput and its `Acquire` calls report success without acquiring; the first read
+    after the panel lets go acquires it again (`acquired again`). All on the game's thread, inside its own calls.
+  - Built, 695 checks pass. Not tested in game.
+  - Same day, **a likelier cause found in the panel's code** (user: on NVIDIA the mouse works wherever the panel is
+    opened, so the exclusive-mouse theory is weak; the cooperative level change stays, it only acts when the log says
+    exclusive). ImGui's Win32 backend (`imgui_impl_win32.cpp`, `UpdateMouseData`) polls `GetCursorPos` only while it
+    tracks no mouse area; a `WM_MOUSEMOVE` starts tracking, and only a `WM_MOUSELEAVE` ends it. gyro4all.dll passes window
+    messages to ImGui only while the panel is open, and clears ImGui's mouse at each opening (`ClearInputMouse`, position
+    -FLT_MAX). So after the mouse was moved over the panel once (the front end), the leave arrived with the panel closed,
+    and in a later opening where the game gets no `WM_MOUSEMOVE` (DOOM in game) ImGui never had a position again and drew
+    no cursor: both AMD logs show exactly that order (mouse used in the front end, then -FLT_MAX in game).
+  - Fix (`src/panel/panel_main.cpp` `api_frame`): each opening passes a `WM_MOUSELEAVE` and a `WM_NCMOUSELEAVE` to
+    ImGui's handler after clearing its input, which ends the tracking, so it polls from the first frame. Diagnostics: a
+    second `input +..ms:` line with the window's mouse messages since the opening (`WM_MOUSEMOVE` count and last
+    position, `WM_MOUSELEAVE`, `WM_NCMOUSEMOVE`, `WM_NCMOUSELEAVE`, `WM_INPUT`, buttons), the frames in which the OS
+    cursor moved, and whether the foreground window is exactly the panel's; the capture line lists the game's
+    DirectInput cooperative levels. Built, 695 checks pass. Not tested in game.
+  - To reproduce on NVIDIA with the earlier build: move the mouse over the panel in the front end, close it, start a
+    level, open it there: the mouse should then be dead too.
+- 2026-10-30 **DOOM (2016) on AMD reproduced and working (user-confirmed: the integrated AMD GPU of the user's own PC,
+  `DOOMx64vk.exe`, DualSense shown as XInput controller 0, connection not recorded, Steam Input not handling it; current
+  build, still 1.9.0 in CMake).** Panel opened in the front end and in game, used with the mouse and the pad, closed by
+  F10, Escape and the panel.
+  - Queue families (index:flags) `0:15 1:14 2:12 3:0 4:32`: 1 is compute+transfer (no graphics). Presents move from
+    family 0 to 1 a second after the renderer starts, back to 0 and again to 1 at screen changes (4 changes in 4 min,
+    no per-frame alternation): the graphics-queue path with the image handed over drew the panel each time. No
+    `not done after 100 ms`, no failed submission.
+  - **DOOM's DirectInput mouse is exclusive: cooperative level 0x5 (`DISCL_EXCLUSIVE | DISCL_FOREGROUND`)**; keyboard
+    0x16 (non-exclusive, foreground, no Windows key). Every opening logged `let go while the settings panel captures it`
+    (Unacquire 0) and every closing `acquired again` (0). With the mouse let go the window got `WM_MOUSEMOVE` (up to 81
+    in 3 s) and the OS cursor moved; ImGui followed it. So the AMD user's dead mouse was most likely the exclusive mouse
+    (no cursor motion, no mouse messages); why the NVIDIA PC's mouse worked before this build is not known.
+  - Swapchain recreated at mode changes (1024x768 -> 3840x2160 -> 1920x1080, same window), the panel followed it.
+  - Still to confirm on the AMD user's dedicated GPU.
+- 2026-10-30 **Test build for the AMD user (DOOM 2016, 6900 XT, Windows 11 26H2): `build/release/Gyro4All-v1.9.0.zip`**,
+  repackaged at 1.9.0 (version kept by the user, so its log line can't be told apart from the first 1.9.0 zip, which it
+  replaces). Contents: HEAD (with the Northlight module and the Glacier changes) plus the uncommitted DOOM work above
+  (Vulkan graphics-queue path, panel ABI 5, the exclusive DirectInput mouse let go, ImGui's mouse tracking reset,
+  the mouse diagnostics). 30 files, as the earlier zips. Same panel code as tested on the integrated AMD GPU, but this
+  binary itself not run in game. Not reproduced here on Windows 11 25H2 (NVIDIA, and the integrated AMD GPU with the
+  build the user had); the user's log decides between the cases (mouse let go and `WM_MOUSEMOVE` > 0; let go but no
+  cursor motion; messages arriving but ImGui at -FLT_MAX).
+
+## 2026-10-30 Silent Hill 2 (remake, UE 5, `SHProto-Win64-Shipping`): camera probe (user, 1.9.0, DualSense)
+- Same Bloober framework as Cronos (PC `SHPlayerControllerPlay_BP_C`, pawn `SHCharacterPlay_BP_C`, PCM
+  `SHPlayerCameraManager_BP_C`), but the Cronos offsets don't carry over: `Pawn.View` +0x2A0/+0x420 read garbage
+  (P -79.99 / P 0.01) here.
+- Probe, two runs (probe key during play):
+  - Run 1 (orbit radius 72-122): live test **`Pawn.SpringArm` raw +0x1E0,+0x348** and **`Pawn.View` raw +0x470,+0x4F8**
+    both MOVE THE CAMERA in both rounds; `Pawn.View` also turns the character. `Pawn.Camera` +0x1E0 turns the view
+    in place (no orbit); `Pawn.Animation` +0x498, PCM POV and `TransformComponent0` are outputs.
+  - Run 2 (orbit radius ~158): `Pawn.SpringArm` overwritten (output), `Pawn.View` kept but the camera didn't move,
+    `James_RotateInPlaceBase_C.PrevViewRotation` output. No candidate verified.
+- With the run-1 profile (default `ControlRotation` + `Match=Camera` SpringArm), user report: the camera turns standing
+  still, but not while walking (log: `SpringArm is rewritten by the game` again and again, `no view of this camera
+  follows the gyro`), and while aiming the gyro moves the crosshair without turning James. `ControlRotation` is mostly
+  `ignored by the camera`.
+- Next: profile with `Pawn.View` +0x470,+0x4F8 as the default view and SpringArm +0x1E0,+0x348 as a `Match=Camera`
+  view (installed in the game folder only, not in `profiles/` until verified). To check: walking, aiming, standing.
+  If walking still fails, follow the SpringArm writes back with `tools/camtrace/`.
+- **User test: works "100%"** (DualSense, 1.9.0) with the `Pawn.View` +0x470,+0x4F8 default view and the SpringArm
+  `Match=Camera` view: standing, walking and aiming (James turns with the aim). Profile added to `profiles/`, GAMES.md row.
+- Why the probe learned the wrong one: `finish_tests` (`ue_probe.cpp`) learns the first verified group in candidate
+  order (SpringArm came before View) and only one; "it also turns the character" doesn't weigh in. It added SpringArm as
+  a `Match=Camera` view next to the default `ControlRotation`, which this game ignores, so walking had no input view.
+- SpringArm view not needed: in two test sessions (one with it, one where the user removed it) Gyro4All never switched
+  away from `Pawn.View`, and the camera was confirmed on it. Shipped profile is now the single `Pawn.View` view.
+- **Probe fix (unreleased, version not bumped):** when several rotations pass the live test, the probe now picks one
+  that turns pitch too, then one that also turns the character. `ProbeGroup`/the live-test verdict carry
+  `pitch_followed` and `turns_pawn` (no more note-string matching); `probe_groups()` sorts the verified ones first by
+  that rank, so `finish_tests` (view learned during play) and `probe_suggestion` (new profile / `.suggested.ini`) pick the
+  same one. `Gyro4All-probe.log` says which was picked and why when more than one passed. On the SH2 run 1 data it
+  would have learned `Pawn.View` +0x470,+0x4F8. Built, 695 checks pass; not re-run in game.

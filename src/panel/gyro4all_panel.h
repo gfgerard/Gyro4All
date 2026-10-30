@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-#define G4A_ABI_VERSION 4u
+#define G4A_ABI_VERSION 5u
 
 struct gl_context;
 
@@ -104,6 +104,14 @@ typedef struct g4a_vk_present {
     uint32_t wait_semaphore_count;
     const uint64_t* wait_semaphores; // VkSemaphore[]: the game's, from VkPresentInfoKHR
     uint64_t signal_semaphore;       // out: VkSemaphore the present must wait on instead (0 = unchanged)
+    // ABI 5. A queue of the device's first graphics family the game got (null if none), for presents from a queue that
+    // can't draw (DOOM 2016 on AMD presents from its compute queue). The game may use it on another thread meanwhile:
+    // gyro4all.dll submits there only between lock_queue(queue, 1) and lock_queue(queue, 0), which winmm.dll also holds
+    // around the game's own submissions and waits on that queue.
+    void* draw_queue;                // VkQueue
+    uint32_t draw_queue_family;
+    uint32_t concurrent;             // the swapchain's images are VK_SHARING_MODE_CONCURRENT (no ownership transfers)
+    void (*lock_queue)(void* queue, int32_t lock);
 } g4a_vk_present;
 
 // The DLL's only export.
