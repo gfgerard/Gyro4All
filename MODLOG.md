@@ -6078,3 +6078,63 @@ or gyro to stick.
   (install folder, the Vehicle view's Activation to keep the gyro off the bike).
 - Regression check (user, 2026-10-30): Cronos: The New Dawn (UE 5.5.4, chunked object array) works as before with this
   build (flat-array search, name text +0x12 and the new profile keys don't change it).
+- 2026-10-30 **Mass Effect 3 LE: camera drift from the stick fallback (GitHub issue #2); `StickFallback=0` setting and
+  an ME3 profile.** Report: drift while the gyro is active, its direction set by where the right stick came to rest
+  (nudging the stick changes or stops it), none with the gyro off; calibration doesn't help. DualSense, wired and
+  wireless, Steam Input on and off; the game reads the DualSense as Gyro4All's XInput controller 0.
+  - 1.8.3: `ue3: engine not found (GObjects found, names found, property offset field missing)`, so the blind stick
+    fallback ran the whole session (also the cause of the stutter when turning with the stick: the gyro's pulses
+    were added to the player's own deflection). 1.9.0 (pre-release) finds the camera (`property offset field +0x94`)
+    and writes `Actor.Rotation` directly, but the fallback still started three times in 25 minutes
+    (`the game undid the gyro's camera writes 8 frames in a row`): two were over at the first probe write 1.5 s later
+    (`the game keeps the gyro's writes again`); one lasted 61 s with the pad lying still (probe writes under
+    `kMinStep` 0.11 deg give no verdict) until `no gameplay view whose angles can be read`.
+  - Cause: `StickFallback::stick` sizes the deflection for a centred stick, and `xinput.cpp`/`dinputpad.cpp`/
+    `nativepad.cpp` add it to the raw right stick, resting offset included; the game's dead zone acts on the sum.
+    Slow turns and noise go out as pulses only `kPulse` (0.04) past the model's dead zone, less than this pad's
+    resting offset (RX +1156..1413, RY +1928..2185 up, XInput units): pulses toward the offset pass amplified, the
+    others fall inside the dead zone, so zero-mean gyro noise becomes a steady turn toward the resting offset. In the
+    61 s episode the camera went right and up at about 0.08 deg/s each (yaw -18.0 to -14.1, pitch 6.6 to 10.7) while
+    `applied` didn't change; right after it, in direct mode, yaw stayed put. A port of `stick()` with the XInput add
+    and zero-mean gyro noise: no drift with a centred stick, 0.15-2 deg/s toward the offset with this one.
+  - Also seen: Unreal3 has no `limit_turn`, so a pitch-dominated push against ME3's pitch limit (the game clamps
+    `Rotation`; nothing piles up past it) reads as undone writes and can start the fallback; the 61 s episode was not
+    that (about 173 deg of yaw written in 4 s were thrown away with the camera mid-pitch; cause not known).
+    `nativepad.cpp` truncates the added byte (`uint8_t(...)`), a one-step bias toward left/up in games that read the
+    PlayStation reports themselves (not ME3).
+  - Change: `StickFallback=0` (`Gyro4All.ini` or the game's profile, read at start) keeps the fallback off: no
+    detection, no blind mode (with no camera hook the gyro then turns nothing, logged once); it also overrides
+    `StickFallbackTest`. `profiles/MassEffect3.ini` sets it. Not a fix for the fallback itself (it still adds its
+    deflection to a resting or moving stick in other games). Not built yet (on 1.8.3's source, which still misses
+    1.9.0's ME3 camera fix) and not tested in game. For a quick test, a 1.9.0 `winmm.dll` with the `jl` after
+    `cmp undone_run_, 8` in the inlined `note_write` made a `jmp` (no start from undone writes, any game; log line
+    `Gyro4All 1.9.0-nf`).
+- 2026-10-30 **Mass Effect 3 LE: `ue3tool.py` read a decoy name table** (Steam, ME3 running, read-only reads with
+  `tools/unrealEngine3/ue3tool.py`; DualSense).
+  - **Decoy name table**: `ue3tool.py find` stopped at `UProperty offset field not found` (no `Matrix.XPlane`), the
+    same step as 1.8.3's `ue3: engine not found (... property offset field missing)`. It had taken
+    `MassEffect3.exe+0x17AB058`: chunk 0 right (the same base as the real table), chunk 1 junk, where a third of the
+    names still read as identifiers, so the 3/4-of-all-samples rule (2026-10-26) let it through. The real table is
+    `+0x17B33D0` (chunk 1 on the heap; also what 1.9.0 logs). Samples per chunk: decoy 200/200 and 74/200, real 200/200
+    and 200/200. Fix in `ue3tool.py`: 3/4 identifiers in every chunk in use. `Unreal3`'s `find_names` has the same
+    rule and needs the same change (not done yet).
+  - ME3 layout (same UObject/UProperty fields as ME1/ME2): GObjects `+0x1887E40`, Offset +0x94, ElementSize +0x74,
+    ArrayDim +0x70, bool mask +0xD0, SuperField +0x60. Scene: `SFXEngine` -> `SFXLocalPlayer` -> `SFXPlayerController`
+    (< `BioPlayerController`), camera `SFXPlayerCamera` (< `SFXCameraNativeBase` < `Camera`), input `BioPlayerInput`.
+- 2026-10-30 **`Unreal3` finds ME3's name table (decoy fix)** (built with VS Build Tools 2026 18.11.2 / MSVC 14.51,
+  together with the zoom work; on 1.8.3's source, no version bump; not tested in game yet).
+  - `Unreal3::find_names`: 3/4 identifiers in every chunk in use (not over all samples), as in `ue3tool.py`: ME3's decoy
+    table at `+0x17AB058` is rejected, `+0x17B33D0` found. This is what kept 1.8.3 from ME3's camera.
+- 2026-10-30 **First in-game run with the per-chunk rule: no camera (the decoy again), fixed** (user; DualSense;
+  launched through ME3Tweaks Mod Manager, Steam Input on: `not shown: Steam Input handles the controller`). Log: `ue3:
+  engine not found (GObjects found, names found, property offset field missing)`, then with `StickFallback=0` `the gyro
+  can't turn it`: no gyro at all. `find_names` ran 3 s after start (`UObject Class` at the main menu's load), when no
+  sampled object used chunk 1 yet, so the per-chunk rule had nothing to reject the decoy with, and the table found is
+  never searched again. Fix: when the Matrix planes don't read back (`find_members`), the table is a decoy: logged
+  (`ue3: the name table at ... doesn't read Core.Object.Matrix's planes: a decoy, looking for another`), remembered and
+  skipped by the next `find_names` (the list is cleared when nothing else fits). Built, 698 checks pass; not tested in
+  game yet.
+- 2026-10-30 **Moved onto 1.9.0 (main)**: `find_names` and `ue3tool.py` keep upstream's repeated-chunk check and add the
+  per-chunk 3/4 rule (the module also keeps rejecting a table whose Matrix planes don't read back).
+- 2026-10-31 **Split from the zoom work** into its own change: `StickFallback=0`, the ME3 profile and the name table
+  search; built with MSVC 14.51, 700 checks pass.
