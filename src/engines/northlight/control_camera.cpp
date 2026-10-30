@@ -21,6 +21,7 @@
 #include "control_camera.hpp"
 
 #include "hooks.hpp"
+#include "look_queue.hpp"
 #include "log.hpp"
 #include "mem.hpp"
 
@@ -44,28 +45,6 @@ constexpr uintptr_t kLookCopy = 0x40, kLook = 0xB8, kViewQuat = 0x250;
 // A respawn replaces the camera entity, whose new component is filled in a few seconds later (MODLOG 2026-10-30); a scan
 // takes about 200 ms on its own thread and only runs while there is no component.
 constexpr ULONGLONG kRescanMs = 1000;
-constexpr double kPi = 3.14159265358979323846, kDeg = 180.0 / kPi;
-
-struct Section {
-    uintptr_t begin = 0, end = 0;  // the part initialized from the file
-};
-
-// The exe's section of this name, {0, 0} if none.
-Section exe_section(const char* name) {
-    const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
-    const IMAGE_SECTION_HEADER* s = IMAGE_FIRST_SECTION(nt);
-    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++s)
-        if (std::strncmp(reinterpret_cast<const char*>(s->Name), name, IMAGE_SIZEOF_SHORT_NAME) == 0)
-            return {base + s->VirtualAddress, base + s->VirtualAddress + std::min(s->Misc.VirtualSize, s->SizeOfRawData)};
-    return {};
-}
-
-std::vector<uint8_t> copy(const Section& s) {
-    std::vector<uint8_t> out(s.end - s.begin);
-    if (out.empty() || !mem::guarded_copy(out.data(), s.begin, out.size())) out.clear();
-    return out;
-}
 
 // MSVC RTTI: the vtable of the class with this decorated name, 0 if not found. Type descriptor in .data ({ type_info's
 // vtable, spare, name }); complete object locator in .rdata ({ 1, offset 0, cdOffset, type descriptor rva, hierarchy
@@ -92,18 +71,6 @@ uintptr_t rtti_vtable(const char* decorated) {
     }
     return 0;
 }
-
-bool read3(uintptr_t a, double v[3]) {
-    float f[3];
-    if (!mem::guarded_copy(f, a, sizeof f)) return false;
-    for (int i = 0; i < 3; ++i) {
-        if (!std::isfinite(f[i])) return false;
-        v[i] = f[i];
-    }
-    return true;
-}
-
-double length(const double v[3]) { return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
 
 // Why c isn't a live component ("" when it is).
 std::string check(uintptr_t c, uintptr_t vtable) {
@@ -141,136 +108,23 @@ using Update_t = uintptr_t (*)(void* self);
 Update_t g_update = nullptr;
 std::atomic<bool> g_hooked{false};
 std::atomic<uintptr_t> g_live{0};  // the component the hook turns (the game thread's g_component)
-// The gyro's turn as running totals (degrees) at the times of the game thread's frames, and how much of it the hook has
-// applied. The game thread's frames come about 1.8 times per update and out of step with it, so taking "what was added"
-// still gave each update one or two frames' worth (MODLOG 2026-10-30: steps p10 0.46, p90 2.09 x the median); the hook
-// takes the totals as they stand at its own time instead: the last ones plus the recent rate since then (at most 20 ms),
-// and what that guess gets wrong is evened out at the next update.
-struct Total {
-    int64_t t = 0;  // QueryPerformanceCounter
-    double pitch = 0, yaw = 0;
-};
-std::mutex g_pending_mutex;  // guards everything below
-Total g_totals[16];          // the last frames' totals, g_totals[g_last] the newest
-int g_last = 0;
-double g_applied_pitch = 0, g_applied_yaw = 0, g_max_up = 80, g_max_down = 80;
-int64_t g_freq = 0;
-std::atomic<ULONGLONG> g_last_take{0};
-std::atomic<uint32_t> g_takes{0};
-
-int64_t qpc() {
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    return now.QuadPart;
-}
-
-// The totals at time t: between two frames, interpolated; past the newest, the newest plus the rate over the last ~10 ms
-// of frames for the time since it, up to 20 ms; before the oldest kept, the oldest.
-Total totals_at(int64_t t) {
-    const Total& last = g_totals[g_last];
-    Total out = last;
-    if (!g_freq || !last.t) return out;
-    if (t < last.t) {
-        for (int i = 1; i < 16; ++i) {
-            const Total& older = g_totals[(g_last - i + 16) % 16];
-            const Total& newer = g_totals[(g_last - i + 17) % 16];
-            if (!older.t || older.t >= newer.t) return newer;
-            if (older.t <= t) {
-                const double f = double(t - older.t) / double(newer.t - older.t);
-                return {t, older.pitch + (newer.pitch - older.pitch) * f, older.yaw + (newer.yaw - older.yaw) * f};
-            }
-        }
-        return g_totals[(g_last + 1) % 16].t ? g_totals[(g_last + 1) % 16] : out;
-    }
-    const Total* from = nullptr;
-    for (int i = 1; i < 16; ++i) {
-        const Total& e = g_totals[(g_last - i + 16) % 16];
-        if (!e.t || e.t >= last.t) break;
-        from = &e;
-        if (last.t - e.t >= g_freq / 100) break;  // 10 ms
-    }
-    if (!from) return out;
-    const double span = double(last.t - from->t) / double(g_freq);
-    const double ahead = std::clamp(double(t - last.t) / double(g_freq), 0.0, 0.020);
-    out.pitch += (last.pitch - from->pitch) / span * ahead;
-    out.yaw += (last.yaw - from->yaw) / span * ahead;
-    return out;
-}
-
-// The start of the function holding code at pc, through the unwind table (chained entries followed to the primary).
-uintptr_t function_start(uintptr_t pc) {
-    DWORD64 image = 0;
-    const RUNTIME_FUNCTION* f = RtlLookupFunctionEntry(pc, &image, nullptr);
-    for (int i = 0; f && i < 8; ++i) {
-        const auto* info = reinterpret_cast<const uint8_t*>(image + f->UnwindData);
-        if (!((info[0] >> 3) & UNW_FLAG_CHAININFO)) return uintptr_t(image + f->BeginAddress);
-        const size_t codes = (info[2] + 1) & ~1u;  // CountOfCodes, rounded up to even
-        f = reinterpret_cast<const RUNTIME_FUNCTION*>(info + 4 + codes * 2);
-    }
-    return 0;
-}
+LookQueue g_queue;  // the gyro's turns, from Gyro4All's frame to the hooked update
 
 // The update's start, 0 unless the copy code is found exactly once.
 uintptr_t find_update() {
-    const Section text = exe_section(".text");
-    const std::vector<uint8_t> t = copy(text);
-    uintptr_t at = 0;
     int hits = 0;
-    for (size_t i = 0; i + sizeof kCopyCode <= t.size(); ++i) {
-        if (t[i] != kCopyCode[0]) continue;
-        bool match = true;
-        for (size_t j = 1; j < sizeof kCopyCode && match; ++j) match = j == kCopyAny || t[i + j] == kCopyCode[j];
-        if (match) at = text.begin + i, ++hits;
-    }
-    if (hits != 1) {
+    const uintptr_t at = find_unique_code(kCopyCode, sizeof kCopyCode, kCopyAny, hits);
+    if (!at) {
         log("northlight: the camera movement update's code matched %d times; the gyro writes the camera from the pump thread", hits);
         return 0;
     }
     return function_start(at);
 }
 
-// The hook's frame clock (QueryPerformanceCounter units; the hook's thread only). The update jobs start at uneven times
-// (5-10 ms apart at about 135/s) while the game moves the camera by an even step per update: the stick's steps varied
-// 2.4% from update to update, its rate per real time 10% (MODLOG 2026-10-30). Taken at the update's real time, the gyro's
-// steps followed that scheduling noise (20%). So the clock advances by the average update interval, pulled gently toward
-// real time minus kDelay, and the totals are read at it: interpolated between the gyro frames (about every 4 ms), so no
-// guess ahead either.
-int64_t g_clock = 0, g_last_call = 0;
-double g_interval = 0;
-
-int64_t frame_clock() {
-    const int64_t now = qpc(), delay = g_freq * 6 / 1000;  // kDelay: 6 ms, more than the gyro frames' spacing
-    const int64_t target = now - delay;
-    if (!g_last_call || now - g_last_call > g_freq / 10) {  // first update, or one after a pause or loading: start over
-        g_clock = target;
-        g_interval = 0;
-    } else {
-        const double dt = double(now - g_last_call);
-        g_interval = g_interval > 0 ? g_interval * 0.9 + dt * 0.1 : dt;
-        const int64_t before = g_clock;
-        g_clock += int64_t(g_interval);
-        const int64_t error = target - g_clock;
-        if (error > g_freq / 20 || error < -g_freq / 20) g_clock = target;  // a hitch (50 ms off): start over
-        else g_clock += error / 10;
-        g_clock = std::max(g_clock, before);  // never back: that would turn the camera back a little
-        g_clock = std::min(g_clock, now);
-    }
-    g_last_call = now;
-    return g_clock;
-}
-
 uintptr_t hk_update(void* self) {
     if (reinterpret_cast<uintptr_t>(self) == g_live.load(std::memory_order_relaxed)) {
         double pitch, yaw, up, down;
-        {
-            std::lock_guard lock(g_pending_mutex);
-            const Total now = g_freq ? totals_at(frame_clock()) : g_totals[g_last];
-            pitch = now.pitch - g_applied_pitch, yaw = now.yaw - g_applied_yaw, up = g_max_up, down = g_max_down;
-            g_applied_pitch = now.pitch, g_applied_yaw = now.yaw;
-        }
-        g_last_take = GetTickCount64();
-        g_takes.fetch_add(1, std::memory_order_relaxed);
-        if (pitch != 0 || yaw != 0) turn(reinterpret_cast<uintptr_t>(self), pitch, yaw, up, down);
+        if (g_queue.take(pitch, yaw, up, down)) turn(reinterpret_cast<uintptr_t>(self), pitch, yaw, up, down);
     }
     return g_update(self);
 }
@@ -375,55 +229,16 @@ bool valid(uintptr_t c) {
     return c && g_vtable && mem::rd(c, vt) && vt == g_vtable && read3(c + kLook, look) && std::fabs(length(look) - 1.0) < 0.01;
 }
 
-bool look(uintptr_t c, double& pitch, double& heading) {
-    double v[3];
-    if (!read3(c + kLook, v)) return false;
-    const double len = length(v);
-    if (len < 0.5) return false;
-    pitch = std::asin(std::clamp(v[1] / len, -1.0, 1.0)) * kDeg;
-    heading = std::atan2(v[0], v[2]) * kDeg;
-    return true;
-}
+bool look(uintptr_t c, double& pitch, double& heading) { return look_angles(c + kLook, pitch, heading); }
 
 bool turn(uintptr_t c, double pitch, double yaw, double max_up, double max_down) {
-    double v[3];
-    if (!read3(c + kLook, v)) return false;
-    const double len = length(v);
-    if (len < 0.5) return false;
-    const double p = std::clamp(std::asin(std::clamp(v[1] / len, -1.0, 1.0)) * kDeg + pitch, -max_down, max_up) / kDeg;
-    const double h = std::atan2(v[0], v[2]) + yaw / kDeg;
-    const float out[3] = {float(len * std::cos(p) * std::sin(h)), float(len * std::sin(p)), float(len * std::cos(p) * std::cos(h))};
-    return mem::guarded_store(c + kLook, out, sizeof out);
+    return turn_look(c + kLook, pitch, yaw, max_up, max_down);
 }
 
 bool hooked() { return g_hooked; }
 
-void add(double pitch, double yaw, double max_up, double max_down) {
-    const ULONGLONG now = GetTickCount64();
-    std::lock_guard lock(g_pending_mutex);
-    if (!g_freq) {
-        LARGE_INTEGER f;
-        QueryPerformanceFrequency(&f);
-        g_freq = f.QuadPart;
-    }
-    Total next = g_totals[g_last];
-    // Untaken for 100 ms (pause, loading): what is left is dropped, and the rate starts over.
-    if (now - g_last_take.load() > 100) {
-        for (Total& e : g_totals) e = {};
-        g_applied_pitch = next.pitch, g_applied_yaw = next.yaw;
-    }
-    next.t = qpc();
-    next.pitch += pitch;
-    next.yaw += yaw;
-    g_last = (g_last + 1) % 16;
-    g_totals[g_last] = next;
-    g_max_up = max_up;
-    g_max_down = max_down;
-}
+void add(double pitch, double yaw, double max_up, double max_down) { g_queue.add(pitch, yaw, max_up, max_down); }
 
-double pending_pitch() {
-    std::lock_guard lock(g_pending_mutex);
-    return g_totals[g_last].pitch - g_applied_pitch;
-}
+double pending_pitch() { return g_queue.pending_pitch(); }
 
 }  // namespace gyro4all::northlight::control

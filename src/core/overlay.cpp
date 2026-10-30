@@ -1249,6 +1249,10 @@ bool attach(gl_context* ctx) {
         hwnd = g_swapchain ? g_hwnd : nullptr;
     }
     if (!hwnd && !g_overlay.load()) {  // no DX12 swapchain: a D3D10/D3D11/D3D9 game's panel, once it has a target
+        // A D3D10/D3D11 swapchain the game doesn't present to (Alan Wake 2 makes a D3D11 one ~2 s before its D3D12 one,
+        // MODLOG 2026-10-30) gets no panel yet: one frontend per context, so it would keep it from the DX12 swapchain.
+        if (panel_host::target() && (!panel_host::target_has_presented() || panel_host::target_idle_ms() >= kAdoptIdleMs))
+            return false;
         if (!panel_host::attach(ctx)) return false;
         subclass(panel_host::window());
         return true;

@@ -5699,3 +5699,135 @@ or gyro to stick.
   01:12:15 -> 01:12:23; respawns or loads), each new one picked once its `+0x40` and view quaternion were filled in.
   Not covered yet: photo mode, the free camera and cutscenes (only the mouse cursor gates the gyro), CONTROL Resonant
   (detection and right stick only), the DX11 exe, USB.
+
+## 2026-10-30 Alan Wake 2 (Epic): no gyro frame, panel never attached
+
+- Detected as Northlight by `data_pack2\pc\*.rmdtoc` (the CONTROL Resonant rule). Log: one PeekMessageW only, on the
+  window's thread (AppWindowClass, not the DllMain thread), from `AlanWake2.exe+0x1859487`, then nothing: GyroLib never
+  started, so no panel. The pump at `+0x1859481` is one PeekMessageW followed by a blocking GetMessageW /
+  TranslateMessage / DispatchMessageW loop (`+0x18594a1`). CONTROL Resonant's exe has the same shape (PeekMessageW
+  `+0x3fe0b0`, GetMessageW `+0x3fe12f`, `+0x3fe1df`).
+- Fix: the Northlight module runs the gyro frame on its own thread, woken by each Present (`overlay::on_present`, 8 ms
+  timer without one), for every Northlight game but Control (`frame_source`, as Frostbite's). `window_class()` is
+  `AppWindowClass` for all of them now (WM_DEVICECHANGE goes to the process's window of that class).
+- Second issue, core: the game makes a D3D11 swapchain (`dxgi.dll`) ~2.4 s before its D3D12 one and never presents to
+  it. A frame running in between would attach GyroLib's static panel to it (one frontend per context), and the DX12
+  panel would never come. `overlay::attach` now waits while the D3D10/D3D11 target hasn't presented since its capture
+  (`panel_host::target_has_presented`) or has been idle 500 ms.
+- The game reads the DualSense itself through HID (Sony's pad library, report 0x01 seen) and imports XInputGetState
+  (exe import hooked). Not tested in game yet.
+- Verified in game (Epic version, DualSense, Steam Input not involved): `northlight: gyro frame thread`, the panel
+  attached on the D3D12 swapchain (`DX12 panel ready`), opens and closes; gyro as right stick (blind stick fallback),
+  on in play and off while the mouse cursor shows. The user had to rename the game's own `msvcp140.dll` and
+  `msvcp140_2.dll` (14.34.31938, shipped next to the exe) for Gyro4All to work; then `deps:` shows System32's 14.51 for
+  both (the game's VCRUNTIME140/_1 14.34 stay, not known to break GyroLib). No camera hook for Alan Wake 2 yet.
+
+## 2026-10-30 Alan Wake 2: camera recon (static, the exe)
+
+- What carries over from Control: little directly. No `GamePlayerCameraMovementComponentState` (no vtable to scan for)
+  and no match for Control's update-code pattern (`48 8D 57 40 0F 28 C4 0F C2 02 00 0F 50 C0 83 F8 0F 74 ?? 0F 11 22`).
+  `content::GamePlayerCameraMovementComponent` (and its Adhesion, AdhesionLook/MoveCurves, CrouchCurves, FireMode,
+  QuickTurn) is still there, but only as content (tuning data), reached through
+  `bigfish::component::CameraMovementContentWrapper`. What can be reused is the method and code shape:
+  `control_camera.cpp`'s turn of a look vector, the update hook with its totals, interpolation and frame clock.
+- The gameplay camera is a real ECS now (`ecs::World`, `ecs::access::DefinitionComponentEntry<T, access, ...>`, access
+  2 = read, 3 = write in these system signatures). Components are plain structs (no RTTI). The chain, from the system
+  signatures in `.rdata`:
+  - `bigfish::player::*` writes `bigfish::component::PlayerCamera` (and PlayerInput / PlayerInputFrame).
+  - `bigfish::tailcamera::update` (and `::loadingUpdate`): reads PlayerInput, PlayerMode, CameraMovementContentWrapper,
+    Equippable, CharacterController, Skeleton, AnimationOutput, Teleported, WorldTransformReadOnly; writes
+    `bigfish::component::TailCameraState` and `coregame::component::CameraView`. The over-the-shoulder camera's own
+    state, so the place to turn (as Control's `+0xB8`).
+  - `bigfish::cameramixer::initialUpdate` / `loadingInitialUpdate` and two unnamed ones: write
+    `bigfish::cameramixer::CameraMixerState`, `coregame::component::CameraLookDirection` and CameraView, reading
+    TimelineCameras, GameAimTarget and TargetSelector. These are mixer outputs (blends, timeline cameras): writes there
+    would likely be undone each frame, like Control's `+0x40` copy.
+  - Others: `coregame::component::FreeCameraState` / `FreeCameraStateOverride` / `FreeCameraTransformOverride`
+    (photo mode or free camera), `bigfish::camerapanning::component::CameraPanning`, `TimelineCameraOutput`.
+- Exe: plain sections (`.text .rdata .data .pdata _RDATA .rsrc .reloc`), no Themida, Denuvo, VMProtect or anti-cheat
+  strings: camtrace (cdb) is allowed with the user's OK.
+
+## 2026-10-30 Alan Wake 2: the gameplay camera's source (camtrace, Epic build)
+
+- `snap`/`vectors` (static data, 90 deg stick turn): 49 turned copies, view matrices around `exe+0x3c15d80` and a
+  forward row at `exe+0x3c0d248` (struct at `exe+0x3c0d220`, rotation rows at +0x1c/+0x28/+0x34). Write test: undone.
+  `bp`: written by `exe+0x24b16cb` in `exe+0x24b1630`, from a 3x3 matrix in its caller's stack frame, then distance tests
+  against an array of 0x70-byte entries (a listener or visibility query): a consumer, not followed further.
+- `find-vec` before and after a second turn: 1493 and 1167 copies, 842 at the same address in both (most in large
+  repeating arrays, e.g. stride 0x1a0 around a `0x3c8b1c1....` block). Write tests (`--yaw 20`) of the isolated ones:
+  one heap copy kept the write **and every copy read after it was 20 deg further: the source**. Others: undone, or kept
+  with no effect (stale copies). The source sits in a sparse region with entity-id-like ints (`0x22a25`): an ECS
+  component column, not an object with a vtable.
+- `bp` on it: written every frame (still camera too) by `exe+0x191a958` (`vmovups [rsi], xmm0`) in **`exe+0x191a4b0`**
+  (`.pdata` 0x191a4b0-0x191a99e), called from `exe+0x1919499` (returns to `+0x1919565`). Per frame, with rsi = the 6th
+  argument (stack `[rbp+0x6f]`), a float 5th argument (`[rbp+0x67]`, dt) and the 7th/8th pointers (`[rbp+0x77]`,
+  `[rbp+0x7f]`):
+  - reads the unit direction at `rsi+0x00` (x, y up, z), converts it to two angles (`exe+0x1f32980`);
+  - adds the stick's rates times dt: `rsi+0x90` (yaw) and `rsi+0x98` (pitch), plus a timed turn driven by `rsi+0xdc`
+    (quick turn, presumably);
+  - wraps the yaw into one turn and stores it at `rsi+0x8c`; clamps the pitch between two scaled globals and stores it
+    at `rsi+0x94`;
+  - rebuilds the direction from them (`exe+0x3a7230` twice) and stores it at `rsi+0x00`.
+  So the direction is the state the game turns from each frame: a turn written into it before this function runs is
+  kept, and the game applies its own pitch clamp. Same convention as Control's `+0xB8` look direction (y up, heading
+  atan2(x, z)).
+- Hook plan: as Control's `hk_update`, on `exe+0x191a4b0` (8 arguments: 4 integer, a float, 3 pointers), turning the
+  direction at the 6th argument before calling the original. Its bytes at +0x48 (`48 8B D9 48 8B 75 6F C5 F8 10 06 C5
+  FB 11 44 24`) occur once in the exe (a signature candidate). Still to check: whether it runs for other cameras too
+  (one hit seen), the yaw/pitch signs in game, and what gates it (cutscenes, photo mode).
+- Implemented: `aw2_camera.cpp` hooks the update (found by `48 8B D9 48 8B 75 6F C5 F8 10 06 C5 FB 11 44 24 40`, once in
+  the exe, and the function around it in the unwind table) for every Northlight game but Control, at configure. The
+  first camera state it runs on is turned; another one takes over once that one hasn't run for 100 ms (another one
+  running at the same time is logged once). The camera counts as gameplay while the update ran in the last 100 ms (and
+  no mouse cursor shows). Control's queue, frame clock, look-vector turn and code search moved to `look_queue.cpp`
+  (`LookQueue`), shared by both; Control's behaviour unchanged. Not tested in game yet.
+- Measured in game (the hook's `camera steps` line every 5 s, DualSense, gyro on L2/L1 as in Control): Alan Wake 2's
+  camera update runs on a **fixed 30 Hz step**: dt (the 5th argument) 33.3 ms at p10/p50/p90, while it renders at ~68
+  fps, so the updates come on every 2nd or 3rd rendered frame (intervals p10 ~28, p50 ~30, p90 ~44 ms). The gyro's
+  step changed 0.18-0.48 of its size from update to update, with 3-5 single steps over 1.8x both neighbours (and a few
+  skipped) per 5 s; while the stick turned too, the whole step varied less (0.11 with the gyro's part at 0.38). The user
+  saw occasional steps, not jitter. Cause: LookQueue read the gyro's totals 6 ms behind real time (Control's frames
+  were ~4 ms apart), but here Gyro4All's frames come once per Present (~15 ms), so the read was often past the newest
+  frame and extrapolated from about one frame's rate.
+- Fix: the delay is now at least 1.5x the average spacing of `add()` calls (Control's ~4 ms keeps 6 ms), and the hook
+  passes the game's dt to `take()`, which advances the clock by it (each 33.3 ms update gets 33.3 ms of gyro; it also
+  covers VRR and frame-time swings); Control, with no dt, keeps the average interval.
+- Verified in game by the user after the fix: "Steps gone" (DualSense, Epic version). Measured: in steady turns
+  (>200 deg per 5 s) 0-2 doubled steps per window (was up to 5) and skipped ones almost always 0; step change per update
+  0.12-0.35 (the hand's own motion at 30 Hz counts in it; the stick alone: 0.027). The game's update intervals also
+  changed with the scene (29/44 ms alternating, or an even 33 ms). Not covered yet: aiming, character switches, photo
+  mode and cutscenes (the update stops in menus and loading; the mouse cursor gates the rest), and Control after the
+  LookQueue change (its ~4 ms frames keep the 6 ms delay, so it should behave as before).
+- The 5 s `camera steps` measurement was removed from the hook after the test (its method is above, to add back when needed).
+- 2026-10-30 **DOOM (2016) on AMD, second log (user, build with the queue fix): cause confirmed, panel ABI 5.** Panel
+  shown and used in the startup screens (presents from queue family 0). From the screen with Campaign / Multiplayer /
+  SnapMap on, every present comes from **queue family 1** (`the game presents from queue ... (family 1) now ...: that
+  family can't draw`), AMD's compute family (DOOM's async compute), so the earlier fix skipped the panel there: F10 then
+  logged `renderer not ready` and nothing opened, in menus, the map and gameplay. The swapchain was made again twice
+  (same window and size), unrelated.
+  - Fix (to test on AMD): the panel draws on the game's graphics queue when the present's queue can't draw.
+    - winmm.dll (`src/core/panel_vk.cpp`): `vkCreateDevice` reads the queue families' flags (logged: `queue families,
+      index:flags`); the first queue the game gets from a graphics family is the device's draw queue, passed in
+      `g4a_vk_present` (ABI 5: `draw_queue`, `draw_queue_family`, `concurrent` = the swapchain's sharing mode,
+      `lock_queue`). As soon as presents come from another queue, the game's `vkQueueSubmit`, `vkQueueSubmit2(KHR)`,
+      `vkQueueBindSparse`, `vkQueueWaitIdle` on the draw queue and `vkDeviceWaitIdle` on its device take a recursive
+      lock (new hooks, import table and the interposer's exports), which gyro4all.dll also takes around its submission
+      there (Vulkan requires external synchronisation of a queue). Logged once: `presents from queue ... the panel can
+      draw on queue ...`.
+    - gyro4all.dll (`src/panel/panel_vk.cpp`): `pick_queue` (the present's queue if it can draw, else the draw queue);
+      exclusive images: three submissions per frame, release (present family -> draw family) on the present queue
+      waiting on the game's semaphores, the draw on the graphics queue (acquire, draw, release back), acquire on the
+      present queue, chained by semaphores, fence on the last; concurrent images: the draw alone on the graphics queue.
+      Layout stays PRESENT_SRC_KHR. Frames rebuilt when the present's family changes (a second command pool and two
+      semaphores per image when transferring).
+  - Known gaps: a game submitting on the draw queue at the very moment the lock is switched on (the first present from
+    the other queue) isn't covered; a game alternating present queues every frame would rebuild the frames each time.
+  - Built, 695 checks pass. Not tested in game.
+- Switch Pro Controller (shown as XInput, auto mode): works in menus and in play, but the game shows a one-time
+  "controller disconnected" alert when a save loads; dismissing it, the controller keeps working. Gyro4All never hid
+  it (no "not shown" decision; every poll answered by controller 0, ~2400 per 10 s in play). `XInputTrace=1`: only the
+  EOS overlay calls XInput besides the exe's one import (`XInputGetState` ordinal 2, called at `exe+0x20a2a69`,
+  `+0x20a2d7a` (the 4-slot scan in `exe+0x20a2cf0`), `+0x20a3a7a`); `dinput8.dll` is loaded at run time, not through an
+  import. The game's IsXInputDevice (WMI sample with the Steam `28DE:11FF` exception, `exe+0x151ad29`) reads the Pro
+  Controller as XInput. The alert is the game's `ActionPrimaryUserLoggedOutOrDisconnectedInputDevice` (data-driven,
+  trigger not found). Left as is (user's call).

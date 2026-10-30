@@ -26,6 +26,8 @@ bool is_dxgi_target(const void* swapchain);
 // The D3D10/D3D11 target (only compared or logged), and the time since it last presented or was captured.
 void* target();
 ULONGLONG target_idle_ms();
+// The D3D10/D3D11 target presented at least once since it was captured.
+bool target_has_presented();
 // panel_vk.cpp: the Vulkan swapchain the panel draws on (VkSwapchainKHR) and its window.
 void set_vk_target(uint64_t swapchain, HWND window);
 // panel_gl.cpp: the window the game swaps OpenGL buffers on (the panel draws into its back buffer).

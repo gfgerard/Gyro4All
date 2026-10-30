@@ -23,6 +23,7 @@ namespace {
 std::atomic<void*> g_target{nullptr};  // IDXGISwapChain* (D3D10/D3D11) or IDirect3DDevice9*
 std::atomic<HWND> g_window{nullptr};
 std::atomic<ULONGLONG> g_target_presented{0};  // GetTickCount64 of g_target's last Present (or its capture)
+std::atomic<bool> g_target_has_presented{false};  // g_target presented since its capture
 std::atomic<uint64_t> g_vk_target{0};  // VkSwapchainKHR (Vulkan games, panel_vk.cpp)
 std::atomic<bool> g_gl_target{false};  // the game swaps OpenGL buffers (panel_gl.cpp)
 std::atomic<uint32_t> g_color_space{G4A_COLOR_SPACE_UNKNOWN};
@@ -285,7 +286,10 @@ void* runtime_export(const char* function, void* real) {
 }
 
 void set_dxgi_target(void* swapchain, HWND window, const char* api) {
-    if (g_target.exchange(swapchain) != swapchain) g_color_space = G4A_COLOR_SPACE_UNKNOWN;
+    if (g_target.exchange(swapchain) != swapchain) {
+        g_color_space = G4A_COLOR_SPACE_UNKNOWN;
+        g_target_has_presented = false;
+    }
     g_target_presented = GetTickCount64();
     const HWND previous = g_window.exchange(window);
     log("panel: captured %s swapchain %p for window %p", api, swapchain, static_cast<void*>(window));
@@ -298,6 +302,8 @@ bool is_dxgi_target(const void* swapchain) { return swapchain && swapchain == g_
 void* target() { return g_target.load(); }
 
 ULONGLONG target_idle_ms() { return GetTickCount64() - g_target_presented.load(); }
+
+bool target_has_presented() { return g_target_has_presented.load(); }
 
 void set_vk_target(uint64_t swapchain, HWND window) {
     g_vk_target = swapchain;
@@ -392,6 +398,7 @@ void dxgi_present(void* swapchain) {
     const g4a_api* a = g_api.load();
     if (!is_dxgi_target(swapchain)) return;
     g_target_presented = GetTickCount64();
+    g_target_has_presented = true;
     if (a) a->dxgi_present(swapchain, g_color_space.load());
 }
 
