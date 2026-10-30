@@ -14,6 +14,7 @@
 |---|---|---|---|
 | 007 First Light | ✅ Works (tested on the Steam version) | Glacier 2 | Install in `Retail`, next to `007FirstLight.exe`. |
 | Alan Wake 2 | ✅ Works | Northlight | Install next to `AlanWake2.exe` in the game's main folder. Rename `msvcp140.dll` and `msvcp140_2.dll` in that folder (e.g. to `.bak`: incompatible old VC++ runtime shipped). |
+| Alan Wake Remastered | ✅ Works (tested on the Epic version) | Northlight | Install next to `Game_f_x64_EOS.exe` in the game's main folder. |
 | Battlefield 4 | ✅ Works (tested on the EA app version, Game Pass) | Frostbite 3 | Install next to `bf4.exe` in the game's main folder. Turn off the EA app's in-game overlay for the game (it freezes on start otherwise). Move the right stick once in game to start the gyro. On foot only so far (vehicles not tested). Campaign only: never play multiplayer with it (PunkBuster). |
 | Battlefield Hardline | ✅ Works (tested on the EA app version, Game Pass) | Frostbite 3 | Install next to `bfh.exe` in the game's main folder. Move the right stick once in game to start the gyro (again after cutscenes). Off in vehicles. Campaign only: never play multiplayer with it (PunkBuster). |
 | Control (2019, Ultimate Edition) | ✅ Works (tested on the Steam version, DX12) | Northlight | Install next to `Control_DX12.exe` in the game's main folder. DX11 (`Control_DX11.exe`) not tested. |
@@ -78,7 +79,6 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 |---|---|---|---|
 | Halo: The Master Chief Collection | Blam! / Saber 3D / Halo | 2014 |
 | Halo: Campaign Evolved | Unreal Engine 5 | 2026 |
-| Alan Wake Remastered | Northlight | 2021 |
 | Borderlands 3 | Unreal Engine 4 | 2019 |
 | Borderlands 4	| Unreal Engine 5 | 2025 |
 | Crysis 2| CryEngine 3 | 2011 |

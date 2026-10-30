@@ -5831,3 +5831,56 @@ or gyro to stick.
   import. The game's IsXInputDevice (WMI sample with the Steam `28DE:11FF` exception, `exe+0x151ad29`) reads the Pro
   Controller as XInput. The alert is the game's `ActionPrimaryUserLoggedOutOrDisconnectedInputDevice` (data-driven,
   trigger not found). Left as is (user's call).
+
+## 2026-10-30 Alan Wake Remastered (Epic): Northlight detection
+
+- Install folder (static look, not run): one exe, `Game_f_x64_EOS.exe` (Epic; DX12 only), no `*_rmdwin*_f.dll` modules
+  (not Control's modular layout) and no `data_pack2\` (not AW2 / Resonant's). Imports `XINPUT1_4.dll`, `d3d12.dll`,
+  `dxgi.dll`, `xaudio2_9.dll`, `EOSSDK-Win64-Shipping.dll`, `fmod.dll`, `bink2w64.dll`; the pump is **PeekMessageA**
+  (no PeekMessageW/GetMessageW names in the exe); window class `AppWindowClass`, as the other Northlight games.
+- Data: the older pack layout, `data\ep999-000.rmdp` + `data\ep999-000.bin` (index, holds the build path `d:\data`),
+  `ep999-001`, and per language `ep999-00x-<lang>.rmdp/.bin`; also `data\videos\*.bik` (`alan_wake_logo.bik`),
+  `shaders\build\pc_DXIL\`, `codebuild.txt`, `databuild.txt`. `.keystoneBuild` (Remedy build JSON, project "Deer",
+  exes `game_x64.exe`/`game_f_x64.exe`) is probably Epic-only: not used.
+- Detection (`northlight_engine.cpp`, `is_aw_remastered`): `data\ep*.rmdp` without Control's coregame modules (Control
+  has `data\ep100-*.rmdp` too, but is checked first). `configure` skips the AW2 camera hook search there and logs
+  `Alan Wake Remastered (no camera hook yet): gyro as right stick`; frame on `frame_thread` like AW2's.
+- Built, 695 checks pass. **User-verified in game: "todo bien"** (DualSense Wireless shown as XInput controller 0;
+  log: `engine: Northlight (detected)`, the frame thread running, the game polling slot 0). Steam Input state not
+  recorded (Epic build). The Steam build's exe name wasn't checked (detection doesn't use it).
+
+## 2026-10-30 Alan Wake Remastered: the gameplay camera's source (camtrace, Epic build)
+
+- Static: plain sections (`.text .rdata .data .pdata`, Bink sections), one `IsDebuggerPresent` import, no Denuvo, Themida
+  or anti-cheat strings. Unlike AW2 it keeps MSVC RTTI and classic camera classes (vtables, exe-relative):
+  `PlayerCamera` 0x769280 (BaseCamera > rend::PerspectiveView > rend::View, MessageReceiver at +0xd00), `TailCamera`
+  0x76e560, `AttachedCamera` 0x752928, `RailCamera` 0x76a360, `RevealCamera` 0x76b8a8, `PathCamera` 0x767ab8 (all
+  BasePlayerCamera), `FreeCamera` 0x75c320, `CinematicCamera` 0x756b30, `DeathCamera` 0x758270, `Character` 0x754780.
+  Statics: `exe+0xb05df0` -> the PlayerCamera, `+0xb05e00` FreeCamera, `+0xb05e08` CinematicCamera, `+0xb05e18`
+  DeathCamera. One TailCamera in play (others pooled: 8 Attached, 8 Path, 8 Rail).
+- TailCamera: `+0x08` 3x3 rotation, rows right/up/forward (y up, heading atan2(x, z)), position `+0x2c`. Write test:
+  kept ~0.3 s, then eased back to the old view over ~0.4 s (the smoothed output). `bp`: copied from a stack matrix at
+  `exe+0x2f008b` in TailCamera's update `exe+0x2ef3a0` (chained .pdata chunk `exe+0x2effa8`), which builds it from a
+  look direction: `exe+0x2f3d10` returns the global `[exe+0xb20980]`, `exe+0x13e350` reads its `+0x18`, then
+  `exe+0x15f4d0` turns it into yaw/pitch, the pitch gets `TailCamera+0x14c` added and `exe+0x14c4c0` builds the matrix
+  (plus a ~7 deg shoulder offset in yaw).
+- Dead ends on the way: `Character+0xbc` (the character's world transform, its facing) and a float yaw at
+  `0x6f1f650+0xfc`, written by `exe+0x23e1d0` from the PlayerCamera's matrix (a consumer); found by an angle scan
+  (floats that changed by the turn, in deg/rad, twice).
+- **The source: `[exe+0xb20980]`** (heap struct, no vtable): `+0x00` eye and `+0x0c` target positions, **`+0x18` the
+  unit look direction** (y up, heading atan2(x, z), same convention as Control's and AW2's), `+0x24` yaw and `+0x28`
+  pitch in radians (yaw = heading, pitch = -elevation; derived from `+0x18` by `exe+0x29b8a0`, write test undone).
+  Write test `--yaw 20` on `+0x18`: kept, and TailCamera followed (dir -63.6 -> -43.6, TailCamera -50.6).
+- Written by **`exe+0x29f1b0`** (rcx = an object holding the look struct at `+0x50`, rdx = a 3x3 rotation): dir = M x
+  dir, then `exe+0x2f5390` stores it and recomputes `+0x24`/`+0x28`. So the look direction is the state the game turns
+  each frame (as AW2's `exe+0x191a4b0`). Signature `48 8B DA 0F 29 74 24 30 48 8B F9 48 8D 54 24 20 48 8B 49 50 E8`
+  (at +0xa, once in the exe). The global is set at `exe+0x2f3b68`/`+0x2f3b82` and read by the getter `exe+0x2f3d10`.
+- Not checked yet: the pitch (write test, clamp), which cameras the look struct drives besides TailCamera (aiming,
+  Attached/Rail/Path cameras, cutscenes), and whether the user saw the 20 deg jump on screen (the numbers say yes).
+- Implemented: `awr_camera.cpp` hooks the look turn (`exe+0x29f1b0`, found by the signature above and the unwind
+  table) for Alan Wake Remastered, at configure; the hook turns the direction at `[reader+0x50]+0x18` before the game's
+  own turn (LookQueue, no dt: the average interval). The engine's AW2 and AWR paths share one `HookedCamera` table in
+  `northlight_engine.cpp`. Checked before writing it: the method runs with the stick idle too (`bp --exec`, rcx a
+  `PlayerInputReader`, vtable `exe+0x7694b8`, method at vtable+0xc8, called from `exe+0x180535` with rbx the Character).
+- **User-verified in game: "perfecto"** (DualSense Wireless shown as XInput controller 0, Epic build; log: `look turn
+  hooked at Game_f_x64_EOS.exe+0x29F1B0`, `look direction` found on entering play). Built, 695 checks pass.
