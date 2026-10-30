@@ -50,6 +50,11 @@ Obj struct_type(const Prop& p);              // UScriptStruct* of a StructProper
 // Rotators are float (UE4) or double (UE5 large world coordinates); element_size tells which.
 bool add_rotator(uintptr_t address, int32_t element_size, double pitch, double yaw);
 bool read_rotator(uintptr_t address, int32_t element_size, double& pitch, double& yaw, double& roll);
+// A float rotation matrix (FMatrix rows X forward, Y right, Z up, 16 bytes apart, as FRotationMatrix builds them), for
+// games that keep the view as a matrix (Days Gone's BendCamFollow). Turning rebuilds the rows from the new angles,
+// roll kept; pitch stays within +-89 degrees.
+bool read_matrix_rotation(uintptr_t address, double& pitch, double& yaw, double& roll);
+bool add_matrix_rotation(uintptr_t address, double pitch, double yaw);
 
 // Scene components with absolute rotation (their RelativeRotation is the world rotation) keep that rotation twice:
 // in RelativeRotation and in the non-reflected ComponentToWorld transform, which is what game code reads back
@@ -109,7 +114,7 @@ void probe_reset();
 // as_profile: the header for the game's own profile (the game had none), else for <exe>.suggested.ini.
 std::string probe_suggestion(const std::string& exe_stem, std::string& summary, bool as_profile, bool& verified);
 
-// The camera's final view rotation (PlayerCameraManager CameraCachePrivate.POV.Rotation).
+// The camera's final view rotation (PlayerCameraManager CameraCachePrivate.POV.Rotation, CameraCache in older UE 4).
 bool camera_pov(Obj camera, double& pitch, double& yaw);
 // The camera's final view location (...POV.Location), in world units.
 bool camera_pov_location(Obj camera, double location[3]);

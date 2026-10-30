@@ -349,6 +349,13 @@ Label=Exploration
 ;                        look input, see "The stick's look input (Property=RotationInput)"
 ;   Offsets=0x2A0,0x420  raw FRotator offsets instead (non-reflected C++ state); all get the delta
 ;   RotatorSize=24       24 = double (UE5), 12 = float (UE4)
+;   Matrix=1             with Offsets=: each offset is a float rotation matrix (FMatrix rows forward, right,
+;                        up) instead of an FRotator, for cameras that keep the view that way (Days Gone)
+;   OutputMatrix=0x80    with Matrix=1: the matrix the game shows, built from the one written; a written pitch
+;                        past it (the game's pitch limit) is brought back first (no dead zone past the limit)
+;   ActiveList=0x35D0    with Object=...@ClassA|ClassB: the object before @ keeps a list (TArray) of objects there,
+;                        newest first; the view is active while its first entry is of those classes, and turns it
+;                        (one camera object per mode). ActiveListSkip=ClassC|ClassD: entries to look past
 ;   PitchView=1          this view turns yaw only; its pitch goes into view 1's rotation (a camera that keeps
 ;                        yaw and pitch in two objects; the probe writes it for a camera that only followed yaw)
 ;   WorldRotation=1      with Property=RelativeRotation of a scene component that uses absolute rotation: also

@@ -376,7 +376,7 @@ void test_load_views() {
     const std::wstring path = temp_profile(L"load");
     write_file(path,
                "[Gyro4All]\r\nViews=InCar, Clamp, Bad, Dup\r\n\r\n"
-               "[View.Default]\r\nLabel=On foot\r\n\r\n"
+               "[View.Default]\r\nLabel=On foot\r\nObject=Camera.@BendPlayerCamFollow_C\r\nOffsets=0x120\r\nMatrix=1\r\n\r\n"
                "[View.InCar]\r\nId=2\r\nViewTargetClass=BP_Car_C\r\nProperty=CamRot\r\n\r\n"
                "[View.Clamp]\r\nId=3\r\nMatch=camera\r\nObject=Camera.@SBZClampCameraRotationModifier\r\nOffsets=0x68\r\n"
                "RotatorSize=24\r\n\r\n"
@@ -385,6 +385,7 @@ void test_load_views() {
     const std::vector<View> views = load_views(path);
     CHECK(views.size() == 3);
     CHECK(views[0].label == "On foot");
+    CHECK(views[0].matrix && views[0].offsets.size() == 1 && views[0].offsets[0] == 0x120);
     const View* car = by_id(views, 2);
     CHECK(car && car->view_target_class == "BP_Car_C" && !car->match_camera && car->property == "CamRot");
     const View* clamp = by_id(views, 3);
@@ -393,6 +394,25 @@ void test_load_views() {
     CHECK(clamp && clamp->offsets.size() == 1 && clamp->offsets[0] == 0x68 && clamp->rotator_size == 24);
     CHECK(clamp && clamp->label == "Clamp" && clamp->parent == 1);
     CHECK(has_views(path));
+}
+
+void test_load_active_list_views() {
+    std::puts("profile: ActiveList views (one camera object per mode) load without ViewTargetClass or Match");
+    const std::wstring path = temp_profile(L"active_list");
+    write_file(path,
+               "[Gyro4All]\r\nViews=Vehicle, Aim\r\n\r\n"
+               "[View.Default]\r\nObject=Camera.@BendPlayerCamFollow_C|BendCamMelee\r\nOffsets=0x120\r\nMatrix=1\r\n"
+               "OutputMatrix=0x80\r\nActiveList=0x35D0\r\nActiveListSkip=BendCamTransition\r\n\r\n"
+               "[View.Vehicle]\r\nId=2\r\nObject=Camera.@BendVehicleCamFollow_C\r\nOffsets=0x120\r\nMatrix=1\r\n"
+               "ActiveList=0x35D0\r\n\r\n"
+               "[View.Aim]\r\nId=3\r\nObject=Camera.@BendCamManualAim\r\nOffsets=0x120\r\nMatrix=1\r\n");
+    const std::vector<View> views = load_views(path);
+    CHECK(views.size() == 2);  // Aim has no ActiveList, ViewTargetClass or Match: skipped
+    CHECK(views[0].active_list == 0x35D0 && views[0].output_matrix == 0x80 && views[0].active_skip.size() == 1 &&
+          views[0].active_skip[0] == "BendCamTransition");
+    CHECK(views[0].object.size() == 2 && views[0].object[1] == "@BendPlayerCamFollow_C|BendCamMelee");
+    const View* vehicle = by_id(views, 2);
+    CHECK(vehicle && vehicle->active_list == 0x35D0 && vehicle->output_matrix < 0 && vehicle->parent == 1);
 }
 
 LearnedView clamp_view() {
@@ -1294,6 +1314,7 @@ int main() {
     test_match_pitch_carry_limit();
     test_load_missing();
     test_load_views();
+    test_load_active_list_views();
     test_update_rotation_shape();
     test_add_view_new_file();
     test_add_view_yaw_only();

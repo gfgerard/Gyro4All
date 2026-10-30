@@ -143,8 +143,42 @@ View* find_view(uint32_t id) {
     return nullptr;
 }
 
-// The view for the camera's view target: a ViewTargetClass view (not Match=Camera), else the default one.
+// ActiveList= views (ue_profile.hpp): the list's first entry past ActiveListSkip= classes, if it is of one of the view's
+// classes (the path's last step, @A|B|C), else 0.
+ue::Obj listed_object(const View& v, const Scene& s) {
+    if (v.object.size() < 2 || v.object.back().size() < 2 || v.object.back().front() != '@') return 0;
+    const ue::Obj outer = resolve_path(std::vector<std::string>(v.object.begin(), v.object.end() - 1), s);
+    uintptr_t data = 0;
+    int32_t n = 0;
+    if (!outer || !ue::read_ptr(outer + v.active_list, data) || !ue::read_i32(outer + v.active_list + 8, n) || n <= 0 ||
+        n > 64)
+        return 0;
+    for (int32_t i = 0; i < n; ++i) {
+        uintptr_t o = 0;
+        if (!ue::read_ptr(data + i * 8ull, o) || !o) return 0;
+        if (std::any_of(v.active_skip.begin(), v.active_skip.end(), [&](const std::string& c) { return ue::is_a(o, c.c_str()); }))
+            continue;
+        for (const std::string& c : split(v.object.back().substr(1), '|'))
+            if (ue::is_a(o, c.c_str())) return o;
+        return 0;
+    }
+    return 0;
+}
+
+// The first ActiveList view whose classes have the list's active entry.
+View* listed_view(const Scene& s) {
+    for (View& v : g_views) {
+        if (v.active_list < 0) continue;
+        v.active_object = listed_object(v, s);
+        if (v.active_object) return &v;
+    }
+    return nullptr;
+}
+
+// The view for the camera's view target: the ActiveList view of the active camera, a ViewTargetClass view (not
+// Match=Camera), else the default one (none when the default is an ActiveList view and the active camera isn't its).
 View* base_view(const Scene& s) {
+    if (View* v = listed_view(s)) return v;
     if (s.view_target) {
         for (View& v : g_views)
             if (!v.match_camera && !v.view_target_class.empty() && ue::is_a(s.view_target, v.view_target_class.c_str()))
@@ -153,7 +187,7 @@ View* base_view(const Scene& s) {
     // Main menus usually possess a placeholder DefaultPawn (SpectatorPawn derives from it), or a game's own menu pawn
     // with a fixed camera (Ghostrunner 2, Valor Mortis: BP_MenuPawn_C): no gameplay camera.
     if (!s.pawn || ue::is_a(s.pawn, "DefaultPawn") || ue::is_a_like(s.pawn, "MenuPawn")) return nullptr;
-    return &g_views.front();
+    return g_views.front().active_list >= 0 ? nullptr : &g_views.front();
 }
 
 // The view the gyro turns: the base view, or the Match=Camera view for the same view target that the camera follows
@@ -215,6 +249,7 @@ ue::Obj resolve_path(const std::vector<std::string>& path, const Scene& s) {
 }
 
 ue::Obj view_object(const View& view, const Scene& s) {
+    if (view.active_list >= 0) return view.active_object;
     if (view.object.empty()) return view.id == 1 ? s.pc : s.view_target;
     return resolve_path(view.object, s);
 }
@@ -234,8 +269,18 @@ bool apply(View& view, const Scene& s, double pitch, double yaw) {
         pitch = 0;
     }
     if (!view.offsets.empty()) {
+        // OutputMatrix: the game limits the pitch in the output matrix without clamping the source one (Days Gone:
+        // the follow camera holds its view near 21 degrees down while the source goes on), so past that limit the
+        // gyro would wind the source up, a dead zone on the way back. The source is first brought back to the output.
+        double sp = 0, sy = 0, sr = 0, op = 0, oy = 0, orr = 0;
+        if (view.matrix && view.output_matrix >= 0 &&
+            ue::read_matrix_rotation(target + view.offsets.front(), sp, sy, sr) &&
+            ue::read_matrix_rotation(target + view.output_matrix, op, oy, orr) && std::abs(sp) > std::abs(op) + 1)
+            pitch += op - sp;
         bool ok = true;
-        for (int32_t off : view.offsets) ok &= ue::add_rotator(target + off, view.rotator_size, pitch, yaw);
+        for (int32_t off : view.offsets)
+            ok &= view.matrix ? ue::add_matrix_rotation(target + off, pitch, yaw)
+                              : ue::add_rotator(target + off, view.rotator_size, pitch, yaw);
         if (!ok) return false;
     } else if (update_rotation::is_input_property(view.property)) {
         // The stick's look input: queued for the controller's UpdateRotation (ue_update_rotation.hpp).
@@ -276,7 +321,9 @@ bool read_view_rotation(const View& v, const Scene& s, double& pitch, double& ya
     const ue::Obj target = view_object(v, s);
     if (!target) return false;
     double roll = 0;
-    if (!v.offsets.empty()) return ue::read_rotator(target + v.offsets.front(), v.rotator_size, pitch, yaw, roll);
+    if (!v.offsets.empty())
+        return v.matrix ? ue::read_matrix_rotation(target + v.offsets.front(), pitch, yaw, roll)
+                        : ue::read_rotator(target + v.offsets.front(), v.rotator_size, pitch, yaw, roll);
     if (update_rotation::is_input_property(v.property)) {
         // RotationInput only holds this frame's input: the view is ControlRotation, plus the turn not taken yet.
         const ue::Prop c = ue::prop_of(target, "ControlRotation");
@@ -530,7 +577,8 @@ void status_details(const Scene& s, const View* view) {
         std::string text;
         for (int32_t off : view->offsets) {
             double p = 0, y = 0, r = 0;
-            if (o && ue::read_rotator(o + off, view->rotator_size, p, y, r))
+            if (o && (view->matrix ? ue::read_matrix_rotation(o + off, p, y, r)
+                                   : ue::read_rotator(o + off, view->rotator_size, p, y, r)))
                 text += std::format(" +0x{:X}=(P {:.2f} Y {:.2f})", off, p, y);
         }
         log("status: view object %s%s", o ? ue::name_of(o).c_str() : "(not found)", text.c_str());

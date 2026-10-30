@@ -33,6 +33,11 @@ void load_view_extras(View& v, const std::wstring& path, const wchar_t* section)
         v.offsets.push_back(int32_t(std::strtol(o.c_str(), nullptr, 0)));
     v.rotator_size = GetPrivateProfileIntW(section, L"RotatorSize", 24, path.c_str());
     v.world_rotation = GetPrivateProfileIntW(section, L"WorldRotation", 0, path.c_str()) != 0;
+    v.matrix = GetPrivateProfileIntW(section, L"Matrix", 0, path.c_str()) != 0;
+    const std::string active = ini(path, section, L"ActiveList"), output = ini(path, section, L"OutputMatrix");
+    if (!active.empty()) v.active_list = int32_t(std::strtol(active.c_str(), nullptr, 0));
+    v.active_skip = split(ini(path, section, L"ActiveListSkip"), '|');
+    if (!output.empty()) v.output_matrix = int32_t(std::strtol(output.c_str(), nullptr, 0));
     v.pitch_view = GetPrivateProfileIntW(section, L"PitchView", 0, path.c_str());
     v.watch = split(ini(path, section, L"Watch"), ',');
     v.watched_values.assign(v.watch.size(), std::string{});
@@ -95,10 +100,10 @@ std::vector<View> load_views(const std::wstring& path) {
         v.parent = GetPrivateProfileIntW(section.c_str(), L"Parent", 1, path.c_str());
         load_view_extras(v, path, section.c_str());
         const bool duplicate_id = std::any_of(views.begin(), views.end(), [&](const View& o) { return o.id == v.id; });
-        if (v.id <= 1 || duplicate_id || (v.view_target_class.empty() && !v.match_camera) ||
+        if (v.id <= 1 || duplicate_id || (v.view_target_class.empty() && !v.match_camera && v.active_list < 0) ||
             (v.property.empty() && v.offsets.empty())) {
-            log("profile: view %s ignored (needs a unique Id > 1, ViewTargetClass or Match=Camera, and Property or "
-                "Offsets)", v.key.c_str());
+            log("profile: view %s ignored (needs a unique Id > 1, ViewTargetClass, Match=Camera or ActiveList, and "
+                "Property or Offsets)", v.key.c_str());
             continue;
         }
         views.push_back(std::move(v));
@@ -108,9 +113,14 @@ std::vector<View> load_views(const std::wstring& path) {
         std::string where;
         for (int32_t off : v.offsets) where += (where.empty() ? "raw +0x" : ",0x") + std::format("{:X}", off);
         if (where.empty()) where = v.property.empty() ? "ControlRotation" : v.property;
+        else if (v.matrix) where += " (rotation matrices)";
+        if (v.output_matrix >= 0) where += std::format(" (output +0x{:X})", v.output_matrix);
+        if (v.active_list >= 0) where += std::format(" (active while first in the list at +0x{:X})", v.active_list);
         if (v.world_rotation) where += v.offsets.empty() ? " (WorldRotation)" : " (WorldRotation ignored: needs Property=)";
         if (v.pitch_view) where += std::format(" (yaw only, pitch in view {})", v.pitch_view);
-        const std::string target = v.view_target_class.empty() ? (v.match_camera ? "(any)" : "(pawn)") : v.view_target_class;
+        const std::string target = !v.view_target_class.empty() ? v.view_target_class
+                                   : v.match_camera || v.active_list >= 0 ? "(any)"
+                                                                            : "(pawn)";
         const std::string object = join(v.object, '.');
         log("  view %u '%s' target=%s%s object=%s rotation=%s parent=%u", v.id, v.label.c_str(), target.c_str(),
             v.match_camera ? " match=camera" : "", object.empty() ? "(default)" : object.c_str(), where.c_str(), v.parent);

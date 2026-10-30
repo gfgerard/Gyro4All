@@ -39,6 +39,8 @@ constexpr int kObjFlags = 0x08, kObjIndex = 0x0C, kObjClass = 0x10, kObjName = 0
 constexpr uint32_t RF_ClassDefaultObject = 0x10, RF_ArchetypeObject = 0x20;
 
 uintptr_t g_obj_array = 0;   // TUObjectArray: Objects**, PreAllocated*, Max, Num, MaxChunks, NumChunks
+// UE <= 4.19 (FFixedUObjectArray): one flat array, Objects*, MaxElements, NumElements (Days Gone, UE 4.11).
+bool g_obj_flat = false;
 int g_item_stride = 0;       // sizeof(FUObjectItem)
 int g_item_object = 0;       // FUObjectItem::Object: +0, or +8 in UE 5.7 (a 64-bit flags/refcount field first)
 uintptr_t g_name_blocks = 0; // FNamePool Blocks[]
@@ -148,10 +150,14 @@ std::string fname(uintptr_t address) {  // FName at address: ComparisonIndex, Nu
 
 int32_t object_count() {
     int32_t n = 0;
-    return rd(g_obj_array + 0x14, n) ? n : 0;
+    return rd(g_obj_array + (g_obj_flat ? 0x0C : 0x14), n) ? n : 0;
 }
 
 Obj object_at(int32_t i) {
+    if (g_obj_flat) {
+        const uintptr_t items = rdp(g_obj_array);
+        return items ? rdp(items + uintptr_t(i) * g_item_stride + g_item_object) : 0;
+    }
     const uintptr_t chunks = rdp(g_obj_array);
     if (!chunks) return 0;
     const uintptr_t chunk = rdp(chunks + (i / 65536) * 8ull);
@@ -159,27 +165,17 @@ Obj object_at(int32_t i) {
     return rdp(chunk + uintptr_t(i % 65536) * g_item_stride + g_item_object);
 }
 
-// FChunkedFixedUObjectArray at a: Objects**, PreAllocatedObjects*, MaxElements, NumElements, MaxChunks,
-// NumChunks, with items 1..16 of chunk 0 being live UObjects whose InternalIndex matches. Returns the item
-// stride (sizeof(FUObjectItem)), 0 if the header doesn't match, -1 if the header matches but the items don't.
-// object_out: where the Object pointer is in an item (+0; +8 in UE 5.7, e.g. Valor Mortis, whose item starts with
-// a 64-bit flags/refcount field).
-int object_array_stride(uintptr_t a, uintptr_t* chunk0_out = nullptr, int* object_out = nullptr) {
-    int32_t max = 0, num = 0, max_chunks = 0, num_chunks = 0;
-    if (!rd(a + 0x10, max) || !rd(a + 0x14, num) || !rd(a + 0x18, max_chunks) || !rd(a + 0x1C, num_chunks)) return 0;
-    if (num <= 1000 || num > max || max < 0x10000 || max > 0x10000000) return 0;
-    if (max_chunks != (max + 65535) / 65536) return 0;
-    if (num_chunks < (num + 65535) / 65536 || num_chunks > max_chunks) return 0;
-    const uintptr_t chunks = rdp(a);
-    const uintptr_t chunk0 = chunks ? rdp(chunks) : 0;
-    if (chunk0_out) *chunk0_out = chunk0;
-    if (!chunk0) return -1;
+// FUObjectItems at `items`: items 1..16 are live UObjects whose InternalIndex matches. Returns the item stride
+// (sizeof(FUObjectItem)), or -1. object_out: where the Object pointer is in an item (+0; +8 in UE 5.7, e.g. Valor
+// Mortis, whose item starts with a 64-bit flags/refcount field).
+int item_stride(uintptr_t items, int* object_out) {
+    if (!items) return -1;
     for (int object : {0, 8}) {
         for (int stride : {0x18, 0x10, 0x20, 0x28, 0x30}) {
             if (object + 8 > stride) continue;
             bool ok = true;
             for (int i = 1; i <= 16 && ok; ++i) {
-                const uintptr_t o = rdp(chunk0 + uintptr_t(i) * stride + object);
+                const uintptr_t o = rdp(items + uintptr_t(i) * stride + object);
                 int32_t idx = -1;
                 uintptr_t vtable = 0;
                 ok = o && rd(o + kObjIndex, idx) && idx == i && rd(o, vtable) && in_module(vtable);
@@ -190,6 +186,29 @@ int object_array_stride(uintptr_t a, uintptr_t* chunk0_out = nullptr, int* objec
         }
     }
     return -1;
+}
+
+// FChunkedFixedUObjectArray at a: Objects**, PreAllocatedObjects*, MaxElements, NumElements, MaxChunks,
+// NumChunks, with valid items in chunk 0. Returns the item stride, 0 if the header doesn't match, -1 if the header
+// matches but the items don't.
+int object_array_stride(uintptr_t a, uintptr_t* chunk0_out = nullptr, int* object_out = nullptr) {
+    int32_t max = 0, num = 0, max_chunks = 0, num_chunks = 0;
+    if (!rd(a + 0x10, max) || !rd(a + 0x14, num) || !rd(a + 0x18, max_chunks) || !rd(a + 0x1C, num_chunks)) return 0;
+    if (num <= 1000 || num > max || max < 0x10000 || max > 0x10000000) return 0;
+    if (max_chunks != (max + 65535) / 65536) return 0;
+    if (num_chunks < (num + 65535) / 65536 || num_chunks > max_chunks) return 0;
+    const uintptr_t chunks = rdp(a);
+    const uintptr_t chunk0 = chunks ? rdp(chunks) : 0;
+    if (chunk0_out) *chunk0_out = chunk0;
+    return item_stride(chunk0, object_out);
+}
+
+// FFixedUObjectArray (UE <= 4.19) at a: Objects*, MaxElements, NumElements. Item stride, or <= 0.
+int flat_object_array_stride(uintptr_t a, int* object_out = nullptr) {
+    int32_t max = 0, num = 0;
+    if (!rd(a + 0x08, max) || !rd(a + 0x0C, num)) return 0;
+    if (num <= 1000 || num > max || max < 0x10000 || max > 0x10000000) return 0;
+    return item_stride(rdp(a), object_out);
 }
 
 // diagnose: log every candidate that passes the header checks and why its items were rejected.
@@ -203,6 +222,13 @@ bool find_object_array(const std::vector<Range>& sections, bool diagnose = false
             if (stride > 0) {
                 g_obj_array = a;
                 g_item_stride = stride;
+                g_item_object = object;
+                return true;
+            }
+            if (const int flat = flat_object_array_stride(a, &object); flat > 0) {
+                g_obj_array = a;
+                g_obj_flat = true;
+                g_item_stride = flat;
                 g_item_object = object;
                 return true;
             }
@@ -451,7 +477,7 @@ bool find_name_pool(const std::vector<Range>& sections) {
 }
 
 // TNameEntryArray (UE <= 4.22) at `chunks`: names 0 and 1 are None and ByteProperty, NumElements/NumChunks follow
-// the 128 chunk pointers. Sets the characters' offset in an entry.
+// the 128 chunk pointers. Sets the characters' offset in an entry (+0x12 in Days Gone: 2 more bytes after HashNext).
 bool legacy_names_at(uintptr_t chunks) {
     const uintptr_t chunk0 = rdp(chunks);
     if (!chunk0) return false;
@@ -460,7 +486,7 @@ bool legacy_names_at(uintptr_t chunks) {
     int32_t num = 0, num_chunks = 0;
     if (!rd(chunks + 128 * 8, num) || !rd(chunks + 128 * 8 + 4, num_chunks)) return false;
     if (num <= 1000 || num > 128 * 16384 || num_chunks < (num + 16383) / 16384 || num_chunks > 128) return false;
-    for (int off : {0x10, 0x0C, 0x08, 0x14, 0x18}) {
+    for (int off : {0x10, 0x0C, 0x08, 0x14, 0x18, 0x12}) {
         char a[5] = {}, b[13] = {};
         if (!guarded_copy(a, e0 + off, sizeof(a)) || !guarded_copy(b, e1 + off, sizeof(b))) continue;
         if (std::memcmp(a, "None", 5) != 0 || std::memcmp(b, "ByteProperty", 13) != 0) continue;
@@ -678,8 +704,9 @@ bool init() {
             if (!found && diagnose) log("ue: GUObjectArray not found yet (retrying every 10 s)");
         }
         if (found)
-            log("ue: GUObjectArray.ObjObjects at %s (item stride 0x%X, object at +0x%X, %d objects)",
-                module_offset(g_obj_array).c_str(), g_item_stride, g_item_object, object_count());
+            log("ue: GUObjectArray.ObjObjects at %s (%s, item stride 0x%X, object at +0x%X, %d objects)",
+                module_offset(g_obj_array).c_str(), g_obj_flat ? "flat, UE 4.19 or older" : "chunked", g_item_stride,
+                g_item_object, object_count());
     }
     if (!g_name_blocks && find_name_pool(sections))
         log("ue: FNamePool.Blocks at %s (header len %s)", module_offset(g_name_blocks).c_str(),
@@ -844,6 +871,33 @@ bool add_rotator(uintptr_t address, int32_t element_size, double pitch, double y
         return guarded_store(address, v, sizeof(v));
     }
     return false;
+}
+
+constexpr double kRadToDeg = 57.29577951308232;
+
+bool read_matrix_rotation(uintptr_t address, double& pitch, double& yaw, double& roll) {
+    float m[12];  // rows X, Y, Z (each x, y, z, w)
+    if (!guarded_copy(m, address, sizeof(m))) return false;
+    if (!std::isfinite(m[0]) || !std::isfinite(m[1]) || !std::isfinite(m[2]) || std::abs(m[2]) > 1.001f) return false;
+    pitch = std::asin(std::clamp(double(m[2]), -1.0, 1.0)) * kRadToDeg;
+    yaw = std::atan2(double(m[1]), double(m[0])) * kRadToDeg;
+    roll = std::atan2(-double(m[6]), double(m[10])) * kRadToDeg;
+    return true;
+}
+
+bool add_matrix_rotation(uintptr_t address, double pitch, double yaw) {
+    double p = 0, y = 0, r = 0;
+    if (!read_matrix_rotation(address, p, y, r)) return false;
+    p = std::clamp(p + pitch, -89.0, 89.0) / kRadToDeg, y = (y + yaw) / kRadToDeg, r /= kRadToDeg;
+    const double sp = std::sin(p), cp = std::cos(p), sy = std::sin(y), cy = std::cos(y), sr = std::sin(r), cr = std::cos(r);
+    const float rows[3][3] = {
+        {float(cp * cy), float(cp * sy), float(sp)},
+        {float(sr * sp * cy - cr * sy), float(sr * sp * sy + cr * cy), float(-sr * cp)},
+        {float(-(cr * sp * cy + sr * sy)), float(cy * sr - cr * sp * sy), float(cr * cp)},
+    };
+    for (int i = 0; i < 3; ++i)
+        if (!guarded_store(address + i * 16, rows[i], sizeof(rows[i]))) return false;
+    return true;
 }
 
 void dump_props(Obj o, const char* stop_at_class) {
@@ -1347,10 +1401,13 @@ int probe_diff(bool verbose) {
         probe_log("probe: diff done (%d rotators, %d numbers changed)", rotators, scalars);
     }
 
-    // The camera's final view rotation, before and now.
+    // The camera's final view rotation, before and now (CameraCache in older UE 4, e.g. Days Gone's 4.11, as in
+    // camera_pov).
     const Leaf* pov = nullptr;
     for (const Leaf& l : g_leaves)
-        if (l.kind >= 2 && l.label.size() > 28 && l.label.ends_with("CameraCachePrivate.POV.Rotation")) pov = &l;
+        if (l.kind >= 2 && l.label.size() > 28 &&
+            (l.label.ends_with("CameraCachePrivate.POV.Rotation") || l.label.ends_with(".CameraCache.POV.Rotation")))
+            pov = &l;
     double now[3] = {};
     if (!pov || !read_leaf(*pov, now)) {
         log("probe: diff of snapshot #%d (%d rotators, %d numbers changed; no camera POV, raw diff skipped) -> "

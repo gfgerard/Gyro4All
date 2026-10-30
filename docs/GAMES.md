@@ -22,6 +22,7 @@
 | Crysis (2007) | ✅ Works (tested on the EA app version, 1.2.1, 64-bit) | CryEngine 2 | Install in `Bin64`, next to `Crysis64.exe`. 64-bit only. |
 | Crysis Remastered | ✅ Works | CryEngine | Install in `Bin64`, next to `CrysisRemastered.exe`. Rename `MSVCP140.dll`.|
 | Crysis 2 Remastered | ✅ Works | CryEngine | Install in `Bin64`, next to `Crysis2Remastered.exe`. Rename `MSVCP140.dll`.|
+| Days Gone | ✅ Works (tested on the Steam version) | Unreal Engine 4 | Install in `BendGame\Binaries\Win64`, next to `DaysGone.exe`. Aim has its own view in settings. Bike has its own `Vehicle` view in the `F10` panel: set its Activation to Off to keep the gyro off on the bike. |
 | Dead Island 2 | ✅ Works (tested on the Epic version) | Unreal Engine 4 | Install in `DeadIsland\Binaries\Win64`. Single-player only: never play online co-op with it. |
 | Dead Space (2023) | ✅ Works (tested on the Steam version) | Frostbite | Install next to `Dead Space.exe` in the game's main folder.|
 | Dishonored (Definitive Edition) | ✅ Works (tested on the Epic version) | Unreal Engine 3 | Install in `Binaries\Win64`, next to `Dishonored.exe`. |

@@ -5966,3 +5966,115 @@ or gyro to stick.
   that rank, so `finish_tests` (view learned during play) and `probe_suggestion` (new profile / `.suggested.ini`) pick the
   same one. `Gyro4All-probe.log` says which was picked and why when more than one passed. On the SH2 run 1 data it
   would have learned `Pawn.View` +0x470,+0x4F8. Built, 695 checks pass; not re-run in game.
+
+## 2026-10-30 Days Gone (Steam, UE 4.11 by Bend, `DaysGone.exe` in `BendGame\Binaries\Win64`): object array not found
+- 1.9.0 log: `engine: Unreal (detected)`, then `GUObjectArray not found yet`, 0 XOR-encoded loads, heap scans find
+  nothing, and after 60 s the "engine's data can't be read" notice. Monolithic exe with a SteamStub `.bind` section.
+- Read-only memory read of the running game (ReadProcessMemory, no debugger):
+  - **GUObjectArray.ObjObjects is the pre-4.20 flat `FFixedUObjectArray`**: `Objects*` (FUObjectItem*), `MaxElements`
+    2097152, `NumElements` ~470k, in `.data` (exe +0x4C122A0 this build). FUObjectItem stride **0x10**, Object at +0.
+    Only the chunked layout (4.20+) was checked, hence nothing found.
+  - **GNames**: global pointer (exe +0x4AA22F8) to a heap `TNameEntryArray` (128 chunks of 16384, NumElements ~240k).
+    FNameEntry: Index +0, HashNext +0x08, 2 extra bytes, **characters at +0x12** (stock is +0x10).
+  - UObject stock (Index +0x0C, Class +0x10, Name +0x18); UStruct SuperStruct +0x30, Children +0x38, UField::Next +0x28:
+    `Controller` children are Pawn, Character, PlayerState, TransformComponent, ControlRotation...
+- Fix (unreleased, version not bumped): `ue.cpp` also accepts a flat object array (`flat_object_array_stride`,
+  `g_obj_flat`; item validation shared with the chunked one in `item_stride`), and name text at +0x12. Built, 695 checks
+  pass; not yet run in game.
+- In game with the fix (user, DualSense, Steam Input off: the game's Steam Input service reports no controller):
+  `ObjObjects at DaysGone.exe+0x4C122A0 (flat ...)`, GNames text +0x12, `layout (UProperty objects) SuperStruct=0x30
+  ChildProperties=0x38 Field.Class=0x10 Field.Next=0x28 Field.Name=0x18 ElementSize=0x34 Offset_Internal=0x50
+  sizeof(Property)=0x78`. Scene: PC `BendDefaultPlayerController_C`, pawn `BendDefaultPlayerPawn_C`, PCM
+  `BendCamManagerBP_C`. **`ControlRotation` is ignored by the camera** (gyro turned it 216 degrees, camera 0), so
+  AutoProbe started.
+- Probe: eight automatic captures (the turns measured through the POV) all "could not be compared": UE 4.11's PCM
+  property is `CameraCache`, not `CameraCachePrivate`. `camera_pov()` tried both, but `probe_diff()` only looked for
+  the label `...CameraCachePrivate.POV.Rotation`, so it found no POV and skipped the raw diff. Fixed (also accepts
+  `.CameraCache.POV.Rotation`); built, 695 checks pass; probe not yet re-run.
+- Probe re-run with the fix (user, 18:36): captures compared now (POV from `Camera.CameraCache.POV.Rotation`, orbit radius
+  ~250, third person). Candidates every capture: `PC.ControlRotation` (+ its TransformComponent0, PC raw +0x1FE4) only in
+  yaw-only turns, never when pitch changed; `Camera.LastFrameCameraCache/ViewTarget.POV.Rotation`, camera
+  TransformComponent0. Live test: all **overwritten (outputs)** or kept without the camera moving. No profile.
+- Read-only reflection walk (running game): Bend's camera is `BendCamManagerBP_C` (native `BendCamManager`, a
+  `PlayerCameraManager`): `m_camInstances` (+0x3600, TArray) holds one instance per mode, outered to the manager:
+  `BendPlayerCamFollow_C_0` (exploration), `...Combat_C`, `...Sprint_C`, `...ManualAim_C`, `...Crouch_C`, vehicle ones
+  (`BendVehicleCamFollow_C`...), ~37 in all; `m_*CamClass` (+0x3610..+0x3758) their classes. `BendCamFollow` reflects
+  only tuning (`m_fGoalYaw` +0x2E4, `m_fYawInputSpeed` +0x2FC, `m_fGoalPitch` +0x314, `m_fPitchInputSpeed` +0x328, pitch
+  and yaw limits, auto-yaw/pitch lerps); `BendCamManager.m_OptionsInput{Min,Default,Max}Scale` +0x3AF0.
+- `BendPlayerCamFollow_C_0` native fields (class size 0x380; reflected ones from +0x298): **+0x80 and +0x120 are FMatrix
+  (forward, right, up, camera location = POV location)**, +0x160 a yaw-only frame with its origin (+0x190) ~250 units
+  from the camera (the orbit pivot), +0xC0 ~257.8 (distance?), +0x200 two small floats (a per-frame input delta?). No
+  float yaw angle anywhere in the instance: the view is kept as matrices/direction vectors, which the probe's raw diff
+  (angles only) can't match. Not yet write-tested.
+- Write tests (user saved first; saves backed up with `um backup create`, name `daysgone-saves`; ReadProcessMemory/
+  WriteProcessMemory, no debugger), the follow camera standing still:
+  - **`BendPlayerCamFollow_C_0` +0x120 (FMatrix: forward +0x120, right +0x130, up +0x140), forward and right turned
+    20 degrees about Z: KEPT, and the POV yaw followed at once (77.54 -> 97.54) and stayed.** The view's source.
+  - +0x160 (yaw-only frame) turned 20 degrees: rewritten within a frame (output). +0x80 (the matrix after +0x120's turn
+    had landed): no change seen.
+  - Pitch: forward and up of +0x120 turned 10 degrees about the right axis: the matrix kept it, but POV pitch stayed
+    0.73 for the 2 s watched; read again later, POV pitch was 10.73 (exactly the write). So pitch comes from the same
+    matrix but isn't applied every frame (maybe only on look input?); to recheck.
+  - +0x230 = -(pitch in radians) (-0.01282 at 0.73 degrees, -0.18735 at 10.73): -0.17 added, undone at once (output).
+  - Pending: what the user saw (orbit around Deacon or turn on the spot), the other modes (Combat, Sprint, aim,
+    vehicle cameras: each `m_camInstances` entry has its own state), and a Gyro4All view type that rotates a matrix
+    basis (profiles only write rotators today).
+- Repeat (game in front the whole time, no stick input): +0x120 turned 45 degrees about Z: POV yaw 97.54 -> 142.54 at
+  once, kept; then forward/up turned -15 degrees about the right axis: POV pitch 10.73 -> -4.27 at once, kept 6 s. So
+  **yaw and pitch both come from the +0x120 matrix** and apply the same frame; the earlier pitch "delay" was the game
+  not in front while sampled. What the user saw: not yet reported.
+- User saw it on screen: the 20/45 degree yaw writes turned the camera, and the pitch loop (+20 degrees, back, three
+  times) tilted the view three times and returned each time.
+- **New view option `Matrix=1`** (unreleased, version not bumped): with `Offsets=`, each offset is a float rotation
+  matrix (FMatrix rows X forward, Y right, Z up, 16 bytes apart) instead of an FRotator. `ue::read_matrix_rotation`
+  (pitch = asin(X.z), yaw = atan2(X.y, X.x), roll = atan2(-Y.z, Z.z)) and `ue::add_matrix_rotation` (rebuilds the
+  three rows as FRotationMatrix does from the new angles, roll kept, pitch clamped to +-89); used by apply,
+  read_view_rotation (follow check, recenter, stick fallback) and the status line. The game's matrix matched
+  FRotationMatrix with roll 0 (up = (-sp*cy, -sp*sy, cp) checked against the dump). Documented in ADVANCED.md; a
+  profile_tests check that `Matrix=1` loads (696 checks pass).
+- Profile, installed in the game folder only (not in `profiles/` until verified): `[View.Default]`
+  `Object=Camera.@BendPlayerCamFollow_C`, `Offsets=0x120`, `Matrix=1`. Covers walking only; the other camera modes
+  are separate objects (to find next).
+- In game with the follow-camera profile (user, DualSense, Steam Input reports no controller): **on foot the gyro
+  turns the camera** (`camera: confirmed, the camera follows the gyro`). Aiming: the gyro does nothing; on the bike
+  too. Short `MOVE_Flying` pauses (2-3 s) are mounting/dismounting the bike, not riding.
+- `BendCamManager` +0x35C8 points at `BendPlayerCamFollow_C` even while other modes run: not the active camera.
+- Read-only watch (0.2 s), which camera's **output matrix +0x80** equals the POV: walking `BendPlayerCamFollow_C`,
+  in combat `BendPlayerCamCombat_C`, sprint `BendPlayerCamSprint_C`, crouch `BendPlayerCamCrouch_C`, aiming
+  `BendPlayerCamAssaultRifleAim_C`, bike `BendVehicleCamFollow_C`; none for a moment during blends. All camera modes
+  are `BendCamBase` with matrices at +0x80 (output) and +0x120 (source). Class tree (instances under the manager, in
+  `m_camInstances` +0x3600 and `m_camPopulation` +0x37D8): aim cameras derive from `BendCamManualAim` (per weapon:
+  Pistol, Rifle, AssaultRifle, SMG, Shotgun, LMG, Sniper*, Minigun, Throw, CrouchAim, Trap, Binocular) and so does the
+  bike's `BendVehicleCamFixedAim_C` (via `BendCamFixedAim`); vehicle ones from `BendVehicleCamFollow_C` (Combat,
+  Boost, FollowWater, WaterBoost, IntroScene, FLASHBACK) plus LookBehind and PassengerCamFollow; on-foot ones from
+  `BendPlayerCamFollow_C` (Combat, Sprint, Crouch, Interior*, Cover, Bush, Climb, Ladder, mission LookAt cameras...),
+  `BendCamMelee`, `BendPlayerCamCrawl_C`.
+- Pitch: the gyro wound the follow camera's source to -75 while the output stayed at -20.9 (near `m_fMaxAutoPitch`
+  0.38 rad; the reflected `m_fMinPitch`/`m_fMaxPitch` are -0.95/1.34 rad on foot, -1.5/1.5 aiming, -0.7/1.05 bike, so
+  the limit isn't those): a dead zone on the way back.
+- **New view option `ActiveMatrix=<offset>`** (unreleased): with `Matrix=1` and `Object=...@ClassA|ClassB`, the view's
+  object is the subobject of those classes whose matrix at that offset matches the POV (0.25 degrees), the last one
+  first; the view is active only while one does (held 1 s through blends; a default ActiveMatrix view with no match =
+  no gameplay view, gyro off). `ue::subobjects_of_classes` lists the candidates (rescanned every 3 s). Before turning,
+  a source pitch beyond the output's (|source| > |output| + 1) is brought back to the output (no wind-up past the
+  game's limit). Profile in the game folder: On foot (default), Vehicle (id 2, before Aim), Aim (id 3), all
+  `Offsets=0x120 Matrix=1 ActiveMatrix=0x80`; the Vehicle tab's Activation can be set Off. 699 checks pass. Not yet
+  run in game; aim cameras' +0x120 not write-tested.
+- In game with ActiveMatrix (user): aiming turns only after a right-stick move, then stutters. Log: `view: Aim` /
+  `view: none` alternating every ~1.9 s (none ~0.2 s): the aim camera's output matches the POV only now and then
+  (aiming adds sway/offsets to the final view), and at aim start the follow camera's frozen output is the closer one.
+  ActiveMatrix dropped.
+- **`BendCamManager` +0x35D0 is the camera stack**: native TArray<BendCamBase*> (8-byte entries), newest first. Walking
+  `[Follow]`; aiming `[AssaultRifleAim, Follow]`; sprint then aim `[BendCamTransition, Aim, Sprint, Follow]` for a moment;
+  bike `[VehicleCamFollow, Follow]`. While blending (0.2-0.4 s) entry 0 is a `BendCamTransition` and entry 1 the camera
+  blended to. (+0x35C8 stays `BendPlayerCamFollow_C`: the base camera.)
+- Replaced by **`ActiveList=<offset>`** (+ `ActiveListSkip=` classes): the view is active while the list's first entry
+  past the skipped classes is of its classes (`Object=...@A|B|C`), and turns it; views in profile order (Vehicle before
+  Aim: the bike's FixedAim is a BendCamManualAim). The pitch fix moved to **`OutputMatrix=0x80`**. Profile updated
+  (all three views `ActiveList=0x35D0 ActiveListSkip=BendCamTransition OutputMatrix=0x80`). 700 checks pass; not yet
+  run in game.
+- In game with ActiveList (user, DualSense): views switch cleanly On foot / Aim / Vehicle with no `view: none` gaps
+  (log 19:32-19:36), `camera: confirmed ... view 'Aim'`. Profile saved to `profiles/DaysGone.ini`, GAMES.md row added
+  (install folder, the Vehicle view's Activation to keep the gyro off the bike).
+- Regression check (user, 2026-10-30): Cronos: The New Dawn (UE 5.5.4, chunked object array) works as before with this
+  build (flat-array search, name text +0x12 and the new profile keys don't change it).

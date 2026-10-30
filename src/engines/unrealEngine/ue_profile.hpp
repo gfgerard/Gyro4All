@@ -24,6 +24,19 @@ struct View {
     std::vector<std::string> object;  // path to the view object (empty = PC for the default view, else ViewTarget)
     std::vector<int32_t> offsets;     // raw rotator offsets in the view object (instead of Property)
     int32_t rotator_size = 24;        // 24 = double (UE5), 12 = float (UE4)
+    // Matrix=1: each offset is a float rotation matrix (FMatrix rows forward, right, up) instead of a rotator, for C++
+    // cameras that keep the view that way (Days Gone: Camera.@BendPlayerCamFollow_C +0x120). RotatorSize is ignored.
+    bool matrix = false;
+    // ActiveList=<offset> (with an Object= ending in @Class, where Class may list several: @A|B|C): the object before
+    // that step keeps a TArray<UObject*> at that offset, newest first, whose first entry (past ActiveListSkip= classes)
+    // is the active one. The view is active while that entry is of one of its classes, and turns it. For games with one
+    // camera object per mode (Days Gone: BendCamManager's camera stack +0x35D0; BendCamTransition entries while blending).
+    int32_t active_list = -1;
+    std::vector<std::string> active_skip;
+    uintptr_t active_object = 0;  // runtime: the list's entry this view turns (0 = none)
+    // OutputMatrix=<offset> (with Matrix=1): the matrix the game shows, built from the one written. A written pitch beyond
+    // it (the game's pitch limit) is brought back to it first, so the gyro doesn't wind up past the limit.
+    int32_t output_matrix = -1;
     // WorldRotation=1: Property is a scene component's RelativeRotation with absolute rotation; its world rotation
     // (ComponentToWorld) is written too, because the game turns the component from it (Severed Steel's camera).
     bool world_rotation = false;
