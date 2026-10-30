@@ -81,6 +81,8 @@ std::wstring find_cooked(const std::wstring& exe_path) {
 
 uintptr_t g_objects = 0;  // address of GObjects (TArray<UObject*>)
 uintptr_t g_names = 0;    // address of the name chunk array (BioWare) or of GNames (TArray<FNameEntry*>)
+// Name tables that fit but read Core.Object.Matrix's planes wrong (find_members): decoys, skipped by find_names.
+std::vector<uintptr_t> g_rejected_names;
 enum class Names { Chunks, Array } g_names_kind = Names::Chunks;
 uintptr_t g_name_text = 12;   // the text's offset in a name entry
 uintptr_t g_prop_offset = 0;  // UProperty field holding the property's offset in its struct
@@ -99,6 +101,13 @@ struct Bool {
 // pause menu (no Pauser there).
 Bool g_players_only, g_menu_level, g_paused;
 uintptr_t g_engine = 0;  // the GameEngine object
+// The rendered field of view, for zoom compensation: PlayerController.PlayerCamera -> Camera.CameraCache (TCameraCache)
+// .POV (TPOV) .FOV, horizontal degrees (Mass Effect LE 3: 100, 39.4 aiming the Shuriken, 10 through the Black Widow's
+// scope, 120 sprinting; its DefaultFOV fields, 85 and 90, follow none of it). Optional; -1 = not found.
+struct FovPath {
+    int32_t player_camera = -1, cache = -1, pov = -1, fov = -1;
+    bool found() const { return player_camera >= 0 && cache >= 0 && pov >= 0 && fov >= 0; }
+} g_fov;
 
 uintptr_t object_at(int32_t i) {
     const uintptr_t data = mem::rdp(g_objects);
@@ -223,8 +232,12 @@ bool find_names() {
     }
     uint32_t value = 0;
     if (!class_class || !mem::rd(class_class + g_name, value)) return false;
-    // Most samples, not all: some objects have names that aren't identifiers (Mass Effect LE 1: "<uninitialized>").
+    // Most samples, not all, in every chunk in use: some objects have names that aren't identifiers (Mass Effect LE 1:
+    // "<uninitialized>"), and Mass Effect LE 3 has a decoy array whose chunk 0 is right and chunk 1 isn't (a third of its
+    // names still read as identifiers, so a count over all the samples let it through). GNames values are plain
+    // indices: one group.
     auto fits = [&](uintptr_t a, Names kind, uintptr_t text_at) {
+        if (std::find(g_rejected_names.begin(), g_rejected_names.end(), a) != g_rejected_names.end()) return false;
         if (name_text(a, kind, text_at, value) != "Class") return false;
         if (kind == Names::Chunks) {
             // Every chunk the names use must exist and be its own: a decoy array can repeat chunk 0 in slot 1 (Mass Effect
@@ -236,9 +249,13 @@ bool find_names() {
                 seen[slot] = chunk;
             }
         }
-        size_t good = 0;
-        for (uint32_t v : samples) good += identifier(name_text(a, kind, text_at, v));
-        if (good * 4 < samples.size() * 3) return false;
+        size_t good[8] = {}, total[8] = {};
+        for (uint32_t v : samples) {
+            ++total[(v >> 29) & 7];
+            good[(v >> 29) & 7] += identifier(name_text(a, kind, text_at, v));
+        }
+        for (int c = 0; c < 8; ++c)
+            if (good[c] * 4 < total[c] * 3) return false;
         g_names = a, g_names_kind = kind, g_name_text = text_at;
         return true;
     };
@@ -254,6 +271,8 @@ bool find_names() {
                     if (fits(a, Names::Array, text_at)) return true;
         }
     }
+    // Every table that fits was rejected: try them all again next time (more objects loaded, other samples).
+    g_rejected_names.clear();
     static bool logged = false;
     if (!logged) {
         logged = true;
@@ -305,6 +324,17 @@ bool find_members() {
     } wants[] = {{"Engine", "GamePlayers", &g_off.game_players, true}, {"Player", "Actor", &g_off.player_actor, true},
                  {"Actor", "Rotation", &g_off.rotation, true},         {"Controller", "Pawn", &g_off.pawn, true},
                  {"Actor", "WorldInfo", &g_off.world_info, true},      {"WorldInfo", "Pauser", &g_off.pauser, false}};
+    // Optional, the rendered field of view (zoom compensation); offsets can be 0 (POV in TCameraCache).
+    const struct {
+        const char* owner;
+        const char* name;
+        int32_t* out;
+    } fov_wants[] = {{"PlayerController", "PlayerCamera", &g_fov.player_camera},
+                     {"Camera", "CameraCache", &g_fov.cache},
+                     {"TCameraCache", "POV", &g_fov.pov},
+                     {"TPOV", "FOV", &g_fov.fov}};
+    g_fov = {};
+    std::vector<std::pair<uintptr_t, int32_t*>> fov_props;
     uintptr_t planes[4] = {};  // Core.Object.Matrix.XPlane..WPlane
     std::vector<std::pair<uintptr_t, uint32_t*>> props;
     uintptr_t players_only = 0, players_only_pending = 0, menu_level = 0, paused = 0, player_controller = 0;
@@ -325,6 +355,8 @@ bool find_members() {
             planes[std::strchr("XYZW", name[0]) - "XYZW"] = o;
         for (const Want& w : wants)
             if (name == w.name && owner == w.owner) props.push_back({o, w.out});
+        for (const auto& w : fov_wants)
+            if (name == w.name && owner == w.owner) fov_props.push_back({o, w.out});
         if (owner == "WorldInfo" && cls == "BoolProperty") {
             if (name == "bPlayersOnly") players_only = o;
             else if (name == "bPlayersOnlyPending") players_only_pending = o;
@@ -342,7 +374,18 @@ bool find_members() {
         }
         if (all) g_prop_offset = field;
     }
-    if (!g_prop_offset) return false;
+    if (!g_prop_offset) {
+        // Core's Matrix is loaded before anything else, so its planes not reading back means the name table is wrong: a
+        // decoy whose first chunk is right (Mass Effect LE 3's, found before the real one 3 s after start, while no
+        // sampled object used the second chunk yet). The next try takes the next table that fits.
+        if (g_names) {
+            log("ue3: the name table at %s doesn't read Core.Object.Matrix's planes: a decoy, looking for another",
+                mem::module_offset(g_names).c_str());
+            g_rejected_names.push_back(g_names);
+            g_names = 0;
+        }
+        return false;
+    }
     if (!g_super_field) find_super_field(player_controller);
     g_engine = 0;
     for (uintptr_t e : engines)
@@ -350,6 +393,10 @@ bool find_members() {
     for (auto& [prop, out] : props) {
         int32_t v = 0;
         if (mem::rd(prop + g_prop_offset, v) && v > 0) *out = uint32_t(v);
+    }
+    for (auto& [prop, out] : fov_props) {
+        int32_t v = -1;
+        if (mem::rd(prop + g_prop_offset, v) && v >= 0) *out = v;
     }
     for (const Want& w : wants)
         if (!*w.out && w.needed) {
@@ -442,6 +489,7 @@ public:
         f.paused = pauser != 0 || players_only || paused;
         f.view_id = pawn && !menu_level ? 1 : 0;
         f.target = pawn ? pawn_name_ : "no pawn";
+        f.fov = rendered_fov(pc);
         return f;
     }
 
@@ -504,6 +552,13 @@ private:
                 g_off.game_players, g_off.player_actor, g_off.rotation, g_off.pawn, g_off.world_info, g_off.pauser,
                 g_paused.offset, g_paused.mask, g_players_only.offset, g_players_only.mask, g_menu_level.offset,
                 g_menu_level.mask, mem::module_offset(g_engine).c_str());
+            if (g_fov.found())
+                log("ue3: field of view at PlayerController.PlayerCamera +0x%x, Camera.CameraCache +0x%x, TCameraCache.POV "
+                    "+0x%x, TPOV.FOV +0x%x (zoom compensation)",
+                    g_fov.player_camera, g_fov.cache, g_fov.pov, g_fov.fov);
+            else
+                log("ue3: the camera's field of view not found (PlayerCamera %d, CameraCache %d, POV %d, FOV %d): no zoom "
+                    "compensation", g_fov.player_camera, g_fov.cache, g_fov.pov, g_fov.fov);
         } else if (now - first_try_ > kGiveUpMs) {
             stage_ = Stage::Failed;
             log("ue3: engine not found (GObjects %s, names %s, property offset field %s): the gyro goes to the game as "
@@ -514,6 +569,15 @@ private:
     static bool world_bool(uintptr_t world, const Bool& b) {
         uint32_t word = 0;
         return world && b.mask && mem::rd(world + b.offset, word) && (word & b.mask);
+    }
+
+    // The camera's rendered field of view (horizontal degrees), 0 if unknown.
+    static double rendered_fov(uintptr_t pc) {
+        if (!g_fov.found()) return 0;
+        const uintptr_t camera = mem::rdp(pc + g_fov.player_camera);
+        float fov = 0;
+        if (!camera || !mem::rd(camera + g_fov.cache + g_fov.pov + g_fov.fov, fov) || !(fov > 1 && fov < 179)) return 0;
+        return fov;
     }
 
     Stage stage_ = Stage::Waiting;

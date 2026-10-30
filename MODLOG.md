@@ -6078,3 +6078,146 @@ or gyro to stick.
   (install folder, the Vehicle view's Activation to keep the gyro off the bike).
 - Regression check (user, 2026-10-30): Cronos: The New Dawn (UE 5.5.4, chunked object array) works as before with this
   build (flat-array search, name text +0x12 and the new profile keys don't change it).
+- 2026-10-30 **Mass Effect 3 LE: camera drift from the stick fallback (GitHub issue #2); `StickFallback=0` setting and
+  an ME3 profile.** Report: drift while the gyro is active, its direction set by where the right stick came to rest
+  (nudging the stick changes or stops it), none with the gyro off; calibration doesn't help. DualSense, wired and
+  wireless, Steam Input on and off; the game reads the DualSense as Gyro4All's XInput controller 0.
+  - 1.8.3: `ue3: engine not found (GObjects found, names found, property offset field missing)`, so the blind stick
+    fallback ran the whole session (also the cause of the stutter when turning with the stick: the gyro's pulses
+    were added to the player's own deflection). 1.9.0 (pre-release) finds the camera (`property offset field +0x94`)
+    and writes `Actor.Rotation` directly, but the fallback still started three times in 25 minutes
+    (`the game undid the gyro's camera writes 8 frames in a row`): two were over at the first probe write 1.5 s later
+    (`the game keeps the gyro's writes again`); one lasted 61 s with the pad lying still (probe writes under
+    `kMinStep` 0.11 deg give no verdict) until `no gameplay view whose angles can be read`.
+  - Cause: `StickFallback::stick` sizes the deflection for a centred stick, and `xinput.cpp`/`dinputpad.cpp`/
+    `nativepad.cpp` add it to the raw right stick, resting offset included; the game's dead zone acts on the sum.
+    Slow turns and noise go out as pulses only `kPulse` (0.04) past the model's dead zone, less than this pad's
+    resting offset (RX +1156..1413, RY +1928..2185 up, XInput units): pulses toward the offset pass amplified, the
+    others fall inside the dead zone, so zero-mean gyro noise becomes a steady turn toward the resting offset. In the
+    61 s episode the camera went right and up at about 0.08 deg/s each (yaw -18.0 to -14.1, pitch 6.6 to 10.7) while
+    `applied` didn't change; right after it, in direct mode, yaw stayed put. A port of `stick()` with the XInput add
+    and zero-mean gyro noise: no drift with a centred stick, 0.15-2 deg/s toward the offset with this one.
+  - Also seen: Unreal3 has no `limit_turn`, so a pitch-dominated push against ME3's pitch limit (the game clamps
+    `Rotation`; nothing piles up past it) reads as undone writes and can start the fallback; the 61 s episode was not
+    that (about 173 deg of yaw written in 4 s were thrown away with the camera mid-pitch; cause not known).
+    `nativepad.cpp` truncates the added byte (`uint8_t(...)`), a one-step bias toward left/up in games that read the
+    PlayStation reports themselves (not ME3).
+  - Change: `StickFallback=0` (`Gyro4All.ini` or the game's profile, read at start) keeps the fallback off: no
+    detection, no blind mode (with no camera hook the gyro then turns nothing, logged once); it also overrides
+    `StickFallbackTest`. `profiles/MassEffect3.ini` sets it. Not a fix for the fallback itself (it still adds its
+    deflection to a resting or moving stick in other games). Not built yet (on 1.8.3's source, which still misses
+    1.9.0's ME3 camera fix) and not tested in game. For a quick test, a 1.9.0 `winmm.dll` with the `jl` after
+    `cmp undone_run_, 8` in the inlined `note_write` made a `jmp` (no start from undone writes, any game; log line
+    `Gyro4All 1.9.0-nf`).
+- 2026-10-30 **Mass Effect 3 LE: the zoom FOV for gyro zoom compensation; `ue3tool.py` read a decoy name table**
+  (Steam, ME3 running, read-only reads with `tools/unrealEngine3/ue3tool.py`; DualSense).
+  - **Decoy name table**: `ue3tool.py find` stopped at `UProperty offset field not found` (no `Matrix.XPlane`), the
+    same step as 1.8.3's `ue3: engine not found (... property offset field missing)`. It had taken
+    `MassEffect3.exe+0x17AB058`: chunk 0 right (the same base as the real table), chunk 1 junk, where a third of the
+    names still read as identifiers, so the 3/4-of-all-samples rule (2026-10-26) let it through. The real table is
+    `+0x17B33D0` (chunk 1 on the heap; also what 1.9.0 logs). Samples per chunk: decoy 200/200 and 74/200, real 200/200
+    and 200/200. Fix in `ue3tool.py`: 3/4 identifiers in every chunk in use. `Unreal3`'s `find_names` has the same
+    rule and needs the same change (not done yet).
+  - ME3 layout (same UObject/UProperty fields as ME1/ME2): GObjects `+0x1887E40`, Offset +0x94, ElementSize +0x74,
+    ArrayDim +0x70, bool mask +0xD0, SuperField +0x60. Scene: `SFXEngine` -> `SFXLocalPlayer` -> `SFXPlayerController`
+    (< `BioPlayerController`), camera `SFXPlayerCamera` (< `SFXCameraNativeBase` < `Camera`), input `BioPlayerInput`.
+  - **The rendered FOV is `Camera.CameraCache.POV.FOV`** (`CameraCache` +0x448, `TCameraCache.POV` +0, `TPOV.FOV`
+    +0x18: camera +0x460; `ViewTarget.POV.FOV` +0x3F0 holds the same), horizontal degrees. Recorded at 20 Hz against
+    `BioPlayerInput.bWantsToZoom` (+0x3C8, the game's own aim flag): 100 unzoomed, 10.0 scoped (Black Widow), 39.43
+    aimed (Shuriken SMG), both switching within a frame; 120 while sprinting, ramping over about 0.5 s.
+  - Not the reference: `Camera.DefaultFOV` 90, `PlayerController.FOVAngle`/`DesiredFOV`/`DefaultFOV` 85 (none follow
+    the zoom or match the rendered 100). `PlayerInput.bEnableFOVScaling` is off: ME3 doesn't use UE3's FOV/90 mouse
+    scaling (its own: `BioPlayerController.RotationSensitivityLow/Medium/High`, `ZoomData`; not looked into).
+  - Plan for zoom compensation (GyroLib's `gl_set_gameplay_context_fov`, `gyro.zoom_compensation`): current =
+    `CameraCache.POV.FOV`; reference = the FOV the camera rests at most of the time (learnt: no reflected field holds
+    it), with the scale capped at 1 so the sprint FOV doesn't speed the gyro up. Expected scale: Shuriken aim 0.30,
+    Black Widow scope 0.073 (`tan(fov/2)` ratios).
+- 2026-10-30 **Zoom compensation for UE3 (GyroLib's `gyro.zoom_compensation`), and `Unreal3` finds ME3's name table
+  (decoy fix)** (built with VS Build Tools 2026 18.11.2 / MSVC 14.51, 698 checks pass; on 1.8.3's source, no version
+  bump; not tested in game yet).
+  - `Unreal3::find_names`: 3/4 identifiers in every chunk in use (not over all samples), as in `ue3tool.py`: ME3's decoy
+    table at `+0x17AB058` is rejected, `+0x17B33D0` found. This is what kept 1.8.3 from ME3's camera.
+  - Core: `EngineFrame::fov` (rendered field of view, horizontal degrees, 0 = unknown). `host.cpp` `report_fov` calls
+    `gl_set_gameplay_context_fov` before every `gl_update` for the view it updates (the sensitivity profiles too), with
+    `vertical_fov` (16:9: only the tan ratio counts) of min(fov, reference) and of the reference; the first FOV declares
+    zoom for every registered view and profile (`offer_zoom`, again after the engine's views change). New
+    `src/core/zoom.hpp` (header-only, unit-tested): `ZoomReference` = the FOV held steady the longest (0.1-degree bins,
+    frames that change by over 0.05 degree don't count, 10-minute half-life, at most 32 bins), `zoom_scale` (capped at
+    1), `vertical_fov`. `ZoomReference=<degrees>` pins it. Log: `zoom: the engine reports the view's field of view`,
+    `zoom: unzoomed field of view N (learnt from play / ZoomReference=)`, status `zoom: field of view, unzoomed, gyro xS
+    with Zoom compensation (on/off in view N)`. Compensation stays GyroLib's per-view setting (default off).
+  - `Unreal3`: `PlayerController.PlayerCamera`, `Camera.CameraCache`, `TCameraCache.POV` (+0, so the optional offsets
+    are signed), `TPOV.FOV`, logged as `ue3: field of view at ...`; read per frame, kept between 1 and 179.
+  - Tests: resting FOV among scope/aim/sprint (ramps skipped), a scoped start, a changed FOV setting, unsteady and
+    invalid FOVs, the scale against GyroLib's tan ratio through `vertical_fov`.
+- 2026-10-30 **First in-game run of the zoom build: no camera (the decoy again), fixed** (user; DualSense; launched
+  through ME3Tweaks Mod Manager, Steam Input on: `not shown: Steam Input handles the controller`). Log: `ue3: engine not
+  found (GObjects found, names found, property offset field missing)`, then with `StickFallback=0` `the gyro can't turn
+  it`: no gyro at all. `find_names` ran 3 s after start (`UObject Class` at the main menu's load), when no sampled object
+  used chunk 1 yet, so the per-chunk rule had nothing to reject the decoy with, and the table found is never searched
+  again. Fix: when the Matrix planes don't read back (`find_members`), the table is a decoy: logged (`ue3: the name table
+  at ... doesn't read Core.Object.Matrix's planes: a decoy, looking for another`), remembered and skipped by the next
+  `find_names` (the list is cleared when nothing else fits). Built, 698 checks pass; not tested in game yet. Also: the
+  UE3 module's view is named `Default` in the panel (UE4's is `Exploration`), and Zoom compensation only shows once a
+  FOV is reported.
+- 2026-10-30 **Zoom compensation works in ME3 (user: "it works great"), and `ZoomStrength=`** (user; DualSense; through
+  ME3Tweaks Mod Manager). The decoy rejection found the real name table and the camera; Zoom compensation on in the
+  `Default` tab. New `ZoomStrength=<percent>` (default 100, 0..200, `Gyro4All.ini` or the profile): GyroLib's scale
+  raised to strength/100 (`zoom_scale`), so each zoom feels faster than unzoomed by magnification^(1 - strength/100)
+  (75: Black Widow 1.92x, Shuriken 1.35x). GyroLib's formula is fixed, so the core reports `zoom_fov` = the FOV whose tan
+  ratio to the reference is that scale. `ZoomStrength`/`ZoomReference` are read again when `Gyro4All.ini` or the profile
+  is saved (`check_settings_file` now always watches both; the stick camera reloads with them); log `settings:
+  ZoomStrength=N, ZoomReference=... (why)`, status `... with Zoom compensation at N% ...`. Template comment in the
+  created `Gyro4All.ini`. Built, 743 checks pass. The user's own ME3 `Gyro4All.ini`: `ZoomStrength=75`.
+- 2026-10-30 **Zoom reference: flipped to the scope at the start of a session; fixed** (user: "strange sensitivity /
+  camera jumps"; log: `zoom: unzoomed field of view 100.0` at 21:58:46, `10.0` at 21:58:53, `100.0` again at 21:59:31:
+  scoping right after loading outweighed the 1-2 s of unzoomed play, so the scope ran uncompensated for 38 s, then
+  compensated). Also in that log: Steam Input on (`not shown: Steam Input handles the controller`, ~247 gyro samples/s
+  instead of ~495) and the game launched through Steam and the EA app; and while scoped, 9 deg of yaw and 8 of pitch
+  written in 10 s with the camera moving 0.1 and 0.6 (the game pulling the aim back while zoomed? aim assist or
+  `SFXWeapon.ZoomSnapList`; not looked into yet).
+  - `ZoomReference` (zoom.hpp): a FOV counts only after holding 0.5 s (spawn cameras, ramps); no reference until 10 s
+    counted, then the most-held FOV; afterwards another takes over only when held over 2x + 10 s (wider) or 3x + 60 s
+    (narrower). The reference bin is never evicted. A too-narrow reference only leaves zooms uncompensated (scale capped
+    at 1), a too-wide one (a sprint held from the start) would slow unzoomed play: hence the 10 s before the first.
+  - `EngineFrame::aiming`: the game's own aim flag; aiming time never counts. `Unreal3`: `PlayerController.PlayerInput`
+    -> `BioPlayerInput.bWantsToZoom` (optional, logged with the FOV path).
+  - Tests: the log's case with and without the aim flag, aiming time ignored, a sprint held from the start. 754 checks
+    pass. Installed for the user; not tested in game yet.
+- 2026-10-30 **Zoom: the first scope after loading was uncompensated; provisional reference** (user: "extremely fast
+  until I released zoom, then as expected"; log: gameplay at 22:21:11, `unzoomed 0.0` in the status lines, the reference
+  at 22:21:32: 10 s of non-aiming play took 21 s). `ZoomReference::reference()` now gives the most-held counted FOV while
+  the first 10 s are counted (`settled()` false; log `zoom: unzoomed field of view 100.0 (provisional, still learning)`,
+  status `unzoomed 100.0 (provisional)`), so a zoom is compensated after the first half second of unzoomed play. Still
+  Steam Input on and launched through the EA app in that run. 757 checks pass; installed; not tested in game yet.
+- 2026-10-30 **Zoom: `ZoomReference=` as the normal field of view (three knobs), uncapped, in vertical degrees** (user:
+  Mass Effect 3's ship has another field of view than the field, so a learnt reference made speeds depend on where the
+  session started; the user's design: one formula over the whole range, sensitivity + strength + a set normal FOV).
+  With `ZoomReference=<vertical degrees>` the scale is (tan(fov/2) / tan(normal/2))^(strength/100) for every field of
+  view, wider ones too (sprint 120 at 75%: x1.32), the same whatever was played before; unset, learning as before
+  (capped at 1). Everything in vertical degrees from the game window's client aspect ratio (`game_aspect`: the
+  foreground window while the game has focus, 16:9 until known), so a set value survives resolution changes and
+  ultrawide (games widen the horizontal FOV and keep the vertical); learning now bins vertical FOVs too. ME3 at 16:9:
+  100 horizontal = 67.68 vertical. Log: `zoom: normal field of view N vertical (...)`, status `field of view H (vertical
+  V), normal N vertical (ZoomReference)`. Template comment rewritten. 776 checks pass. The user's ME3 `Gyro4All.ini`:
+  `ZoomReference=67.7`, `ZoomStrength=75`. Installed; not tested in game yet.
+- 2026-10-30 **Zoom: defaults and panel text** (user, after "works great"). `ZoomReference` defaults to 50.5 vertical
+  (`default_normal_fov`: 80 degrees horizontal at 16:9) instead of learning; `0` selects learning (adaptive);
+  `ZoomStrength` stays 100; GyroLib's Zoom compensation switch stays off by default. GyroLib 1.3.1 has no host API for a
+  setting's tooltip, so every tab (engine views and sensitivity profiles) is registered again with a description that
+  says what Zoom compensation works with and the values in use (`describe_zoom`: when zoom is first offered, when the
+  engine's views change and when `Gyro4All.ini`/the profile is saved; `Profile` keeps its tab label and description).
+  The created `Gyro4All.ini` explains both values (vertical degrees, the status line's number, 0 = adaptive). Also: the
+  user looked for `ZoomStrength` in a backup copy (`Gyro4All.bak\Gyro4All.ini`); the active file had it.
+- 2026-10-30 **Zoom: learning removed, fixed knobs only** (user). `ZoomReference` (default 50.5 vertical = 80 horizontal
+  at 16:9; outside 1..179, `0` included, the default) and `ZoomStrength` (default 100) set one uncapped curve,
+  (tan(fov/2) / tan(normal/2))^(strength/100) in vertical degrees. Removed: `ZoomReference` the class (most-held FOV,
+  settle, provisional reference, hysteresis), the cap at 1, `EngineFrame::aiming` and `Unreal3`'s
+  `BioPlayerInput.bWantsToZoom` reading (only learning used them), and their tests. Log: `zoom: the engine reports the
+  view's field of view (H, vertical V): ... against the normal field of view N vertical (ZoomReference=)`; status
+  `field of view H (vertical V), normal N vertical, gyro xS ...`. 785 checks pass.
+- 2026-10-30 **The ME3 / zoom work moved onto 1.9.0 (main)**: stashed, fast-forwarded to `origin/main` (1.9.0: Glacier,
+  Northlight, sensor-time pacing, the UE3 names hotfix, ...) and reapplied. Conflicts resolved: `check_settings_file`
+  reloads the pacer, the zoom settings and the stick camera on save (both sides had made it watch the files always);
+  `find_names` and `ue3tool.py` keep upstream's repeated-chunk check and add the per-chunk 3/4 rule (the module also keeps
+  rejecting a table whose Matrix planes don't read back); tests, docs and this log keep both sides. 811 checks pass.

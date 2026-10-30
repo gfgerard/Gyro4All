@@ -33,6 +33,8 @@ struct EngineFrame {
     // 0 = view_id itself.
     uint32_t base_view_id = 0;
     std::string target;    // what the camera looks at (e.g. its class), for the log
+    // The view's field of view as rendered this frame (horizontal degrees; 0 = unknown): zoom compensation (zoom.hpp).
+    double fov = 0;
     // The engine has no hook for this game's camera at all (no camera model fits it): the gyro then always goes to the
     // game as right-stick input (the stick fallback, blind: no angles to learn from, no camera writes). Report the
     // default view (view_id 1, in_game) with it, so the gyro's gate (focus, pause, cursor) and GyroLib's view still

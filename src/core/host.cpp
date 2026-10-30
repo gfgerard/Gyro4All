@@ -17,6 +17,7 @@
 #include "util.hpp"
 #include "writewatch.hpp"
 #include "xinput.hpp"
+#include "zoom.hpp"
 
 #include <windows.h>
 
@@ -66,6 +67,7 @@ StickFallback g_stick_fallback;  // the gyro as right-stick input while the game
 bool g_applied_this_frame = false;
 bool g_stick_suppression = false;  // GL_HOST_NATIVE_STICK_SUPPRESSION declared (xinput.cpp or nativepad.cpp can do it)
 bool g_fallback_test = false;      // StickFallbackTest=1: the stick fallback forced on every other minute
+bool g_fallback_off = false;       // StickFallback=0: the gyro never goes to the game as right-stick input
 bool g_native_flick = false;       // NativeFlickStick=1: flick stick through the game's own PlayStation reports too
 // Stick camera (StickCamera=1, stick_camera.hpp): the right stick's turn written like the gyro's, while the game reads a
 // centred right stick. Its Stick* values are read again when Gyro4All.ini or the game's profile is saved.
@@ -81,6 +83,13 @@ std::vector<int> g_pass_buttons;
 constexpr uint64_t kPassMs = 200;
 bool g_long_press = false;         // GL_HOST_LONG_PRESS_BLOCKING declared (longpress.cpp, applied by xinput/nativepad)
 std::vector<uint32_t> g_registered;  // engine view ids registered with GyroLib (tabs in the panel)
+// Zoom compensation (zoom.hpp): offered once the engine reports the view's FOV (EngineFrame::fov).
+bool g_zoom_offered = false;   // zoom declared to GyroLib for every view (the panel shows Zoom compensation)
+double g_zoom_normal = 0;      // ZoomReference=: the normal FOV, vertical degrees
+double g_zoom_strength = 1;    // ZoomStrength= / 100
+double g_fov = 0;              // this frame's FOV (0 = none reported)
+double g_fov_vertical = 0;     // ... as a vertical FOV (game_aspect)
+uint32_t g_fov_view = 0;       // the GyroLib view it was reported for
 // Mouse look (Raw Input reaching the game's main thread): counts like the right stick for the engine's camera checks.
 std::atomic<ULONGLONG> g_mouse_moved_at{0};
 
@@ -111,6 +120,7 @@ struct Profile {
     int button = -1;  // SDL_GamepadButton, or kLeftTrigger / kRightTrigger; -1 = disabled
     std::string button_name;
     bool registered = false;  // has its tab in the panel
+    std::string tab_label, tab_description;  // as registered (describe_zoom adds the zoom text)
     bool toggle = false;
     bool down = false, on = false;
     uint64_t since = 0;  // activation order: the latest active profile wins
@@ -175,13 +185,13 @@ void register_sensitivity_profiles(gl_context* ctx, const std::vector<ViewInfo>&
             p.button = -1;
             continue;
         }
-        const std::string label = p.button < 0 ? std::string(p.label) + " - disabled" : p.label;
-        const std::string description =
+        p.tab_label = p.button < 0 ? std::string(p.label) + " - disabled" : p.label;
+        p.tab_description =
             p.button < 0 ? std::format("Disabled. To use it, set {0}ProfileButton= (e.g. LT) and {0}ProfileMode= (Hold or "
                                        "Toggle) in Gyro4All\\Gyro4All.ini, then restart the game.", p.key)
             : p.toggle   ? std::format("Pressing {} turns these settings on, pressing it again turns them off.", p.button_name)
                          : std::format("These settings are used while {} is held.", p.button_name);
-        g_gyro->register_view(p.id, label.c_str(), GL_OUTPUT_CAMERA, 0, description.c_str());
+        g_gyro->register_view(p.id, p.tab_label.c_str(), GL_OUTPUT_CAMERA, 0, p.tab_description.c_str());
         p.registered = true;
         const bool parent_registered = std::any_of(std::begin(g_profiles), std::end(g_profiles),
                                                    [&](const Profile& o) { return o.id == p.parent && o.registered; });
@@ -349,6 +359,66 @@ void register_views() {
     }
 }
 
+// Zoom support for every registered view and sensitivity profile: the panel offers Zoom compensation in their tabs.
+void offer_zoom() {
+    gl_context* ctx = g_gyro->get();
+    for (uint32_t id : g_registered) gl_set_gameplay_context_zoom_available(ctx, id, 1);
+    for (const Profile& p : g_profiles)
+        if (p.registered) gl_set_gameplay_context_zoom_available(ctx, p.id, 1);
+}
+
+// The tabs' descriptions (the panel's tooltips) say what Zoom compensation works with: GyroLib's own setting can't be
+// described by the host, and ZoomReference/ZoomStrength live in Gyro4All.ini, out of the panel. Every tab is registered
+// again with them (GyroLib keeps its saved values), once zoom is offered and whenever they change; zoom is offered again.
+void describe_zoom() {
+    if (!g_zoom_offered) return;
+    const std::string zoom = std::format(
+        "Zoom compensation: this tab's sensitivity is the gyro's speed at your normal field of view (ZoomReference={:.1f}, "
+        "vertical degrees); every other field of view (scopes, aiming, sprint) scales from it at ZoomStrength={:.0f}%. Set "
+        "both in Gyro4All\\Gyro4All.ini (they apply on save; the log's status line shows the current field of view, "
+        "vertical).",
+        g_zoom_normal, g_zoom_strength * 100);
+    try {
+        for (const ViewInfo& v : g_engine->views())
+            if (std::find(g_registered.begin(), g_registered.end(), v.id) != g_registered.end())
+                g_gyro->register_view(v.id, v.label.c_str(), GL_OUTPUT_CAMERA, 0, zoom.c_str());
+        for (const Profile& p : g_profiles)
+            if (p.registered)
+                g_gyro->register_view(p.id, p.tab_label.c_str(), GL_OUTPUT_CAMERA, 0, (p.tab_description + " " + zoom).c_str());
+    } catch (const std::exception& e) {
+        log("zoom: a tab's description not updated: %s", e.what());
+    }
+    offer_zoom();
+}
+
+// The game window's aspect ratio (client width / height), for the vertical FOV zoom compensation works in: taken while
+// the game has focus, the last one kept otherwise; 16:9 until known.
+double game_aspect() {
+    static double aspect = 16.0 / 9.0;
+    if (host::game_has_focus()) {
+        RECT r{};
+        if (GetClientRect(GetForegroundWindow(), &r) && r.right > 0 && r.bottom > 0) aspect = double(r.right) / r.bottom;
+    }
+    return aspect;
+}
+
+// Before every gl_update: the view's FOV and the normal one (ZoomReference=), as vertical FOVs, for GyroLib's zoom
+// compensation (zoom.hpp). An update without them leaves the gyro unscaled (no FOV from the engine, no gameplay view).
+void report_fov(const EngineFrame& f, uint32_t view) {
+    g_fov = view ? f.fov : 0;
+    g_fov_view = view;
+    if (!(g_fov > 0)) return;
+    g_fov_vertical = vertical_fov(g_fov, game_aspect());
+    if (!g_zoom_offered) {
+        g_zoom_offered = true;
+        describe_zoom();
+        log("zoom: the engine reports the view's field of view (%.1f, vertical %.1f): Zoom compensation is offered in the "
+            "panel (per view), against the normal field of view %.1f vertical (ZoomReference=)",
+            g_fov, g_fov_vertical, g_zoom_normal);
+    }
+    gl_set_gameplay_context_fov(g_gyro->get(), view, zoom_fov(g_fov_vertical, g_zoom_normal, g_zoom_strength), g_zoom_normal);
+}
+
 bool start_gyro() {
     const std::wstring dll = settings::install_dir() + L"\\gyrolib.dll";
     if (!deps::check_gyrolib(dll)) return false;  // the game's own runtime DLLs would crash GyroLib
@@ -440,6 +510,16 @@ void load_stick_camera(const char* why) {
         c.invert_y ? ", Y inverted" : "");
 }
 
+// Zoom compensation's settings (zoom.hpp): at start and again when Gyro4All.ini or the game's profile is saved.
+void load_zoom_settings(const char* why) {
+    const double normal = setting_number(L"ZoomReference", default_normal_fov());
+    g_zoom_normal = normal > 1 && normal < 179 ? normal : default_normal_fov();
+    g_zoom_strength = std::clamp(setting_number(L"ZoomStrength", 100), 0.0, 200.0) / 100;
+    log("settings: ZoomStrength=%.0f, ZoomReference=%.1f (the normal field of view, vertical degrees) (%s)",
+        g_zoom_strength * 100, g_zoom_normal, why);
+    describe_zoom();  // the panel's tooltips show the new values
+}
+
 // Whether a file's last write time differs from the one seen (which is then updated); a missing file has none.
 bool file_changed(const std::wstring& path, FILETIME& seen) {
     WIN32_FILE_ATTRIBUTE_DATA data{};
@@ -453,12 +533,13 @@ void check_settings_file() {
     const ULONGLONG now = GetTickCount64();
     if (now < g_next_ini_check) return;
     g_next_ini_check = now + 1000;
-    {
-        const bool mod = file_changed(settings::settings_path(), g_mod_ini_time);
-        const bool profile = file_changed(settings::profile_path(), g_profile_ini_time);
+    const bool mod = file_changed(settings::settings_path(), g_mod_ini_time);
+    const bool profile = file_changed(settings::profile_path(), g_profile_ini_time);
+    if (mod || profile) {
         const char* why = mod ? "Gyro4All.ini saved" : "the game's profile saved";
-        if (mod || profile) load_pacer(why, false);
-        if (g_stick_camera_on && (mod || profile)) load_stick_camera(why);
+        load_pacer(why, false);
+        load_zoom_settings(why);
+        if (g_stick_camera_on) load_stick_camera(why);
     }
     const char* path = gl_get_settings_path(g_gyro->get());
     if (!path || !*path) return;
@@ -530,6 +611,16 @@ void status() {
         (unsigned long long)d.accepted_samples, d.stationary, d.bias.x, d.bias.y, d.bias.z, g_applied_yaw, g_applied_pitch);
     if (const std::string fallback = g_stick_fallback.status(); !fallback.empty()) log("status: %s", fallback.c_str());
     if (g_stick_camera_on) log("status: stick camera %s", g_stick_camera_state.c_str());
+    if (g_fov > 0) {
+        char key[64];
+        std::snprintf(key, sizeof key, "context.%u.gyro.zoom_compensation", g_fov_view);
+        double on = 0;
+        gl_setting_get_effective(g_gyro->get(), key, &on);
+        log("status: zoom: field of view %.1f (vertical %.1f), normal %.1f vertical, gyro x%.3f with Zoom compensation at "
+            "%.0f%% (%s in view %u)",
+            g_fov, g_fov_vertical, g_zoom_normal, zoom_scale(g_fov_vertical, g_zoom_normal, g_zoom_strength),
+            g_zoom_strength * 100, on != 0 ? "on" : "off", g_fov_view);
+    }
     g_engine->status_details();
     Delivery& m = g_delivery;
     const uint64_t now_ns = SDL_GetTicksNS();
@@ -712,6 +803,7 @@ void frame() {
     const EngineFrame f = g_engine->read_frame();
     if (g_engine->views_changed()) {
         register_views();
+        describe_zoom();  // the new views too
         g_recenter_view = 0;  // decide recenter support again
         g_recenter_final = false;
     }
@@ -753,6 +845,7 @@ void frame() {
     }
     g_input->poll(now_ns);
     poll_steam(now_ns);
+    report_fov(f, profile ? profile : f.view_id);
     const gl_output out = g_gyro->update(now_ns, host, profile ? profile : f.view_id);
     // GyroLib's flick stick needs the game's own right-stick rotation suppressed: possible for the controller shown to
     // the game as XInput, or when the game reads the controller itself through a checked report layout.
@@ -834,9 +927,16 @@ void frame() {
         trace_frame(now_ns, camera, gs.new_samples, out, pitch, yaw);
     }
     // Stick fallback: when the game undoes the gyro's camera writes, its turn goes to the game as right-stick input;
-    // when the engine has no hook for the game's camera at all, always (blind).
+    // when the engine has no hook for the game's camera at all, always (blind). StickFallback=0: never.
     const bool turning = view && host.camera_allowed && !g_engine->hold_gyro();
-    if (f.no_camera) {
+    if (g_fallback_off) {
+        static bool logged = false;
+        if (f.no_camera && !logged) {
+            logged = true;
+            log("stick fallback: off (StickFallback=0), and the engine has no hook for this game's camera: the gyro "
+                "can't turn it");
+        }
+    } else if (f.no_camera) {
         g_stick_fallback.frame_blind(turning && host.focused && !f.paused && !neutral, now_ns);
     } else {
         double view_pitch = 0, view_yaw = 0;
@@ -955,7 +1055,14 @@ void host_configure(Engine& engine) {
     engine.configure();
     load_sensitivity_profiles();
     g_native_flick = settings::get(L"NativeFlickStick", 0) != 0;
-    g_fallback_test = settings::get(L"StickFallbackTest", 0) != 0;
+    // ZoomStrength=<percent> and ZoomReference=<the normal FOV, vertical degrees; default 50.5 = 80 horizontal at 16:9>:
+    // zoom compensation (zoom.hpp). Read again on save, like the Stick* values (check_settings_file).
+    load_zoom_settings("Gyro4All.ini, the game's profile overrides");
+    // StickFallback=0: for games whose camera writes always last, where the fallback would only start by mistake (the
+    // gyro pushed against a pitch limit, a scene that takes the camera over) and turn the camera through the stick.
+    g_fallback_off = settings::get(L"StickFallback", 1) == 0;
+    if (g_fallback_off) log("settings: StickFallback=0 (the gyro never goes to the game as right-stick input)");
+    g_fallback_test = !g_fallback_off && settings::get(L"StickFallbackTest", 0) != 0;
     if (g_fallback_test) log("settings: StickFallbackTest=1 (the stick fallback forced on every other minute)");
     // The game's stick as the stick fallback learnt it in an earlier session (written to the profile by save_stick_model).
     if (const std::string saved = settings::get_string(L"StickFallbackLearned"); !saved.empty()) {
