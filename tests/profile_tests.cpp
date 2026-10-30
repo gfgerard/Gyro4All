@@ -1,6 +1,6 @@
 // Unit tests for the parts of Gyro4All that need no game: the Unreal module's game profile (ue_profile.cpp), the
-// core's Match=Camera choice (camera_match.hpp), its stick fallback (stick_fallback.cpp, stick_response.cpp), stick camera (stick_camera.cpp) and sensor-time
-// pacing (sensor_pacer.cpp). Built with Gyro4All (target gyro4all_tests); run with
+// core's Match=Camera choice (camera_match.hpp), its stick fallback (stick_fallback.cpp, stick_response.cpp), stick camera (stick_camera.cpp), sensor-time
+// pacing (sensor_pacer.cpp) and zoom compensation (zoom.hpp). Built with Gyro4All (target gyro4all_tests); run with
 // tools/test-gyro4all.sh.
 #include "camera_match.hpp"
 #include "sensor_pacer.hpp"
@@ -9,6 +9,7 @@
 #include "ue_profile.hpp"
 #include "ue_update_rotation_match.hpp"
 #include "util.hpp"
+#include "zoom.hpp"
 
 #include <windows.h>
 
@@ -1294,6 +1295,59 @@ void test_pacer_fixed_delay() {
     CHECK(r.worst(200, 10'000'000) < 0.05);
 }
 
+// Zoom compensation (zoom.hpp), with Mass Effect 3 LE's fields of view (MODLOG 2026-10-30): normal 100 degrees
+// horizontal at 16:9, 10 through the Black Widow's scope, 39.43 aiming the Shuriken, 120 sprinting.
+
+// The scale is the tan ratio, wider fields of view included; the same through vertical_fov at any aspect ratio.
+void test_zoom_scale() {
+    CHECK(std::abs(zoom_scale(10, 100) - 0.0734) < 1e-3);
+    CHECK(std::abs(zoom_scale(39.43, 100) - 0.300) < 1e-3);
+    CHECK(std::abs(zoom_scale(120, 100) - 1.453) < 1e-3);
+    CHECK(zoom_scale(100, 100) == 1);
+    CHECK(zoom_scale(10, 0) == 1);
+    for (const double aspect : {4.0 / 3, 16.0 / 9, 21.0 / 9})
+        for (const double fov : {5.0, 10.0, 39.43, 90.0, 120.0}) {
+            CHECK(std::abs(zoom_scale(vertical_fov(fov, aspect), vertical_fov(100, aspect)) - zoom_scale(fov, 100)) < 1e-9);
+            CHECK(vertical_fov(fov, aspect) > 0 && vertical_fov(fov, aspect) < fov);
+        }
+    CHECK(vertical_fov(178) < 179);
+}
+
+// ZoomStrength: the scale raised to strength / 100, and the FOV reported for it gives GyroLib exactly that scale.
+void test_zoom_strength() {
+    const double full = zoom_scale(10, 100);
+    CHECK(std::abs(zoom_scale(10, 100, 0.75) - std::pow(full, 0.75)) < 1e-12);
+    CHECK(zoom_scale(10, 100, 0) == 1);
+    CHECK(zoom_scale(120, 100, 0) == 1);
+    // How much faster a zoom feels than normal play: its magnification^(1 - strength); 75%: the scope 1.92x.
+    CHECK(std::abs(zoom_scale(10, 100, 0.75) / full - 1.92) < 0.01);
+    for (const double strength : {0.0, 0.5, 0.75, 1.0, 1.5})
+        for (const double fov : {5.0, 10.0, 39.43, 100.0, 120.0, 150.0}) {
+            const double reported = zoom_fov(fov, 100, strength);
+            CHECK(std::abs(std::tan(reported * kHalfDegree) / std::tan(100 * kHalfDegree) - zoom_scale(fov, 100, strength)) <
+                  1e-9);
+            CHECK(reported > 0 && reported < 179);
+        }
+    CHECK(std::abs(zoom_fov(10, 100, 1) - 10) < 1e-9);
+}
+
+// The three knobs with Mass Effect 3 LE at 16:9: ZoomReference=67.7 (its normal 100 horizontal, as vertical degrees),
+// ZoomStrength=75; and ZoomReference's default.
+void test_zoom_normal() {
+    const double normal = vertical_fov(100, 16.0 / 9);
+    CHECK(std::abs(normal - 67.68) < 0.02);
+    CHECK(std::abs(default_normal_fov() - 50.53) < 0.01);  // 80 horizontal at 16:9
+    // The normal FOV keeps the sensitivity at any strength; the scope, the aim and the sprint scale from it.
+    for (const double strength : {0.0, 0.75, 1.0}) CHECK(std::abs(zoom_scale(normal, normal, strength) - 1) < 1e-12);
+    CHECK(std::abs(zoom_scale(vertical_fov(10), normal, 0.75) - 0.141) < 1e-3);
+    CHECK(std::abs(zoom_scale(vertical_fov(39.43), normal, 0.75) - 0.406) < 1e-3);
+    CHECK(std::abs(zoom_scale(vertical_fov(120), normal, 0.75) - 1.32) < 0.01);
+    // An ultrawide screen widens the horizontal FOV and keeps the vertical: the same speeds as at 16:9.
+    const double horizontal_21_9 = std::atan(std::tan(normal * kHalfDegree) * (21.0 / 9)) / kHalfDegree;
+    CHECK(std::abs(horizontal_21_9 - 114.8) < 0.1);
+    CHECK(std::abs(vertical_fov(horizontal_21_9, 21.0 / 9) - normal) < 1e-9);
+}
+
 int main() {
     test_rewritten_helper();
     test_match_single_member();
@@ -1362,6 +1416,9 @@ int main() {
     test_pacer_burst_passthrough_and_off();
     test_pacer_stall_at_once();
     test_pacer_fixed_delay();
+    test_zoom_scale();
+    test_zoom_strength();
+    test_zoom_normal();
     std::printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

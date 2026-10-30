@@ -37,6 +37,22 @@ play.
   needs no setting; games that read the controller through Steam Input or their own SDL can't get it. To test it in a
   game whose writes last, `StickFallbackTest=1` (`Gyro4All.ini` or the game's profile) forces it on in the first minute
   of play and every other minute after, with a notice at each switch.
+- **Zoom compensation** (Unreal Engine 3 games so far): Gyro4All reports the camera's field of view to GyroLib each
+  frame, and with *Adapt to Zoom* on in the panel (per view; GyroLib's switch, off by default) the gyro turns
+  as many degrees fewer as the view is narrower (`tan(fov/2) / tan(normal/2)`): a scope moves the image under the
+  crosshair about as fast as normal play, for every weapon and zoom level, with no button to set up. Three knobs, one
+  fixed curve over every field of view, the same whatever was played before:
+  - your *sensitivity* (panel) is the speed at the normal field of view;
+  - `ZoomReference=<vertical degrees>` (`Gyro4All.ini` or the game's profile; default 50.5 = 80 degrees horizontal at
+    16:9) sets that normal field of view: every other one (scopes, aiming, sprint, other cameras) scales from it, wider
+    ones speeding the gyro up. Vertical, from the game window's aspect ratio, so it survives a change of resolution or an
+    ultrawide screen; the status line shows the current one (`field of view 100.0 (vertical 67.7)`: put the vertical
+    number of your normal view here);
+  - `ZoomStrength=<percent>` (default 100) sets how much other fields of view change the speed: the scale is raised to
+    strength/100, so at 75 a 13.6x scope feels 1.9x faster than normal play and a 3.3x aim 1.35x (each: its
+    magnification^(1 - strength/100)); 0 turns it off.
+  Both `Zoom*` values apply when the file is saved.
+  With it on, a sensitivity profile for aiming is no longer needed for the zoom (both would slow the gyro).
 - **Stick camera** (`StickCamera=1`, off by default): for games whose right-stick turn is too slow even at full
   deflection. Gyro4All turns the camera with the right stick itself, written in degrees like the gyro, so there is no
   speed cap, and the game reads a centred right stick. No mouse is emulated, so the game keeps its controller prompts
@@ -185,6 +201,8 @@ All diagnostics go to `Gyro4All\Gyro4All.log` (probe results, if enabled, to `Gy
 | `stick camera: on (the controller shown as XInput)` / `on (the game's own controller reports)` | The right stick turns the camera through Gyro4All; the game reads it centred. |
 | `stick camera: off while GyroLib's flick stick uses the right stick` / `off while the stick fallback turns the camera` | Flick stick (priority) or the stick fallback has the right stick. |
 | `stick camera: unavailable: Gyro4All can't hide the right stick from the game here (...)` | Steam Input or a real Xbox controller, or the game's own controller reports aren't checked yet (move the right stick). The game keeps its own stick. A `status: stick camera <state>` line follows the status line every 30 s. |
+| `zoom: the engine reports the view's field of view (100.0, vertical 67.7): Adapt to Zoom is offered in the panel (per view), against the normal field of view 67.7 vertical (ZoomReference=)` | The engine reads the camera's field of view: the panel's views get *Adapt to Zoom*. UE3: `ue3: field of view at PlayerController.PlayerCamera +0x..., Camera.CameraCache +0x..., TCameraCache.POV +0x..., TPOV.FOV +0x...` (or `... not found ...: no zoom compensation`). |
+| `status: zoom: field of view 10.0 (vertical 5.6), normal 67.7 vertical, gyro x0.141 with Adapt to Zoom at 75% (on in view 1)` | Every 10 s: the current field of view (as the engine reports it, and vertical), the normal one, the gyro's scale at `ZoomStrength` and whether the active view has compensation on. `settings: ZoomStrength=75, ZoomReference=67.7 (the normal field of view, vertical degrees) (...)`: at start and when `Gyro4All.ini` or the profile is saved. |
 | `dinputpad: stick fallback on the game's right stick (N-byte state, Z ..., Rz ...)` | The first time the fallback moves the right stick of a DirectInput controller the game reads, with the axis ranges the game set. |
 | `dinputpad: the game opens a DirectInput game controller (VID:PID, type ...)` | The game created a DirectInput device for a controller. It only counts as the game reading controllers itself once it reads it (`xinput: the game reads controllers itself: it reads a DirectInput game controller ...`). |
 | `xinput: the game imports the HID library but hasn't opened a PlayStation controller in 30 s` | The game imports `hid.dll` (usually a sign of Sony's pad library) but never opened the controller: it is translated. If the game opens a PlayStation controller later, the translation stops (`its own PlayStation support is back`). |
@@ -445,7 +463,8 @@ uses `Match=Camera` instead:
 
 ### Unreal Engine 3 games (`[Unreal3]`)
 
-UE3 games need no view sections: the gyro turns the player controller's `Rotation`. By default the gyro stays off while
+UE3 games need no view sections: the gyro turns the player controller's `Rotation`, and the camera's rendered field of view
+(`PlayerCamera.CameraCache.POV.FOV`) drives zoom compensation. By default the gyro stays off while
 the world is a menu level (`WorldInfo.bIsMenuLevel`). Some games keep that flag on during play (Dishonored): their
 profile turns the check off:
 
