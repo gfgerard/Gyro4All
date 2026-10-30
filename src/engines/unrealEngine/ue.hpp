@@ -80,7 +80,8 @@ int probe_diff(bool verbose);
 enum ProbeVerdict { kUntested = 0, kMovesCamera = 1, kOverwritten = -1, kNoEffect = -2, kUntestable = -3, kInconsistent = -4,
                     kTurnsInPlace = -5 };
 // Rotations that followed the camera in most scored diffs (at least two), one per object (all raw rotators of an object
-// together, as a profile writes them) or per reflected property. Usable ones first, then the ones the passive
+// together, as a profile writes them) or per reflected property. The ones that moved the camera in the live test
+// first (pitch followed too, then also turns the character, first), then usable ones, then the ones the passive
 // rules call outputs (tested too: the live test decides).
 struct ProbeGroup {
     std::string id;        // stable key for probe_verdict
@@ -93,9 +94,11 @@ struct ProbeGroup {
     std::string why_not;   // passive reason it looks like an output ("" = usable)
     int verdict = kUntested;
     std::string note;      // live test details
+    bool pitch_followed = false, turns_pawn = false;  // live test: pitch writes moved the camera too / it turned the character
 };
 std::vector<ProbeGroup> probe_groups();
-void probe_verdict(const std::string& id, int verdict, const std::string& note);
+void probe_verdict(const std::string& id, int verdict, const std::string& note, bool pitch_followed = false,
+                   bool turns_pawn = false);
 // Forgets the snapshot, the candidates and the verdicts: a probe started again during play looks at the camera of
 // that moment only.
 void probe_reset();

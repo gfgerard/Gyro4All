@@ -961,6 +961,7 @@ int g_scored_diffs = 0;
 struct Verdict {
     int result = kUntested;
     std::string note;
+    bool pitch_followed = false, turns_pawn = false;
 };
 std::map<std::string, Verdict> g_verdicts;  // live test results by ProbeGroup id
 
@@ -1525,12 +1526,24 @@ std::vector<ProbeGroup> probe_groups() {
     }
     for (ProbeGroup& g : groups) {
         std::sort(g.offsets.begin(), g.offsets.end());
-        if (auto v = g_verdicts.find(g.id); v != g_verdicts.end()) g.verdict = v->second.result, g.note = v->second.note;
+        if (auto v = g_verdicts.find(g.id); v != g_verdicts.end()) {
+            g.verdict = v->second.result, g.note = v->second.note;
+            g.pitch_followed = v->second.pitch_followed, g.turns_pawn = v->second.turns_pawn;
+        }
     }
+    // Among the rotations that moved the camera in the live test: one that turns pitch too first (a yaw-only one is
+    // learned with PitchView=1), then one that also turns the character. That one is upstream of both, the look input
+    // they read; one that turns the camera alone can be a camera stage the game rebuilds from it in other states
+    // (Silent Hill 2: the spring arm turns the camera standing still but is rewritten while walking, and while aiming
+    // only moves the crosshair; the View component turns the camera and James in all three).
+    auto pick_rank = [](const ProbeGroup& g) {
+        return g.verdict != kMovesCamera ? 0 : 1 + (g.pitch_followed ? 2 : 0) + (g.turns_pawn ? 1 : 0);
+    };
     std::vector<size_t> order(groups.size());
     for (size_t i = 0; i < order.size(); ++i) order[i] = i;
     std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
         const ProbeGroup &ga = groups[a], &gb = groups[b];
+        if (pick_rank(ga) != pick_rank(gb)) return pick_rank(ga) > pick_rank(gb);
         if (ga.why_not.empty() != gb.why_not.empty()) return ga.why_not.empty();
         if (rank[a] != rank[b]) return rank[a] > rank[b];
         if (ga.offsets.size() != gb.offsets.size()) return ga.offsets.size() > gb.offsets.size();
@@ -1541,7 +1554,9 @@ std::vector<ProbeGroup> probe_groups() {
     return sorted;
 }
 
-void probe_verdict(const std::string& id, int verdict, const std::string& note) { g_verdicts[id] = {verdict, note}; }
+void probe_verdict(const std::string& id, int verdict, const std::string& note, bool pitch_followed, bool turns_pawn) {
+    g_verdicts[id] = {verdict, note, pitch_followed, turns_pawn};
+}
 
 void probe_reset() {
     g_leaves.clear();
@@ -1556,8 +1571,8 @@ std::string probe_suggestion(const std::string& exe_stem, std::string& summary, 
     verified = false;
     if (g_scored_diffs < 2) return {};
     const std::vector<ProbeGroup> groups = probe_groups();
-    // The pick: a group that moved the camera in the live test, else the passive best guess (usable groups the
-    // live test didn't reject).
+    // The pick: a group that moved the camera in the live test (the best of them comes first, see probe_groups),
+    // else the passive best guess (usable groups the live test didn't reject).
     const ProbeGroup* best = nullptr;
     for (const ProbeGroup& g : groups)
         if (g.verdict == kMovesCamera) {

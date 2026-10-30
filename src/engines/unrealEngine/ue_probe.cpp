@@ -275,6 +275,7 @@ void test_result(int verdict, const std::string& note) {
     log("probe test (round %d): %s: %s%s%s", g_test.round, group_text(g).c_str(), what, note.empty() ? "" : ": ", note.c_str());
     if (verdict == ue::kMovesCamera && g_test.round == 1) g_test.passed.push_back(g.id);  // verdict after round 2
     else if (verdict != ue::kMovesCamera && g_test.round == 2) ue::probe_verdict(g.id, ue::kInconsistent, note);
+    else if (verdict == ue::kMovesCamera) ue::probe_verdict(g.id, verdict, note, g_test.pitch_ok, g_test.turns_pawn);
     else ue::probe_verdict(g.id, verdict, note);
     next_candidate();
 }
@@ -396,19 +397,21 @@ void finish_tests() {
     g_test.phase = LiveTest::Off;
     if (probe_adds_view()) {
         const std::vector<ue::ProbeGroup> groups = ue::probe_groups();
-        // A rotation that turns yaw and pitch first. A yaw-only one (Dead Island 2: the pawn's capsule, which the
-        // first-person camera follows in yaw while pitch stays in ControlRotation) is learned with PitchView=1: its
-        // pitch goes to the default view, else the view would lose pitch.
-        auto pitch_ok = [](const ue::ProbeGroup& g) { return g.note.find(kPitchFollowed) != std::string::npos; };
-        auto verified = std::find_if(groups.begin(), groups.end(), [&](const ue::ProbeGroup& g) {
-            return g.verdict == ue::kMovesCamera && pitch_ok(g);
-        });
-        if (verified == groups.end())
-            verified = std::find_if(groups.begin(), groups.end(),
-                                    [](const ue::ProbeGroup& g) { return g.verdict == ue::kMovesCamera; });
-        if (verified != groups.end()) {
+        // The best verified rotation comes first (probe_groups): yaw and pitch, then one that also turns the character.
+        // A yaw-only one (Dead Island 2: the pawn's capsule, which the first-person camera follows in yaw while pitch
+        // stays in ControlRotation) is learned with PitchView=1: its pitch goes to the default view, else the view
+        // would lose pitch.
+        if (!groups.empty() && groups.front().verdict == ue::kMovesCamera) {
+            const ue::ProbeGroup& verified = groups.front();
+            const size_t count = std::count_if(groups.begin(), groups.end(),
+                                               [](const ue::ProbeGroup& g) { return g.verdict == ue::kMovesCamera; });
             log("probe: done, a rotation moved the camera in both rounds of the live test");
-            return learn_camera(*verified, !pitch_ok(*verified));
+            if (count > 1)
+                probe_log("probe: %zu rotations moved the camera; picked %s (%s)", count, group_text(verified).c_str(),
+                          verified.turns_pawn       ? "it also turns the character: the look input, upstream of the camera"
+                          : verified.pitch_followed ? "turns yaw and pitch"
+                                                    : "yaw only");
+            return learn_camera(verified, !verified.pitch_followed);
         }
     }
     bool usable = false, verified = false;

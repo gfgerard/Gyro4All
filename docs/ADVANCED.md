@@ -532,7 +532,11 @@ The gyro output is **paused** while it runs, so the controller can stay in your 
    the stick orbits it around the character (the captures measure the radius), so a candidate that only turns the
    view on the spot (a free camera) fails too. The ones that pass are tested again in a second round. Touching the stick,
    pausing or leaving gameplay pauses the test (it retries).
-3. **Result.** A rotation that passed both rounds is **verified live**:
+3. **Result.** A rotation that passed both rounds is **verified live**. When several pass, the probe takes one that
+   turns pitch too, and among those one that **also turns the character** (`it also turns the character` in the log):
+   that one is the look input that both the camera and the character read. A rotation that turns only the camera can
+   be a camera stage the game rebuilds from it in other states (Silent Hill 2: the spring arm turns the camera
+   standing still, but the game rewrites it while walking, and while aiming it moves only the crosshair).
    - **The game has no profile:** Gyro4All writes it, `Gyro4All\profiles\<game exe>.ini`. Restart the game to use it.
    - **The game already has a profile:** it is left untouched; the result goes to `<game exe>.suggested.ini` next to
      it. To use it, rename it to `<game exe>.ini` (replacing the old one) and restart.
