@@ -66,6 +66,7 @@ StickFallback g_stick_fallback;  // the gyro as right-stick input while the game
 bool g_applied_this_frame = false;
 bool g_stick_suppression = false;  // GL_HOST_NATIVE_STICK_SUPPRESSION declared (xinput.cpp or nativepad.cpp can do it)
 bool g_fallback_test = false;      // StickFallbackTest=1: the stick fallback forced on every other minute
+bool g_fallback_off = false;       // StickFallback=0: the gyro never goes to the game as right-stick input
 bool g_native_flick = false;       // NativeFlickStick=1: flick stick through the game's own PlayStation reports too
 // Stick camera (StickCamera=1, stick_camera.hpp): the right stick's turn written like the gyro's, while the game reads a
 // centred right stick. Its Stick* values are read again when Gyro4All.ini or the game's profile is saved.
@@ -834,9 +835,16 @@ void frame() {
         trace_frame(now_ns, camera, gs.new_samples, out, pitch, yaw);
     }
     // Stick fallback: when the game undoes the gyro's camera writes, its turn goes to the game as right-stick input;
-    // when the engine has no hook for the game's camera at all, always (blind).
+    // when the engine has no hook for the game's camera at all, always (blind). StickFallback=0: never.
     const bool turning = view && host.camera_allowed && !g_engine->hold_gyro();
-    if (f.no_camera) {
+    if (g_fallback_off) {
+        static bool logged = false;
+        if (f.no_camera && !logged) {
+            logged = true;
+            log("stick fallback: off (StickFallback=0), and the engine has no hook for this game's camera: the gyro "
+                "can't turn it");
+        }
+    } else if (f.no_camera) {
         g_stick_fallback.frame_blind(turning && host.focused && !f.paused && !neutral, now_ns);
     } else {
         double view_pitch = 0, view_yaw = 0;
@@ -955,7 +963,11 @@ void host_configure(Engine& engine) {
     engine.configure();
     load_sensitivity_profiles();
     g_native_flick = settings::get(L"NativeFlickStick", 0) != 0;
-    g_fallback_test = settings::get(L"StickFallbackTest", 0) != 0;
+    // StickFallback=0: for games whose camera writes always last, where the fallback would only start by mistake (the
+    // gyro pushed against a pitch limit, a scene that takes the camera over) and turn the camera through the stick.
+    g_fallback_off = settings::get(L"StickFallback", 1) == 0;
+    if (g_fallback_off) log("settings: StickFallback=0 (the gyro never goes to the game as right-stick input)");
+    g_fallback_test = !g_fallback_off && settings::get(L"StickFallbackTest", 0) != 0;
     if (g_fallback_test) log("settings: StickFallbackTest=1 (the stick fallback forced on every other minute)");
     // The game's stick as the stick fallback learnt it in an earlier session (written to the profile by save_stick_model).
     if (const std::string saved = settings::get_string(L"StickFallbackLearned"); !saved.empty()) {
