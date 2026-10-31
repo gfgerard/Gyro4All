@@ -6133,8 +6133,89 @@ or gyro to stick.
   never searched again. Fix: when the Matrix planes don't read back (`find_members`), the table is a decoy: logged
   (`ue3: the name table at ... doesn't read Core.Object.Matrix's planes: a decoy, looking for another`), remembered and
   skipped by the next `find_names` (the list is cleared when nothing else fits). Built, 698 checks pass; not tested in
+- 2026-10-30 **Steam Input mouse option in the gyro4all.dll panel: experiment (built, 700 checks pass; not tested in
+  game).** User: the per-view `input.steam_mouse` row (Pass through / Block / Convert) shows in a DX12 game's panel but
+  not in the static panel. Cause (known gap, see the gyro4all.dll entry above): GyroLib offers the row only while a
+  Windows mouse bridge is attached (`gl_overlay_win32_message` or `gl_sdl_attach_window`), and the static panel has
+  neither. Experiment (`overlay.cpp`): next to the static panel, a second `gl_overlay` (`g_bridge`) that is never
+  `gl_overlay_dx12_init`-ed, used only as the bridge: `hk_wndproc` forwards it `WM_INPUT`/`WM_MOUSEMOVE` (open or
+  closed) and drops what it returns with `GL_OVERLAY_CAPTURE_MOUSE`; `gl_overlay_process(bridge)` before `gl_update`.
+  Panel open/close, capture and F10 stay on gyro4all.dll. `PanelSteamMouse=0` in `Gyro4All.ini` turns it off. Log:
+  `Steam Input mouse bridge attached next to the gyro4all.dll panel`, `Steam Input mouse movement taken by GyroLib's
+  bridge` (once). Open questions for the test: does the row appear; does Block/Convert act (window messages, and
+  GyroLib's low-level mouse hook for games reading DirectInput or the cursor); does `gl_overlay_process` or the
+  bridge's missing renderer (250 ms snapshot rule) close or fight the static panel (`overlay: panel state` lines).
+  - **DOOM test (user, 2026-10-31; DualSense, Steam Input on with gyro to mouse always on, Vulkan): the row appears, the
+    panel opens and closes normally, but none of the three choices changes anything:** Steam's mouse still turns the
+    camera with Block. Log: bridge attached, `Steam Input mouse movement taken` never logged, and the panel's message
+    counts show `WM_INPUT 0` (only `WM_MOUSEMOVE`). Cause: DOOM reads the mouse through exclusive DirectInput and
+    registers no Raw Input, so the bridge never gets the `WM_INPUT` packets it needs to confirm the Steam stream
+    (OVERLAY.md: at least three device-less relative raw movements correlated with injected movement), and in gameplay
+    the exclusive mouse sends no `WM_MOUSEMOVE` either. Before confirmation GyroLib passes everything through, and its
+    low-level hook only intercepts after confirmation. OVERLAY.md already names this case: "DirectInput or
+    GetRawInputBuffer, need an adapter". Not yet tried: a game that reads the mouse through `WM_INPUT` (most UE4 DX11
+    games), which would show whether the bridge itself works next to the static panel.
+  - **Days Gone test (user, 2026-10-31; DualSense, Steam Input on with L2 = gyro to mouse, Block selected, DX11 static
+    panel): Block has no effect either.** A temporary 10 s counter in `hk_wndproc` (what reaches the bridge) shows
+    `WM_INPUT 0` in gameplay with the panel closed (only 2-14 `WM_MOUSEMOVE` per 10 s), while the game keeps
+    registering the Raw Input mouse (usage 0x1/0x2, flags 0x0). `WM_INPUT` reaches the window only while the panel is
+    open (79-186 per 10 s), when the game stops reading input. So in gameplay Days Gone takes its mouse packets before
+    they are dispatched to the window (likely `GetRawInputBuffer`; not confirmed) and the bridge never sees them; `taken`
+    stayed 0 and no packet came from no device. Same limit as DOOM: the window-message bridge only works for games
+    that read the mouse through `WM_INPUT` in their window procedure. GyroLib's API has no entry for packets read
+    with `GetRawInputBuffer` or DirectInput (`gl_overlay_win32_message` needs the `HRAWINPUT` of a message).
+  - **Message-loop feed (same day):** Gyro4All's `PeekMessageW/A` hooks also hand the bridge each `WM_INPUT` the game
+    removes from its queue (taken ones become `WM_NULL`; the window hook skips a handle already fed). Days Gone test:
+    with the panel open every packet arrived through the loop (219-245 per 10 s), so the game does read `WM_INPUT` in
+    its loop; in gameplay with L2 held still 0 `WM_INPUT`.
+  - **Low-level hook count (temporary `WH_MOUSE_LL` diagnostic, injected vs hardware motion while the game is in
+    front):** L2 held, mouse untouched: injected 0, hardware 0, `WM_INPUT` 0. Physical mouse only: hardware 230-959,
+    `WM_INPUT` 579-610 per 10 s, all through the loop, none from no device. **So in Days Gone Steam's gyro "mouse"
+    never reaches Windows as mouse input at all.** Days Gone uses the Steam Input API itself (GyroLib's Steam Input
+    reader reports `ok` with its steam_api64.dll), so the L2 gyro binding most likely feeds one of the game's own
+    Steam Input actions (mouse-like camera action), which no mouse bridge can see or block. Days Gone is therefore not a
+    test of the bridge; the loop feed itself works (physical packets reach the bridge in gameplay). Still untested: a
+    game where Steam's mouse is OS-injected (games without the Steam Input API, e.g. DOOM 2016) and that reads
+    `WM_INPUT`.
+  - **DOOM (2016) with the low-level hook count (user, same day; Steam Input gyro to mouse always on):** Steam's mouse
+    *is* OS-injected there: injected 54-2833 motions per 10 s with the controller moving (hardware 0 when the mouse is
+    untouched), while the bridge got `WM_INPUT 0` throughout (DirectInput, no Raw Input registered). DOOM's old
+    steam_api64.dll has no Steam Input API (`reader unavailable`), so Steam can only drive it as a real mouse. This is
+    the case for GyroLib: injected motion is visible to a low-level mouse hook, but the bridge confirms the stream only
+    from device-less `WM_INPUT` packets, which a DirectInput game never produces, so Block/Convert never engage.
+- 2026-10-31 **Mass Effect 3 LE: XInput translation toggling every second (user log; not every run).** The DualSense is
+  shown as XInput controller 0, then the watcher thread finds "a real XInput controller" on every other 1 s pass: hidden,
+  shown, hidden... (WM_DEVICECHANGE each time, unstable controller in game). On that system the XInput DLLs differ from
+  the good run's (`xinput1_4.dll!XInputGetState` at +0x1750 and `xinput9_1_0.dll` at +0x1160, against +0x9a60/+0x1b40),
+  so the watcher's own XInputGetState call reaches a Gyro4All hook through a chain `passes_through` doesn't know, and is
+  answered with the translated controller. Fix (`xinput.cpp`): the watcher thread is marked (`t_watcher`); `our_state`
+  never answers it and the xinput1_4 inline hooks pass its calls straight on, whatever the chain. New log line when the
+  watcher's slot mask changes (`xinput: real XInput controllers in slots 0x..`). Built, 700 checks pass; not tested in
   game yet.
 - 2026-10-30 **Moved onto 1.9.0 (main)**: `find_names` and `ue3tool.py` keep upstream's repeated-chunk check and add the
   per-chunk 3/4 rule (the module also keeps rejecting a table whose Matrix planes don't read back).
 - 2026-10-31 **Split from the zoom work** into its own change: `StickFallback=0`, the ME3 profile and the name table
   search; built with MSVC 14.51, 700 checks pass.
+- 2026-10-31 **`Unreal3::limit_turn`: the pitch limit learnt, so a push against it doesn't start the stick fallback**
+  (review of PR 12: Mass Effect 3 LE's fallback started now and then while the gyro worked; one cause was the gyro
+  pushed against the game's pitch limit, which the Unreal3 module didn't trim: the game clamps `Actor.Rotation`'s pitch
+  back each frame and the core read that as undone writes).
+  - As in id Tech (DOOM 2016): the limit isn't read from the game (`Camera.ViewPitchMin/Max` aren't what every UE3 game
+    clamps to, e.g. BioWare's `SFXPlayerCamera`). A pitch past 30 deg up or down (`kMinLimit`: a scene holding the
+    camera near level isn't a limit) that stays put for `kStuckMs` (40 ms) while every turn asks for more is taken as
+    the limit (`ue3: the view stops at N degrees up/down: the gyro's pitch stops there`); the turn stops there, raised if
+    the pitch ever goes past it, learnt again for each player controller (level loads).
+  - Doesn't cover the other cause (a scene that takes the camera over) nor the fallback's drift with a resting stick.
+  - First in-game run (user, ME3 LE, DualSense as Gyro4All's XInput controller 0, Steam Input not handling it; 165
+    frames/s): limits learnt at 60.0 deg up and down, but the fallback still started at the limit 5 times in 18 min,
+    each time 0-7 ms before the `view stops` line: 8 undone frames at 165 frames/s (~48 ms) beat `kStuckMs` plus the
+    first still frame. Each ended 0.5-2 s later (`the game keeps the gyro's writes again`). Limits are learnt again after
+    each level load (new controller), so the race came back each time. Two other starts, mid-pitch (-16 deg) with no
+    limit line, ended with `the stick turns nothing` within 0.3 s: the other cause (a scene holding the camera).
+  - Fix: while the limit is being learnt, the turn already stops wherever the pitch is stuck (from the second frame of a
+    push), and a push is judged on the untrimmed request, so it stays one on the next frames; push threshold 0.03 deg a
+    frame (was 0.25: slow pushes weren't seen), still under 0.02 deg. Built, 700 checks pass, deployed to ME3.
+  - Second in-game run (user, same setup, ~2 min of play): limits learnt at 60.0 deg up and down (down again later, after
+    the pitch went past it) with no fallback start at either. One start mid-scene with no limit line, 6 s after the
+    limits were learnt, ended in 0.35 s (`the stick turns nothing`): the other cause. Short test; a longer session with
+    level loads still to do.
