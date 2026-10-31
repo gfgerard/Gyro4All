@@ -6219,3 +6219,10 @@ or gyro to stick.
     the pitch went past it) with no fallback start at either. One start mid-scene with no limit line, 6 s after the
     limits were learnt, ended in 0.35 s (`the stick turns nothing`): the other cause. Short test; a longer session with
     level loads still to do.
+- 2026-10-31 **PR 12 review fixes** (on the PR's branch): with `StickFallback=0` and no camera hook, an on-screen notice
+  (10 s) joins the log line (the gyro turns nothing; the first ME3 run showed it only in the log). Unreal3's
+  `engine not found` line, the frame target and the status line no longer say "gyro as right stick" with
+  `StickFallback=0` (`the gyro turns nothing (StickFallback=0)`). The decoy name table line is logged once per table:
+  `find_names` brings the rejected tables back every `kRetryMs` once nothing else fits, so a game whose planes never
+  read (an offset field outside +0x60..+0x100) logged it every 2 s until `kGiveUpMs`; the rescans themselves remain.
+  Built, 700 checks pass; not tested in game.

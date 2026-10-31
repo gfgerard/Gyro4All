@@ -843,6 +843,9 @@ void frame() {
             logged = true;
             log("stick fallback: off (StickFallback=0), and the engine has no hook for this game's camera: the gyro "
                 "can't turn it");
+            notify::show(L"Gyro4All: this game's camera wasn't found, and StickFallback=0 keeps the gyro off the right "
+                         L"stick: the gyro turns nothing (see Gyro4All.log)",
+                         10);
         }
     } else if (f.no_camera) {
         g_stick_fallback.frame_blind(turning && host.focused && !f.paused && !neutral, now_ns);

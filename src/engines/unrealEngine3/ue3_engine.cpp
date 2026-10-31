@@ -365,8 +365,14 @@ bool find_members() {
         // decoy whose first chunk is right (Mass Effect LE 3's, found before the real one 3 s after start, while no
         // sampled object used the second chunk yet). The next try takes the next table that fits.
         if (g_names) {
-            log("ue3: the name table at %s doesn't read Core.Object.Matrix's planes: a decoy, looking for another",
-                mem::module_offset(g_names).c_str());
+            // Once per table: the rejected list is cleared when nothing else fits, so the same tables come back every
+            // kRetryMs while the planes don't read (e.g. an offset field outside the search) until kGiveUpMs.
+            static std::vector<uintptr_t> logged;
+            if (std::find(logged.begin(), logged.end(), g_names) == logged.end()) {
+                logged.push_back(g_names);
+                log("ue3: the name table at %s doesn't read Core.Object.Matrix's planes: a decoy, looking for another",
+                    mem::module_offset(g_names).c_str());
+            }
             g_rejected_names.push_back(g_names);
             g_names = 0;
         }
@@ -427,6 +433,8 @@ public:
         // Dishonored keeps WorldInfo.bIsMenuLevel on in play: its profile turns the menu check off.
         use_menu_level_ = settings::profile_int(L"Unreal3", L"MenuLevel", 1) != 0;
         if (!use_menu_level_) log("ue3: WorldInfo.bIsMenuLevel ignored (profile: [Unreal3] MenuLevel=0)");
+        // StickFallback=0 (the core's): with no camera hook the gyro turns nothing, which the log and status say.
+        stick_fallback_ = settings::get(L"StickFallback", 1) != 0;
     }
 
     std::vector<ViewInfo> views() const override { return {{1, "Default", 0}}; }
@@ -438,7 +446,7 @@ public:
             f.no_camera = true;
             f.in_game = true;
             f.view_id = 1;
-            f.target = "no camera hook (gyro as right stick)";
+            f.target = stick_fallback_ ? "no camera hook (gyro as right stick)" : "no camera hook (StickFallback=0)";
             return f;
         }
         if (stage_ != Stage::Ready) return f;
@@ -541,7 +549,8 @@ public:
     bool sees_menus() const override { return stage_ != Stage::Failed; }
 
     std::string status_scene() const override {
-        if (stage_ == Stage::Failed) return "ue3: no camera hook, gyro as right stick";
+        if (stage_ == Stage::Failed)
+            return stick_fallback_ ? "ue3: no camera hook, gyro as right stick" : "ue3: no camera hook, gyro off (StickFallback=0)";
         if (stage_ != Stage::Ready) return "ue3: looking for the engine";
         int32_t r[3] = {};
         if (!pc_ || !mem::rd(pc_ + g_off.rotation, r)) return "ue3: no player controller";
@@ -575,8 +584,10 @@ private:
                 g_menu_level.mask, mem::module_offset(g_engine).c_str());
         } else if (now - first_try_ > kGiveUpMs) {
             stage_ = Stage::Failed;
-            log("ue3: engine not found (GObjects %s, names %s, property offset field %s): the gyro goes to the game as "
-                "right-stick input", g_objects ? "found" : "missing", g_names ? "found" : "missing", g_prop_offset ? "found" : "missing");
+            log("ue3: engine not found (GObjects %s, names %s, property offset field %s): %s", g_objects ? "found" : "missing",
+                g_names ? "found" : "missing", g_prop_offset ? "found" : "missing",
+                stick_fallback_ ? "the gyro goes to the game as right-stick input"
+                                : "the gyro turns nothing (StickFallback=0)");
         }
     }
 
@@ -592,7 +603,7 @@ private:
     }
 
     Stage stage_ = Stage::Waiting;
-    bool players_only_ = false, menu_level_ = false, use_menu_level_ = true;
+    bool players_only_ = false, menu_level_ = false, use_menu_level_ = true, stick_fallback_ = true;
     ULONGLONG first_try_ = 0, last_try_ = 0;
     uintptr_t pc_ = 0, pawn_ = 0;
     std::string pawn_name_;
