@@ -6,6 +6,7 @@
 #include "log.hpp"
 #include "longpress.hpp"
 #include "dinputpad.hpp"
+#include "steammouse.hpp"
 #include "stick_camera.hpp"
 #include "stick_fallback.hpp"
 #include "nativepad.hpp"
@@ -766,6 +767,18 @@ void frame() {
     dinputpad::frame(neutral, pad);
     const unsigned panel_capture = overlay::capture();
     dinputpad::set_capture((panel_capture & GL_OVERLAY_CAPTURE_MOUSE) != 0, (panel_capture & GL_OVERLAY_CAPTURE_KEYBOARD) != 0);
+    // Steam Input's mouse, per GyroLib's input.steam_mouse row (Convert's turn joins the gyro's below).
+    double mouse_pitch = 0, mouse_yaw = 0;
+    {
+        steammouse::Frame m;
+        m.ctx = g_gyro->get();
+        m.pad = pad;
+        m.view = profile ? profile : f.view_id;
+        m.focused = host.focused;
+        m.camera = view && host.camera_allowed && host.focused && !f.paused && !g_engine->hold_gyro();
+        m.gyrolib_panel = overlay::gyrolib_panel();
+        steammouse::frame(m, mouse_pitch, mouse_yaw);
+    }
     // Long-press blocking: the activation button's press is held back from the game, or given to it as a short tap,
     // wherever the game reads that controller through a path Gyro4All can change.
     const longpress::Mask buttons = longpress::frame(g_gyro->get(), pad, now_ns, host.focused && !neutral, g_long_press);
@@ -877,7 +890,7 @@ void frame() {
     }
     // The stick camera's turn goes with the gyro's (one write; the engine's follow check sees both); the stick fallback
     // judges and owes the gyro's share only.
-    double turn_pitch = pitch + stick_pitch, turn_yaw = yaw + stick_yaw;
+    double turn_pitch = pitch + stick_pitch + mouse_pitch, turn_yaw = yaw + stick_yaw + mouse_yaw;
     double gyro_pitch = pitch, gyro_yaw = yaw;  // the gyro's share of the turn
     if (turning && (turn_yaw != 0 || turn_pitch != 0)) {
         // A turn the view can't take (past the game's pitch limit) is left out, the gyro's share in proportion.

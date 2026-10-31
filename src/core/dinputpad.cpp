@@ -92,6 +92,8 @@ bool ours(const void* address) {
     return m && (m == self || m == GetModuleHandleW(L"gyrolib.dll") || m == GetModuleHandleW(L"SDL3.dll"));
 }
 
+std::atomic<uint32_t> g_mouse_acquires{0};  // see mouse_acquires()
+
 Desktop* find_desktop(void* device) {
     for (Desktop& d : g_desktop)
         if (d.device.load(std::memory_order_acquire) == device) return &d;
@@ -120,6 +122,7 @@ bool let_go(void* device, Desktop& d) {
         auto acquire = reinterpret_cast<Acquire_t>(g_acquire.original_for(device));
         if (!acquire) acquire = reinterpret_cast<Acquire_t>(method(device, kAcquire));
         const HRESULT hr = acquire(device);
+        if (d.mouse && hr == DI_OK) g_mouse_acquires.fetch_add(1);
         log("dinputpad: the game's exclusive DirectInput %s acquired again (0x%08lX)", desktop_name(d),
             static_cast<unsigned long>(hr));
     }
@@ -297,8 +300,11 @@ HRESULT STDMETHODCALLTYPE hk_get_data(void* device, DWORD object_size, LPDIDEVIC
 // The game acquiring a mouse or keyboard we let go for the panel: left unacquired, reported done.
 HRESULT STDMETHODCALLTYPE hk_acquire(void* device) {
     auto real = reinterpret_cast<Acquire_t>(g_acquire.original_for(device));
-    if (const Desktop* d = find_desktop(device); d && d->released.load() && captured(*d)) return DI_OK;
-    return real ? real(device) : E_FAIL;
+    const Desktop* d = find_desktop(device);
+    if (d && d->released.load() && captured(*d)) return DI_OK;
+    const HRESULT hr = real ? real(device) : E_FAIL;
+    if (d && d->mouse && hr == DI_OK) g_mouse_acquires.fetch_add(1);  // S_FALSE: already acquired
+    return hr;
 }
 
 HRESULT STDMETHODCALLTYPE hk_cooperative(void* device, HWND window, DWORD flags) {
@@ -407,6 +413,8 @@ void frame(bool neutral, SDL_Gamepad* pad) {
         log("dinputpad: the game's DirectInput controller %s (%u states idled so far)",
             neutral ? "reads idle (GyroLib's panel has the controller)" : "passed through again", g_idled.load());
 }
+
+uint32_t mouse_acquires() { return g_mouse_acquires.load(); }
 
 void set_capture(bool mouse, bool keyboard) {
     const bool any = std::any_of(std::begin(g_desktop), std::end(g_desktop),

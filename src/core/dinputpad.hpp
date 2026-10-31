@@ -38,6 +38,10 @@ void frame(bool neutral, SDL_Gamepad* pad);
 // DirectInput mice and keyboards then read nothing pressed and no motion; buffered reads keep only releases.
 void set_capture(bool mouse, bool keyboard);
 
+// How many times the game (or the panel's release) acquired a DirectInput mouse. An exclusive one installs DirectInput's
+// own low-level mouse hook on Acquire, ahead of any installed before it (steammouse.cpp re-installs its hook after).
+uint32_t mouse_acquires();
+
 // Stick fallback (stick_fallback.hpp; game thread): right-stick deflection added to what the game's GetDeviceState
 // returns (x right, y up, -1..1; 0, 0 = none). Standard joystick formats only, right stick on Z/Rz (PlayStation
 // controllers).

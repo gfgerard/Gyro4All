@@ -82,6 +82,12 @@ ULONG refs_of(IUnknown* object) {
 }
 HWND g_hwnd = nullptr;
 std::atomic<gl_overlay*> g_overlay{nullptr};
+// Next to gyro4all.dll's static panel: a gl_overlay that never renders and is never fed window messages. GyroLib shows
+// its per-view "Steam Input mouse" row (input.steam_mouse) only while one of its mouse bridges exists; this one gives
+// that row to the static panel. GyroLib's bridge confirms Steam's mouse from Raw Input messages it never gets here, so
+// it never intercepts anything itself: steammouse.cpp applies the row's choice (MODLOG 2026-10-31).
+gl_overlay* g_bridge = nullptr;
+bool g_bridge_tried = false;
 std::atomic<bool> g_renderer_ready{false}, g_renderer_failed{false}, g_reinit{false};
 bool g_subclassed = false;
 HWND g_subclassed_hwnd = nullptr;  // the window hk_wndproc is on
@@ -1234,6 +1240,14 @@ void install(const std::wstring& settings_path) {
 
 void on_present(PresentFn fn) { g_on_present = fn; }
 
+void attach_bridge(gl_context* ctx) {
+    if (g_bridge_tried) return;
+    g_bridge_tried = true;
+    g_bridge = gl_overlay_create(ctx, GL_OVERLAY_ABI_VERSION);
+    if (!g_bridge) log("overlay: no Steam Input mouse row in the panel (GyroLib's bridge: %s)", gl_overlay_error());
+    else log("overlay: GyroLib's Steam Input mouse row enabled in the gyro4all.dll panel (its bridge, without a renderer)");
+}
+
 bool attach(gl_context* ctx) {
     if (!g_enabled) return false;
     if (panel_host::api()) {  // the static panel came first (D3D10/D3D11/D3D9): one frontend per context
@@ -1241,6 +1255,7 @@ bool attach(gl_context* ctx) {
             unsubclass();
             subclass(moved);
         }
+        attach_bridge(ctx);
         return true;
     }
     HWND hwnd = nullptr;
@@ -1255,6 +1270,7 @@ bool attach(gl_context* ctx) {
             return false;
         if (!panel_host::attach(ctx)) return false;
         subclass(panel_host::window());
+        attach_bridge(ctx);
         return true;
     }
     if (!hwnd) return false;
@@ -1274,6 +1290,7 @@ bool attach(gl_context* ctx) {
 
 void process() {
     if (gl_overlay* overlay = g_overlay.load()) gl_overlay_process(overlay);
+    else if (g_bridge) gl_overlay_process(g_bridge);
 }
 
 bool available() {
@@ -1312,6 +1329,8 @@ void poll_menu_key(gl_context* ctx, bool focused) {
     }
     g_menu_key_down = down;
 }
+
+bool gyrolib_panel() { return g_overlay.load() != nullptr; }
 
 unsigned capture() {
     unsigned cap = 0;

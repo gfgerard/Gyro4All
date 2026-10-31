@@ -45,6 +45,8 @@ constexpr float kMinPitch = -89.0f, kMaxPitch = 89.0f;
 // 16.7 ms); over kTickMs its view angles aren't reported (view_angles), so the core's stick fallback can't take the
 // writes the paused game doesn't apply for undone ones (it did, while the pause menu or the map opened).
 constexpr ULONGLONG kFrozenMs = 60, kTickMs = 20;
+// limit_turn: how long the view must stay put while turns ask for more pitch to count as the game's limit.
+constexpr ULONGLONG kStuckMs = 40;
 
 // Milliseconds from the performance counter (GetTickCount64 moves in ~15.6 ms steps: too coarse for kTickMs).
 ULONGLONG precise_ms() {
@@ -535,6 +537,41 @@ public:
         return true;
     }
 
+    // id Tech 6+ (deltaViewAngles path): the view stops short of kMin/kMaxPitch (DOOM 2016: pushing the gyro to the top or
+    // bottom made the core's stick fallback take the stopped view for writes the game undid, MODLOG 2026-10-31). The
+    // limit isn't read from the game: a view beyond 45 degrees that stays put for kStuckMs (several 60 Hz ticks: the view
+    // only moves on the game's ticks) while every turn asks for more is taken as the limit there, and the turn stops at
+    // it from then on (raised again if the view ever goes past it).
+    void limit_turn(double& pitch, double& /*yaw*/) override {
+        if (g_layout.tech5 || g_layout.mg6 || g_layout.mg7 || !player_) return;
+        const uintptr_t physics = physics_of(player_);
+        Angles view;
+        if (!physics || !mem::rd(physics + uintptr_t(g_layout.view_angles), view) || !std::isfinite(view.pitch)) return;
+        const double up = -double(view.pitch);  // gyro sense
+        const ULONGLONG now = precise_ms();
+        const bool recent = now - asked_at_ < 100;
+        const bool still = std::abs(up - last_up_) < 0.05;
+        const int pushing = !recent || !still ? 0 : asked_up_ > up + 0.25 && up > 45 ? 1 : asked_up_ < up - 0.25 && up < -45 ? -1 : 0;
+        if (!pushing || pushing != stuck_dir_) {
+            stuck_dir_ = pushing;
+            stuck_since_ = now;
+        } else if (now - stuck_since_ >= kStuckMs) {
+            if (pushing > 0 && up < top_) {
+                top_ = up;
+                log("idtech: the view stops at %.1f degrees up: the gyro's pitch stops there", top_);
+            } else if (pushing < 0 && up > bottom_) {
+                bottom_ = up;
+                log("idtech: the view stops at %.1f degrees down: the gyro's pitch stops there", -bottom_);
+            }
+        }
+        if (up > top_) top_ = std::min(up, double(kMaxPitch));
+        if (up < bottom_) bottom_ = std::max(up, double(kMinPitch));
+        pitch = std::clamp(pitch, bottom_ - up, top_ - up);
+        asked_up_ = up + pitch;
+        asked_at_ = now;
+        last_up_ = up;
+    }
+
     // viewAngles in GyroLib's senses (pitch up, yaw right), for the core's checks; camera = the player. id Tech 5: the
     // input angles the gyro writes (a gun follows them at its own ratio, the view may stop at its pitch limits: neither
     // is a write the game undid).
@@ -771,6 +808,10 @@ private:
     }
 
     bool first_write_logged_ = false;
+    // limit_turn: the view's pitch limits as seen (gyro sense, degrees) and the pitch the last turn asked for.
+    double top_ = kMaxPitch, bottom_ = kMinPitch, asked_up_ = 0, last_up_ = 0;
+    ULONGLONG asked_at_ = 0, stuck_since_ = 0;
+    int stuck_dir_ = 0;
     uintptr_t player_ = 0;
     uintptr_t tech5_checked_ = 0;  // id Tech 5: the player whose offsets passed check_tech5
     ULONGLONG tech5_next_check_ = 0;
