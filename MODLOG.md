@@ -6228,3 +6228,26 @@ or gyro to stick.
     mouse) and Mass Effect 3 LE (DX11, protected exe, non-exclusive DirectInput mouse)**, with the row in the
     gyro4all.dll panel (DualSense under Steam Input, gyro to mouse; connection not reported). Not yet verified: a game
     reading `WM_INPUT` itself (UE), the DOOM pitch-limit learning (no report yet), DX10/DX9/OpenGL games.
+- 2026-10-31 **`Unreal3::limit_turn`: the pitch limit learnt, so a push against it doesn't start the stick fallback**
+  (review of PR 12: Mass Effect 3 LE's fallback started now and then while the gyro worked; one cause was the gyro
+  pushed against the game's pitch limit, which the Unreal3 module didn't trim: the game clamps `Actor.Rotation`'s pitch
+  back each frame and the core read that as undone writes).
+  - As in id Tech (DOOM 2016): the limit isn't read from the game (`Camera.ViewPitchMin/Max` aren't what every UE3 game
+    clamps to, e.g. BioWare's `SFXPlayerCamera`). A pitch past 30 deg up or down (`kMinLimit`: a scene holding the
+    camera near level isn't a limit) that stays put for `kStuckMs` (40 ms) while every turn asks for more is taken as
+    the limit (`ue3: the view stops at N degrees up/down: the gyro's pitch stops there`); the turn stops there, raised if
+    the pitch ever goes past it, learnt again for each player controller (level loads).
+  - Doesn't cover the other cause (a scene that takes the camera over) nor the fallback's drift with a resting stick.
+  - First in-game run (user, ME3 LE, DualSense as Gyro4All's XInput controller 0, Steam Input not handling it; 165
+    frames/s): limits learnt at 60.0 deg up and down, but the fallback still started at the limit 5 times in 18 min,
+    each time 0-7 ms before the `view stops` line: 8 undone frames at 165 frames/s (~48 ms) beat `kStuckMs` plus the
+    first still frame. Each ended 0.5-2 s later (`the game keeps the gyro's writes again`). Limits are learnt again after
+    each level load (new controller), so the race came back each time. Two other starts, mid-pitch (-16 deg) with no
+    limit line, ended with `the stick turns nothing` within 0.3 s: the other cause (a scene holding the camera).
+  - Fix: while the limit is being learnt, the turn already stops wherever the pitch is stuck (from the second frame of a
+    push), and a push is judged on the untrimmed request, so it stays one on the next frames; push threshold 0.03 deg a
+    frame (was 0.25: slow pushes weren't seen), still under 0.02 deg. Built, 700 checks pass, deployed to ME3.
+  - Second in-game run (user, same setup, ~2 min of play): limits learnt at 60.0 deg up and down (down again later, after
+    the pitch went past it) with no fallback start at either. One start mid-scene with no limit line, 6 s after the
+    limits were learnt, ended in 0.35 s (`the stick turns nothing`): the other cause. Short test; a longer session with
+    level loads still to do.

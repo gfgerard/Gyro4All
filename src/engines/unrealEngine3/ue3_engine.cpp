@@ -24,6 +24,8 @@
 // game level (WorldInfo.bIsMenuLevel off; Dishonored keeps it on in play, so its profile has [Unreal3] MenuLevel=0),
 // paused while Pauser is set or WorldInfo.Paused (Dishonored's pause menu) or bPlayersOnly (BioWare's menus) is on. If
 // any of this isn't found, the gyro goes to the game as right-stick input (the core's blind stick fallback).
+// The game clamps Rotation's pitch itself: limit_turn learns where it stops, so pushing the gyro against the limit isn't
+// taken for writes the game undid (the stick fallback started that way in Mass Effect LE 3, MODLOG 2026-10-30).
 #include "unreal3.hpp"
 #include "ue3_xinput.hpp"
 
@@ -52,6 +54,10 @@ uintptr_t g_outer = 0, g_name = 0, g_class = 0;
 uintptr_t g_super_field = 0;  // UStruct.SuperField
 constexpr double kUnitsPerDegree = 65536.0 / 360.0;
 constexpr ULONGLONG kRetryMs = 2000, kGiveUpMs = 60000;
+// limit_turn: how long the pitch must stay put while turns ask for more to count as the game's limit, and how far from
+// level it must be (a scene holding the camera near level isn't a limit).
+constexpr ULONGLONG kStuckMs = 40;
+constexpr double kMinLimit = 30;
 
 std::wstring g_cooked;  // detect(): the cooked package folder found, relative to the game's root (for the log)
 
@@ -420,6 +426,7 @@ public:
         if (pc != pc_) {
             pc_ = pc;
             acc_pitch_ = acc_yaw_ = 0;
+            top_ = 90, bottom_ = -90, stuck_dir_ = 0;  // another controller (a level load): its limits are learnt again
             log("ue3: player controller %s", pc ? (name_of(class_of(pc)) + " " + name_of(pc)).c_str() : "none");
         }
         if (!pc) return f;
@@ -443,6 +450,45 @@ public:
         f.view_id = pawn && !menu_level ? 1 : 0;
         f.target = pawn ? pawn_name_ : "no pawn";
         return f;
+    }
+
+    // The game's pitch limit isn't read from it (Camera.ViewPitchMin/Max aren't what every game clamps to): a pitch past
+    // kMinLimit that stays put for kStuckMs while every turn asks for more is taken as the limit there, and the turn
+    // stops at it from then on (raised again if the pitch ever goes past it). While it's being learnt, the turn already
+    // stops wherever the pitch is stuck: the stick fallback's 8 undone frames come before kStuckMs at 165 frames/s (Mass
+    // Effect LE 3: it started each time, a few ms before the limit was learnt).
+    void limit_turn(double& pitch, double& /*yaw*/) override {
+        int32_t r[3] = {};
+        if (stage_ != Stage::Ready || !pc_ || !mem::rd(pc_ + g_off.rotation, r)) return;
+        const double up = int16_t(r[0] & 0xFFFF) / kUnitsPerDegree;
+        const ULONGLONG now = steady_ms();
+        const bool recent = now - asked_at_ < 100;
+        const bool still = std::abs(up - last_up_) < 0.02;
+        const int pushing = !recent || !still                                    ? 0
+                            : asked_up_ > up + 0.03 && up > kMinLimit            ? 1
+                            : asked_up_ < up - 0.03 && up < -kMinLimit           ? -1
+                                                                                 : 0;
+        if (!pushing || pushing != stuck_dir_) {
+            stuck_dir_ = pushing;
+            stuck_since_ = now;
+        } else if (now - stuck_since_ >= kStuckMs) {
+            if (pushing > 0 && up < top_) {
+                top_ = up;
+                log("ue3: the view stops at %.1f degrees up: the gyro's pitch stops there", top_);
+            } else if (pushing < 0 && up > bottom_) {
+                bottom_ = up;
+                log("ue3: the view stops at %.1f degrees down: the gyro's pitch stops there", -bottom_);
+            }
+        }
+        if (up > top_) top_ = up;
+        if (up < bottom_) bottom_ = up;
+        // What the turn asks for, before any trim: a push stays a push on the next frames.
+        asked_up_ = up + pitch;
+        pitch = std::clamp(pitch, bottom_ - up, top_ - up);
+        if (pushing > 0) pitch = std::min(pitch, 0.0);
+        if (pushing < 0) pitch = std::max(pitch, 0.0);
+        asked_at_ = now;
+        last_up_ = up;
     }
 
     // Gyro degrees (pitch up, yaw right) to rotator units, the fractions kept for the next frame.
@@ -511,6 +557,12 @@ private:
         }
     }
 
+    static ULONGLONG steady_ms() {
+        return ULONGLONG(std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count());
+    }
+
     static bool world_bool(uintptr_t world, const Bool& b) {
         uint32_t word = 0;
         return world && b.mask && mem::rd(world + b.offset, word) && (word & b.mask);
@@ -522,6 +574,10 @@ private:
     uintptr_t pc_ = 0, pawn_ = 0;
     std::string pawn_name_;
     double acc_pitch_ = 0, acc_yaw_ = 0;
+    // limit_turn: the pitch limits as seen (degrees, up positive) and the pitch the last turn asked for.
+    double top_ = 90, bottom_ = -90, asked_up_ = 0, last_up_ = 0;
+    ULONGLONG asked_at_ = 0, stuck_since_ = 0;
+    int stuck_dir_ = 0;
 };
 
 }  // namespace
