@@ -671,7 +671,7 @@ public:
 
     std::vector<ViewInfo> views() const override {
         std::vector<ViewInfo> out;
-        for (const View& v : g_views) out.push_back({v.id, v.label, v.parent});
+        for (const View& v : g_views) out.push_back({v.id, v.label, v.parent, true});
         return out;
     }
 
@@ -710,6 +710,11 @@ public:
         f.view_id = view_id;
         f.base_view_id = base_id;
         f.target = target;
+        if (g_view) {
+            ZoomFov zoom;
+            if (ue::camera_fov(s.camera, g_view->zoom_reference_fov, zoom.current_vertical, zoom.reference_vertical))
+                f.zoom_fov = zoom;
+        }
         return f;
     }
 

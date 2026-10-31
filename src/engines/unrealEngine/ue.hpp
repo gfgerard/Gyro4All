@@ -118,6 +118,9 @@ std::string probe_suggestion(const std::string& exe_stem, std::string& summary, 
 bool camera_pov(Obj camera, double& pitch, double& yaw);
 // The camera's final view location (...POV.Location), in world units.
 bool camera_pov_location(Obj camera, double location[3]);
+// The displayed horizontal POV FOV and the unzoomed reference, converted to vertical degrees for GyroLib.
+// reference_horizontal = 0 reads PlayerCameraManager.DefaultFOV. Orthographic or incomplete views return false.
+bool camera_fov(Obj camera, double reference_horizontal, double& current_vertical, double& reference_vertical);
 
 // Raw guarded reads
 bool read_ptr(uintptr_t address, uintptr_t& out);

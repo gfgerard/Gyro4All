@@ -60,6 +60,8 @@ struct View {
     // level pitch in the view's own rotator (degrees, default 0).
     bool recenter = true;
     double recenter_pitch = 0;
+    // Unzoomed horizontal FOV used by zoom compensation; 0 reads PlayerCameraManager.DefaultFOV.
+    double zoom_reference_fov = 0;
     // Diagnostics: log these properties whenever they change; Dump=1 logs all properties once.
     std::vector<std::string> watch;
     bool dump = false, dumped = false;

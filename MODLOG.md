@@ -6317,3 +6317,34 @@ or gyro to stick.
   `find_names` brings the rejected tables back every `kRetryMs` once nothing else fits, so a game whose planes never
   read (an offset field outside +0x60..+0x100) logged it every 2 s until `kGiveUpMs`; the rescans themselves remain.
   Built, 700 checks pass; not tested in game.
+- 2026-10-31 **Multi-engine GyroLib zoom compensation** (built, 709 checks pass; user-tested in Days Gone):
+  `ViewInfo.zoom_available` declares
+  support per view; `EngineFrame.zoom_fov` carries current and unzoomed reference vertical FOV, and the core reports valid
+  values to the active GyroLib view before every update (ADS/ALT_ADS/OTHER included). Other engines keep support off until
+  they can report FOV. Unreal reads `PlayerCameraManager CameraCachePrivate.POV.FOV` (`CameraCache` in older UE4), horizontal
+  per `FMinimalViewInfo`, plus `POV.AspectRatio` and `ProjectionMode`; perspective FOV is converted with
+  `2*atan(tan(horizontal/2)/aspect)`. The reference is `DefaultFOV`, or horizontal `ZoomReferenceFOV=` in the view profile.
+  Missing/invalid data and orthographic views bypass scaling. No extra scale in camera writes; flick and saved sensitivity
+  stay unchanged. GyroLib formula and integration contract: its `ADVANCED_MOTION.md`, "Zoom compensation".
+  User verification: Zoom compensation worked as expected in Days Gone (DualSense; Steam Input reported no controllers;
+  USB/Bluetooth not reported).
+- 2026-10-31 **Unreal3: zoom compensation** (built, 709 checks pass; not tested in game): the second engine reporting FOV
+  through the core's contract. `find_members` also looks up (all optional) `PlayerController.PlayerCamera`,
+  `Camera.CameraCache`, `TPOV.FOV` and `PlayerController.DefaultFOV`; the Ready log prints them and
+  `zoom compensation available / not available (no Camera.CameraCache.FOV)`. Each frame, in the gameplay view, the module
+  reports `Camera.CameraCache.FOV` (the final POV's FOV, MODLOG 2026-10-22: the camera cache follows the controller's
+  rotation 1:1) as the current horizontal FOV and the unzoomed reference — `[Unreal3] ZoomReferenceFOV=` in the profile
+  when set, else `DefaultFOV` — converting both to vertical with the game window's client aspect (largest visible
+  top-level window of the process, as core/notify.cpp; UE3's FOV is horizontal and UE3 has no `POV.AspectRatio`).
+  `views()` declares `zoom_available` for the default view; missing properties or implausible values bypass the update.
+  `docs/ADVANCED.md`: the Zoom compensation section and the `[Unreal3]` section document it. To verify in Mass Effect LE:
+  the panel's zoom compensation engages on aim only if ME's aiming changes `CameraCache.FOV`; otherwise the live tool is
+  `tools/unrealEngine3/ue3tool.py props Camera` (which properties the game actually has).
+- 2026-10-31 **`ZoomReferenceFOV=` generic fallback** (built, 709 checks pass; redeployed to ME1): the unzoomed
+  reference for zoom compensation resolves the same way in every engine: the most specific place wins — a `[View.*]`
+  section (Unreal), `[Unreal3]` — then a generic `[Gyro4All] ZoomReferenceFOV=` (profile or Gyro4All.ini), then the
+  engine's own default property (`PlayerCameraManager.DefaultFOV` / `PlayerController.DefaultFOV`). `ue_profile.cpp`'s
+  `load_view_extras` reads the `[Gyro4All]` value of the profile file when the view section has none (per-view values
+  stay: different views can have different unzoomed FOVs, which one folder-wide value can't express); `Unreal3`'s
+  `configure()` falls back to `settings::get_string("ZoomReferenceFOV")` (profile wins over Gyro4All.ini, as other mod
+  settings). `docs/ADVANCED.md`: the Zoom compensation section documents the precedence.

@@ -1,5 +1,6 @@
 #include "ue.hpp"
 
+#include "fov.hpp"
 #include "hooks.hpp"
 #include "log.hpp"
 #include "mem.hpp"
@@ -1284,6 +1285,59 @@ bool camera_pov_location(Obj camera, double location[3]) {
         if (!std::isfinite(location[i])) return false;
     }
     return true;
+}
+
+bool camera_fov(Obj camera, double reference_horizontal, double& current_vertical, double& reference_vertical) {
+    if (!g_ready || !camera) return false;
+    static Obj cached_class = 0;
+    static int32_t fov_offset = -1, aspect_offset = -1, projection_offset = -1;
+    static int32_t fov_size = 0, aspect_size = 0;
+    const Obj cls = class_of(camera);
+    if (cls != cached_class) {
+        cached_class = cls;
+        fov_offset = aspect_offset = projection_offset = -1;
+        for (const char* cache : {"CameraCachePrivate", "CameraCache"}) {
+            const Prop c = find_prop(cls, cache);
+            const Prop pov = c ? find_prop(struct_type(c), "POV") : Prop{};
+            const Prop fov = pov ? find_prop(struct_type(pov), "FOV") : Prop{};
+            const Prop aspect = pov ? find_prop(struct_type(pov), "AspectRatio") : Prop{};
+            const Prop projection = pov ? find_prop(struct_type(pov), "ProjectionMode") : Prop{};
+            if (fov && aspect && projection && (fov.element_size == 4 || fov.element_size == 8) &&
+                (aspect.element_size == 4 || aspect.element_size == 8) && projection.element_size == 1) {
+                fov_offset = c.offset + pov.offset + fov.offset;
+                aspect_offset = c.offset + pov.offset + aspect.offset;
+                projection_offset = c.offset + pov.offset + projection.offset;
+                fov_size = fov.element_size;
+                aspect_size = aspect.element_size;
+                break;
+            }
+        }
+    }
+    if (fov_offset < 0) return false;
+    const auto read_number = [&](int32_t offset, int32_t size, double& value) {
+        if (size == 4) {
+            float f = 0;
+            if (!rd(camera + offset, f)) return false;
+            value = f;
+            return true;
+        }
+        return rd(camera + offset, value);
+    };
+    double current_horizontal = 0, aspect_ratio = 0;
+    uint8_t projection = 0;
+    if (!read_number(fov_offset, fov_size, current_horizontal) ||
+        !read_number(aspect_offset, aspect_size, aspect_ratio) || !rd(camera + projection_offset, projection) ||
+        projection != 0)
+        return false;
+    if (reference_horizontal == 0) {
+        const Prop reference = prop_of(camera, "DefaultFOV");
+        if (!reference || (reference.element_size != 4 && reference.element_size != 8) ||
+            !read_number(reference.offset, reference.element_size, reference_horizontal))
+            return false;
+    }
+    current_vertical = fov::vertical_from_horizontal(current_horizontal, aspect_ratio);
+    reference_vertical = fov::vertical_from_horizontal(reference_horizontal, aspect_ratio);
+    return fov::is_valid(current_vertical) && fov::is_valid(reference_vertical);
 }
 
 size_t probe_snapshot(const std::vector<std::pair<std::string, Obj>>& roots) {

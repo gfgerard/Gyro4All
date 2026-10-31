@@ -26,10 +26,15 @@
 // any of this isn't found, the gyro goes to the game as right-stick input (the core's blind stick fallback).
 // The game clamps Rotation's pitch itself: limit_turn learns where it stops, so pushing the gyro against the limit isn't
 // taken for writes the game undid (the stick fallback started that way in Mass Effect LE 3, MODLOG 2026-10-30).
+// Zoom compensation (GyroLib's gyro.zoom_compensation): the displayed horizontal FOV is Camera.CameraCache's
+// TPOV.FOV (the final POV, MODLOG 2026-10-22), the unzoomed reference is [Unreal3] ZoomReferenceFOV= or the generic
+// [Gyro4All] ZoomReferenceFOV=, else PlayerController.DefaultFOV; both convert to vertical with the game window's
+// client aspect. UE3 FOV is horizontal.
 #include "unreal3.hpp"
 #include "ue3_xinput.hpp"
 
 #include "engine.hpp"
+#include "fov.hpp"
 #include "log.hpp"
 #include "mem.hpp"
 #include "settings.hpp"
@@ -40,6 +45,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <format>
 #include <string>
@@ -95,6 +101,9 @@ uintptr_t g_prop_offset = 0;  // UProperty field holding the property's offset i
 
 struct Offsets {
     uint32_t game_players = 0, player_actor = 0, rotation = 0, pawn = 0, world_info = 0, pauser = 0;
+    // Zoom compensation, all optional: PlayerController.PlayerCamera -> the Camera object; Camera.CameraCache (a TPOV
+    // struct) + TPOV.FOV inside it = the displayed FOV; PlayerController.DefaultFOV = the unzoomed reference.
+    uint32_t player_camera = 0, camera_cache = 0, tpov_fov = 0, default_fov = 0;
 } g_off;
 // UBoolProperty's bitmask field (Mass Effect LE +0xD0, Dishonored +0xA4); a WorldInfo bool: offset and mask (0 = not
 // found).
@@ -322,7 +331,11 @@ bool find_members() {
         bool needed;
     } wants[] = {{"Engine", "GamePlayers", &g_off.game_players, true}, {"Player", "Actor", &g_off.player_actor, true},
                  {"Actor", "Rotation", &g_off.rotation, true},         {"Controller", "Pawn", &g_off.pawn, true},
-                 {"Actor", "WorldInfo", &g_off.world_info, true},      {"WorldInfo", "Pauser", &g_off.pauser, false}};
+                 {"Actor", "WorldInfo", &g_off.world_info, true},      {"WorldInfo", "Pauser", &g_off.pauser, false},
+                 {"PlayerController", "PlayerCamera", &g_off.player_camera, false},
+                 {"Camera", "CameraCache", &g_off.camera_cache, false},
+                 {"TPOV", "FOV", &g_off.tpov_fov, false},
+                 {"PlayerController", "DefaultFOV", &g_off.default_fov, false}};
     uintptr_t planes[4] = {};  // Core.Object.Matrix.XPlane..WPlane
     std::vector<std::pair<uintptr_t, uint32_t*>> props;
     uintptr_t players_only = 0, players_only_pending = 0, menu_level = 0, paused = 0, player_controller = 0;
@@ -433,11 +446,18 @@ public:
         // Dishonored keeps WorldInfo.bIsMenuLevel on in play: its profile turns the menu check off.
         use_menu_level_ = settings::profile_int(L"Unreal3", L"MenuLevel", 1) != 0;
         if (!use_menu_level_) log("ue3: WorldInfo.bIsMenuLevel ignored (profile: [Unreal3] MenuLevel=0)");
+        // The unzoomed horizontal FOV for zoom compensation: [Unreal3] ZoomReferenceFOV= wins, else the generic
+        // [Gyro4All] ZoomReferenceFOV= (any engine's fallback); 0 reads PlayerController.DefaultFOV.
+        zoom_reference_fov_ = std::atof(settings::profile_string(L"Unreal3", L"ZoomReferenceFOV", L"0").c_str());
+        if (zoom_reference_fov_ <= 0)
+            zoom_reference_fov_ = std::atof(settings::get_string(L"ZoomReferenceFOV", L"0").c_str());
+        if (zoom_reference_fov_ > 0)
+            log("ue3: zoom reference FOV %.1f degrees ([Unreal3]/[Gyro4All] ZoomReferenceFOV)", zoom_reference_fov_);
         // StickFallback=0 (the core's): with no camera hook the gyro turns nothing, which the log and status say.
         stick_fallback_ = settings::get(L"StickFallback", 1) != 0;
     }
 
-    std::vector<ViewInfo> views() const override { return {{1, "Default", 0}}; }
+    std::vector<ViewInfo> views() const override { return {{1, "Default", 0, true}}; }
 
     EngineFrame read_frame() override {
         EngineFrame f;
@@ -480,6 +500,10 @@ public:
         f.paused = pauser != 0 || players_only || paused;
         f.view_id = pawn && !menu_level ? 1 : 0;
         f.target = pawn ? pawn_name_ : "no pawn";
+        if (f.view_id) {
+            ZoomFov zoom;
+            if (zoom_fov(pc, zoom.current_vertical, zoom.reference_vertical)) f.zoom_fov = zoom;
+        }
         return f;
     }
 
@@ -582,6 +606,9 @@ private:
                 g_off.game_players, g_off.player_actor, g_off.rotation, g_off.pawn, g_off.world_info, g_off.pauser,
                 g_paused.offset, g_paused.mask, g_players_only.offset, g_players_only.mask, g_menu_level.offset,
                 g_menu_level.mask, mem::module_offset(g_engine).c_str());
+            log("ue3: zoom compensation %s: PlayerCamera +0x%x, CameraCache +0x%x, TPOV.FOV +0x%x, DefaultFOV +0x%x",
+                g_off.player_camera && g_off.camera_cache && g_off.tpov_fov ? "available" : "not available (no Camera.CameraCache.FOV)",
+                g_off.player_camera, g_off.camera_cache, g_off.tpov_fov, g_off.default_fov);
         } else if (now - first_try_ > kGiveUpMs) {
             stage_ = Stage::Failed;
             log("ue3: engine not found (GObjects %s, names %s, property offset field %s): %s", g_objects ? "found" : "missing",
@@ -597,6 +624,49 @@ private:
                              .count());
     }
 
+    // The displayed FOV (Camera.CameraCache's TPOV.FOV) and the unzoomed reference, both vertical degrees for GyroLib.
+    // False: the properties weren't found in this game or the values aren't plausible (bypasses this update).
+    bool zoom_fov(uintptr_t pc, double& current_vertical, double& reference_vertical) {
+        if (!g_off.player_camera || !g_off.camera_cache || !g_off.tpov_fov) return false;
+        const uintptr_t camera = mem::rdp(pc + g_off.player_camera);
+        float current = 0;
+        if (!camera || !mem::rd(camera + g_off.camera_cache + g_off.tpov_fov, current)) return false;
+        float reference = float(zoom_reference_fov_);
+        if (!fov::is_valid(reference) &&
+            (!g_off.default_fov || !mem::rd(pc + g_off.default_fov, reference)))
+            return false;
+        const double aspect = window_aspect();
+        current_vertical = fov::vertical_from_horizontal(current, aspect);
+        reference_vertical = fov::vertical_from_horizontal(reference, aspect);
+        return fov::is_valid(current_vertical) && fov::is_valid(reference_vertical);
+    }
+
+    // The game window's client aspect (width/height) for the horizontal-to-vertical FOV conversion. The largest visible
+    // top-level window of this process, as in core/notify.cpp.
+    static double window_aspect() {
+        struct Search {
+            HWND best = nullptr;
+            long long area = 0;
+        } search;
+        EnumWindows(
+            [](HWND hwnd, LPARAM p) -> BOOL {
+                auto& s = *reinterpret_cast<Search*>(p);
+                DWORD pid = 0;
+                GetWindowThreadProcessId(hwnd, &pid);
+                if (pid != GetCurrentProcessId() || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
+                RECT r{};
+                if (!GetClientRect(hwnd, &r)) return TRUE;
+                const long long area = 1ll * (r.right - r.left) * (r.bottom - r.top);
+                if (area > s.area) s.best = hwnd, s.area = area;
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM>(&search));
+        RECT r{};
+        return search.best && GetClientRect(search.best, &r) && r.right > 0 && r.bottom > 0
+                   ? double(r.right) / r.bottom
+                   : 0;
+    }
+
     static bool world_bool(uintptr_t world, const Bool& b) {
         uint32_t word = 0;
         return world && b.mask && mem::rd(world + b.offset, word) && (word & b.mask);
@@ -604,6 +674,7 @@ private:
 
     Stage stage_ = Stage::Waiting;
     bool players_only_ = false, menu_level_ = false, use_menu_level_ = true, stick_fallback_ = true;
+    double zoom_reference_fov_ = 0;  // [Unreal3] ZoomReferenceFOV=, horizontal degrees; 0 reads PlayerController.DefaultFOV
     ULONGLONG first_try_ = 0, last_try_ = 0;
     uintptr_t pc_ = 0, pawn_ = 0;
     std::string pawn_name_;

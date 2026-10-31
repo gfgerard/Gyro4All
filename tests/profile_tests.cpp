@@ -1,8 +1,9 @@
 // Unit tests for the parts of Gyro4All that need no game: the Unreal module's game profile (ue_profile.cpp), the
-// core's Match=Camera choice (camera_match.hpp), its stick fallback (stick_fallback.cpp, stick_response.cpp), stick camera (stick_camera.cpp) and sensor-time
-// pacing (sensor_pacer.cpp). Built with Gyro4All (target gyro4all_tests); run with
-// tools/test-gyro4all.sh.
+// core's Match=Camera choice (camera_match.hpp), FOV conversion (fov.hpp), stick fallback (stick_fallback.cpp,
+// stick_response.cpp), stick camera (stick_camera.cpp) and sensor-time pacing (sensor_pacer.cpp). Built with Gyro4All
+// (target gyro4all_tests); run with tools/test-gyro4all.sh.
 #include "camera_match.hpp"
+#include "fov.hpp"
 #include "sensor_pacer.hpp"
 #include "stick_camera.hpp"
 #include "stick_fallback.hpp"
@@ -359,6 +360,19 @@ void test_match_members_change() {
     CHECK(s.m.select({2}) == 2);
 }
 
+// ---------------------------------------------------------------- FOV
+
+void test_fov_conversion() {
+    std::puts("fov: horizontal FOV converts to vertical with the camera aspect ratio");
+    CHECK(std::abs(fov::vertical_from_horizontal(90, 1) - 90) < 1e-9);
+    CHECK(std::abs(fov::vertical_from_horizontal(90, 16.0 / 9) - 58.7155) < 0.0001);
+    CHECK(fov::vertical_from_horizontal(0, 16.0 / 9) == 0);
+    CHECK(fov::vertical_from_horizontal(179, 16.0 / 9) == 0);
+    CHECK(fov::vertical_from_horizontal(90, 0) == 0);
+    CHECK(fov::vertical_from_horizontal(90, -1) == 0);
+    CHECK(!fov::is_valid(179));
+}
+
 // ---------------------------------------------------------------- profile
 
 void test_load_missing() {
@@ -376,8 +390,9 @@ void test_load_views() {
     const std::wstring path = temp_profile(L"load");
     write_file(path,
                "[Gyro4All]\r\nViews=InCar, Clamp, Bad, Dup\r\n\r\n"
-               "[View.Default]\r\nLabel=On foot\r\nObject=Camera.@BendPlayerCamFollow_C\r\nOffsets=0x120\r\nMatrix=1\r\n\r\n"
-               "[View.InCar]\r\nId=2\r\nViewTargetClass=BP_Car_C\r\nProperty=CamRot\r\n\r\n"
+               "[View.Default]\r\nLabel=On foot\r\nObject=Camera.@BendPlayerCamFollow_C\r\nOffsets=0x120\r\nMatrix=1\r\n"
+               "ZoomReferenceFOV=90\r\n\r\n"
+               "[View.InCar]\r\nId=2\r\nViewTargetClass=BP_Car_C\r\nProperty=CamRot\r\nZoomReferenceFOV=50\r\n\r\n"
                "[View.Clamp]\r\nId=3\r\nMatch=camera\r\nObject=Camera.@SBZClampCameraRotationModifier\r\nOffsets=0x68\r\n"
                "RotatorSize=24\r\n\r\n"
                "[View.Bad]\r\nId=4\r\nMatch=Camera\r\n\r\n"
@@ -386,8 +401,10 @@ void test_load_views() {
     CHECK(views.size() == 3);
     CHECK(views[0].label == "On foot");
     CHECK(views[0].matrix && views[0].offsets.size() == 1 && views[0].offsets[0] == 0x120);
+    CHECK(views[0].zoom_reference_fov == 90);
     const View* car = by_id(views, 2);
     CHECK(car && car->view_target_class == "BP_Car_C" && !car->match_camera && car->property == "CamRot");
+    CHECK(car && car->zoom_reference_fov == 50);
     const View* clamp = by_id(views, 3);
     CHECK(clamp && clamp->match_camera && clamp->view_target_class.empty());
     CHECK(clamp && clamp->object.size() == 2 && clamp->object[1] == "@SBZClampCameraRotationModifier");
@@ -1312,6 +1329,7 @@ int main() {
     test_match_pitch_limit();
     test_match_all_ignored_keeps_followed();
     test_match_pitch_carry_limit();
+    test_fov_conversion();
     test_load_missing();
     test_load_views();
     test_load_active_list_views();

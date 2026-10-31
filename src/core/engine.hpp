@@ -9,6 +9,7 @@
 // GyroLib calls happen too. The game thread is the main thread (the core's PeekMessageW hook) unless the engine
 // runs the frame itself (frame_source).
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -20,6 +21,12 @@ struct ViewInfo {
     uint32_t id = 1;     // 1 = the default view
     std::string label;
     uint32_t parent = 0; // settings inheritance (0 = none)
+    bool zoom_available = false;  // the engine can report this view's current and unzoomed vertical FOV
+};
+
+struct ZoomFov {
+    double current_vertical = 0;
+    double reference_vertical = 0;
 };
 
 // What the core needs from the engine each frame.
@@ -38,6 +45,9 @@ struct EngineFrame {
     // default view (view_id 1, in_game) with it, so the gyro's gate (focus, pause, cursor) and GyroLib's view still
     // apply.
     bool no_camera = false;
+    // Current and unzoomed reference FOV for GyroLib's zoom compensation. Both vertical degrees, same projection.
+    // Empty or invalid values bypass compensation for this update; the engine converts any horizontal FOV itself.
+    std::optional<ZoomFov> zoom_fov;
 };
 
 // View ids of the core's sensitivity profiles (ADS, ALT_ADS, OTHER): an engine must not give them to its own views.

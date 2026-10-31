@@ -2,6 +2,7 @@
 
 #include "deps.hpp"
 #include "engine.hpp"
+#include "fov.hpp"
 #include "hooks.hpp"
 #include "log.hpp"
 #include "longpress.hpp"
@@ -317,6 +318,21 @@ void save_stick_model() {
         narrow(settings::profile_path()).c_str());
 }
 
+void sync_zoom_support(const std::vector<ViewInfo>& views) {
+    gl_context* ctx = g_gyro->get();
+    const auto set = [&](uint32_t id, bool available) {
+        const int32_t result = gl_set_gameplay_context_zoom_available(ctx, id, available ? 1 : 0);
+        if (result != GL_OK) log("zoom: view %u capability change failed (%d)", id, result);
+    };
+    for (const ViewInfo& v : views)
+        if (std::find(g_registered.begin(), g_registered.end(), v.id) != g_registered.end()) set(v.id, v.zoom_available);
+    const bool default_zoom = std::any_of(views.begin(), views.end(), [](const ViewInfo& v) {
+        return v.id == 1 && v.zoom_available;
+    });
+    for (const Profile& p : g_profiles)
+        if (p.registered) set(p.id, default_zoom);
+}
+
 // Gives every engine view its GyroLib view (a tab in the panel, inheriting its parent's settings) and withdraws the
 // ones the engine no longer has: at start, and after the engine's views changed during play (Engine::views_changed).
 // A view can't take a sensitivity profile's id once that profile has its tab (at start the view wins, see
@@ -349,6 +365,7 @@ void register_views() {
         log("profile: view %u withdrawn (no longer in the engine's views)", id);
         it = g_registered.erase(it);
     }
+    sync_zoom_support(views);
 }
 
 bool start_gyro() {
@@ -363,6 +380,7 @@ bool start_gyro() {
     gl_context* ctx = g_gyro->get();
     register_views();
     register_sensitivity_profiles(ctx, g_engine->views());
+    sync_zoom_support(g_engine->views());
     gl_set_host_capabilities(ctx, GL_HOST_MENU_STATE);
 
     // Mod defaults (an existing gyrolib.ini overrides them): always on, calibrate in menus, no flick stick.
@@ -755,7 +773,14 @@ void frame() {
     }
     g_input->poll(now_ns);
     poll_steam(now_ns);
-    const gl_output out = g_gyro->update(now_ns, host, profile ? profile : f.view_id);
+    const uint32_t active_view = profile ? profile : f.view_id;
+    if (active_view && f.zoom_fov && fov::is_valid(f.zoom_fov->current_vertical) &&
+        fov::is_valid(f.zoom_fov->reference_vertical)) {
+        const int32_t result = gl_set_gameplay_context_fov(g_gyro->get(), active_view, f.zoom_fov->current_vertical,
+                                                           f.zoom_fov->reference_vertical);
+        if (result != GL_OK) log("zoom: view %u FOV report failed (%d)", active_view, result);
+    }
+    const gl_output out = g_gyro->update(now_ns, host, active_view);
     // GyroLib's flick stick needs the game's own right-stick rotation suppressed: possible for the controller shown to
     // the game as XInput, or when the game reads the controller itself through a checked report layout.
     SDL_Gamepad* pad = xinput::selected_gamepad(g_gyro->get(), g_input->get(), out);

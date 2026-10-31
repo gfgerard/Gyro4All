@@ -44,6 +44,11 @@ void load_view_extras(View& v, const std::wstring& path, const wchar_t* section)
     v.dump = GetPrivateProfileIntW(section, L"Dump", 0, path.c_str()) != 0;
     v.recenter = GetPrivateProfileIntW(section, L"Recenter", 1, path.c_str()) != 0;
     v.recenter_pitch = std::atof(ini(path, section, L"RecenterPitch", L"0").c_str());
+    // The unzoomed FOV for zoom compensation: the view's own ZoomReferenceFOV= wins; else the generic [Gyro4All]
+    // ZoomReferenceFOV= (any engine's fallback); 0 reads PlayerCameraManager.DefaultFOV.
+    const std::string own_fov = ini(path, section, L"ZoomReferenceFOV");
+    v.zoom_reference_fov =
+        std::atof((own_fov.empty() ? ini(path, settings::kSection, L"ZoomReferenceFOV") : own_fov).c_str());
     for (const std::string& item : split(ini(path, section, L"OnGyro"), ',')) {
         const size_t colon = item.find(':');
         if (colon == std::string::npos) continue;

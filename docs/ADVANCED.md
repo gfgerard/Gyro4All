@@ -320,7 +320,10 @@ DualSense --HID--> SDL3 (inside gyrolib.dll)
 - **Steam Input mouse in the gyro4all.dll panel.** GyroLib's per-view "Steam Input mouse" row (Pass through / Block /
   Convert movement, saved in `gyrolib.ini`) appears when the selected controller is under Steam Input. In DX12 games
   GyroLib applies it itself. In the other games Gyro4All applies it, because GyroLib's own bridge needs window messages
-  that DirectInput games never get. A low-level mouse hook drops Steam's injected motion before it moves the cursor.
+  that DirectInput games never get. Each active view uses its own saved choice: entering ADS, ALT_ADS, OTHER or an engine
+  view applies that view's Pass through / Block / Convert movement setting, and returning to Exploration restores its
+  choice. Merely selecting another tab in F10 edits that view but doesn't activate it. A low-level mouse hook drops
+  Steam's injected motion before it moves the cursor.
   Hooks on Raw Input reads (win32u's `NtUserGetRawInputData`/`NtUserGetRawInputBuffer`, every caller, DirectInput's
   own reads included) empty Steam's packets, the ones from no device. Physical mice, buttons and the wheel pass. Block
   and Convert act everywhere in the game while it is in front, menus and the open panel included. Convert turns the
@@ -414,6 +417,28 @@ RotatorSize=24
 In Unreal games the profile's views are read again whenever the file changes, so edits (and views the probe adds)
 apply without a restart. Its `[Gyro4All]` settings still apply from the next start.
 
+### Zoom compensation
+
+The core supports GyroLib's `gyro.zoom_compensation` for every engine through the same contract: an engine view declares
+support and reports the current and unzoomed reference **vertical FOV**, in degrees and with matching projections, before
+each update. Missing or invalid values bypass compensation for that update. GyroLib scales only the gyro deltas, not flick
+stick or the saved sensitivity; Gyro4All applies no second FOV scale. The setting is Off by default and also works in the
+ADS, ALT_ADS and OTHER sensitivity profiles.
+
+Unreal views read the displayed `PlayerCameraManager CameraCachePrivate.POV.FOV` (`CameraCache` in older UE4) and
+`POV.AspectRatio`, converting the horizontal FOV to vertical. Orthographic cameras and missing or invalid properties
+bypass compensation.
+
+Unreal Engine 3 views read the displayed `Camera CameraCache.FOV` (the `TPOV` struct's `FOV`, the final POV) and convert
+it from horizontal to vertical with the game window's client aspect. Games without the reflected
+`Camera.CameraCache`/`TPOV.FOV` properties get no compensation (the setting stays in the panel but never engages).
+
+The unzoomed reference is the engine's own default (`PlayerCameraManager.DefaultFOV`, `PlayerController.DefaultFOV`)
+unless `ZoomReferenceFOV=` says otherwise (horizontal degrees, like the engine reports). The most specific place wins:
+a view section (`[View.*]`) for Unreal, `[Unreal3]` for Unreal Engine 3, then the generic `[Gyro4All] ZoomReferenceFOV=`
+in the profile or Gyro4All.ini — so one value can serve every game of the folder. `0` (or no value) uses the engine's
+own default.
+
 ### The stick's look input (`Property=RotationInput`)
 
 Some games rebuild `ControlRotation` from other state every frame, so a turn written into it is lost. Dead Island 2
@@ -465,11 +490,14 @@ uses `Match=Camera` instead:
 
 UE3 games need no view sections: the gyro turns the player controller's `Rotation`. By default the gyro stays off while
 the world is a menu level (`WorldInfo.bIsMenuLevel`). Some games keep that flag on during play (Dishonored): their
-profile turns the check off:
+profile turns the check off. Zoom compensation (`gyro.zoom_compensation`) reports the displayed
+`Camera.CameraCache.FOV`; set `ZoomReferenceFOV=` here when the unzoomed horizontal FOV isn't
+`PlayerController.DefaultFOV` (0 = read `DefaultFOV`), or once in `[Gyro4All]` for any engine:
 
 ```ini
 [Unreal3]
 MenuLevel=0
+ZoomReferenceFOV=85
 ```
 
 ## Finding the camera of a new game

@@ -101,7 +101,8 @@ Key rules:
     forwarding to the System32 DLL with the proxy's own name (`winmm.dll` or `version.dll`).
   - `engine.hpp`/`engine.cpp`: the `Engine` interface every engine module implements, and `select_engine`.
   - `host.cpp`: the per-frame logic: GyroLib, the gyro gate (focus, pause, cursor, view), XInput/native pad,
-    status line; calls the engine to read the scene and turn the view.
+    zoom-compensation FOV reports, status line; calls the engine to read the scene and turn the view.
+  - `fov.hpp`: the engine modules' shared vertical-FOV validation and horizontal-to-vertical conversion.
   - `settings.cpp`: `Gyro4All.ini` (created with the defaults) and the profile's `[Gyro4All]` overrides.
   - `hooks.cpp`: import-table hooks (regular and delay-load) on the game modules (exe plus the game's own
     DLLs of modular builds, prefix from the engine); inline MinHook hooks for protected exes.
