@@ -6078,3 +6078,153 @@ or gyro to stick.
   (install folder, the Vehicle view's Activation to keep the gyro off the bike).
 - Regression check (user, 2026-10-30): Cronos: The New Dawn (UE 5.5.4, chunked object array) works as before with this
   build (flat-array search, name text +0x12 and the new profile keys don't change it).
+- 2026-10-30 **Steam Input mouse option in the gyro4all.dll panel: experiment (built, 700 checks pass; not tested in
+  game).** User: the per-view `input.steam_mouse` row (Pass through / Block / Convert) shows in a DX12 game's panel but
+  not in the static panel. Cause (known gap, see the gyro4all.dll entry above): GyroLib offers the row only while a
+  Windows mouse bridge is attached (`gl_overlay_win32_message` or `gl_sdl_attach_window`), and the static panel has
+  neither. Experiment (`overlay.cpp`): next to the static panel, a second `gl_overlay` (`g_bridge`) that is never
+  `gl_overlay_dx12_init`-ed, used only as the bridge: `hk_wndproc` forwards it `WM_INPUT`/`WM_MOUSEMOVE` (open or
+  closed) and drops what it returns with `GL_OVERLAY_CAPTURE_MOUSE`; `gl_overlay_process(bridge)` before `gl_update`.
+  Panel open/close, capture and F10 stay on gyro4all.dll. `PanelSteamMouse=0` in `Gyro4All.ini` turns it off. Log:
+  `Steam Input mouse bridge attached next to the gyro4all.dll panel`, `Steam Input mouse movement taken by GyroLib's
+  bridge` (once). Open questions for the test: does the row appear; does Block/Convert act (window messages, and
+  GyroLib's low-level mouse hook for games reading DirectInput or the cursor); does `gl_overlay_process` or the
+  bridge's missing renderer (250 ms snapshot rule) close or fight the static panel (`overlay: panel state` lines).
+  - **DOOM test (user, 2026-10-31; DualSense, Steam Input on with gyro to mouse always on, Vulkan): the row appears, the
+    panel opens and closes normally, but none of the three choices changes anything:** Steam's mouse still turns the
+    camera with Block. Log: bridge attached, `Steam Input mouse movement taken` never logged, and the panel's message
+    counts show `WM_INPUT 0` (only `WM_MOUSEMOVE`). Cause: DOOM reads the mouse through exclusive DirectInput and
+    registers no Raw Input, so the bridge never gets the `WM_INPUT` packets it needs to confirm the Steam stream
+    (OVERLAY.md: at least three device-less relative raw movements correlated with injected movement), and in gameplay
+    the exclusive mouse sends no `WM_MOUSEMOVE` either. Before confirmation GyroLib passes everything through, and its
+    low-level hook only intercepts after confirmation. OVERLAY.md already names this case: "DirectInput or
+    GetRawInputBuffer, need an adapter". Not yet tried: a game that reads the mouse through `WM_INPUT` (most UE4 DX11
+    games), which would show whether the bridge itself works next to the static panel.
+  - **Days Gone test (user, 2026-10-31; DualSense, Steam Input on with L2 = gyro to mouse, Block selected, DX11 static
+    panel): Block has no effect either.** A temporary 10 s counter in `hk_wndproc` (what reaches the bridge) shows
+    `WM_INPUT 0` in gameplay with the panel closed (only 2-14 `WM_MOUSEMOVE` per 10 s), while the game keeps
+    registering the Raw Input mouse (usage 0x1/0x2, flags 0x0). `WM_INPUT` reaches the window only while the panel is
+    open (79-186 per 10 s), when the game stops reading input. So in gameplay Days Gone takes its mouse packets before
+    they are dispatched to the window (likely `GetRawInputBuffer`; not confirmed) and the bridge never sees them; `taken`
+    stayed 0 and no packet came from no device. Same limit as DOOM: the window-message bridge only works for games
+    that read the mouse through `WM_INPUT` in their window procedure. GyroLib's API has no entry for packets read
+    with `GetRawInputBuffer` or DirectInput (`gl_overlay_win32_message` needs the `HRAWINPUT` of a message).
+  - **Message-loop feed (same day):** Gyro4All's `PeekMessageW/A` hooks also hand the bridge each `WM_INPUT` the game
+    removes from its queue (taken ones become `WM_NULL`; the window hook skips a handle already fed). Days Gone test:
+    with the panel open every packet arrived through the loop (219-245 per 10 s), so the game does read `WM_INPUT` in
+    its loop; in gameplay with L2 held still 0 `WM_INPUT`.
+  - **Low-level hook count (temporary `WH_MOUSE_LL` diagnostic, injected vs hardware motion while the game is in
+    front):** L2 held, mouse untouched: injected 0, hardware 0, `WM_INPUT` 0. Physical mouse only: hardware 230-959,
+    `WM_INPUT` 579-610 per 10 s, all through the loop, none from no device. **So in Days Gone Steam's gyro "mouse"
+    never reaches Windows as mouse input at all.** Days Gone uses the Steam Input API itself (GyroLib's Steam Input
+    reader reports `ok` with its steam_api64.dll), so the L2 gyro binding most likely feeds one of the game's own
+    Steam Input actions (mouse-like camera action), which no mouse bridge can see or block. Days Gone is therefore not a
+    test of the bridge; the loop feed itself works (physical packets reach the bridge in gameplay). Still untested: a
+    game where Steam's mouse is OS-injected (games without the Steam Input API, e.g. DOOM 2016) and that reads
+    `WM_INPUT`.
+  - **DOOM (2016) with the low-level hook count (user, same day; Steam Input gyro to mouse always on):** Steam's mouse
+    *is* OS-injected there: injected 54-2833 motions per 10 s with the controller moving (hardware 0 when the mouse is
+    untouched), while the bridge got `WM_INPUT 0` throughout (DirectInput, no Raw Input registered). DOOM's old
+    steam_api64.dll has no Steam Input API (`reader unavailable`), so Steam can only drive it as a real mouse. This is
+    the case for GyroLib: injected motion is visible to a low-level mouse hook, but the bridge confirms the stream only
+    from device-less `WM_INPUT` packets, which a DirectInput game never produces, so Block/Convert never engage.
+- 2026-10-31 **Mass Effect 3 LE: XInput translation toggling every second (user log; not every run).** The DualSense is
+  shown as XInput controller 0, then the watcher thread finds "a real XInput controller" on every other 1 s pass: hidden,
+  shown, hidden... (WM_DEVICECHANGE each time, unstable controller in game). On that system the XInput DLLs differ from
+  the good run's (`xinput1_4.dll!XInputGetState` at +0x1750 and `xinput9_1_0.dll` at +0x1160, against +0x9a60/+0x1b40),
+  so the watcher's own XInputGetState call reaches a Gyro4All hook through a chain `passes_through` doesn't know, and is
+  answered with the translated controller. Fix (`xinput.cpp`): the watcher thread is marked (`t_watcher`); `our_state`
+  never answers it and the xinput1_4 inline hooks pass its calls straight on, whatever the chain. New log line when the
+  watcher's slot mask changes (`xinput: real XInput controllers in slots 0x..`). Built, 700 checks pass; not tested in
+  game yet.
+  - **Experiment removed (user decision, same day):** the bridge next to the static panel, the message-loop feed and
+    the temporary diagnostics are reverted (`overlay.cpp`, `overlay.hpp`, `dllmain.cpp` back to HEAD). Reason: it shows
+    a Steam Input mouse row that does nothing in the games tested. Deferred idea, not implemented: our own
+    `WH_MOUSE_LL` hook that swallows injected motion while the game is in front, the panel closed and the controller
+    under Steam Input (covers DirectInput, Raw Input and the cursor at once; Convert would add the swallowed motion
+    to our camera turn), set by a Gyro4All.ini `SteamMouse=` key and used only where GyroLib's bridge isn't attached.
+    First check before building it: whether Steam's injected events carry a recognisable `dwExtraInfo`, so only
+    Steam's motion is blocked and not other injectors' (DS4Windows, remote desktop, AutoHotkey). Games that read
+    Steam's gyro through their own Steam Input actions (Days Gone) can't be helped by any mouse filter: turn the gyro
+    off in the Steam layout there.
+- 2026-10-31 **Steam Input mouse Block of our own (`src/core/steammouse.cpp`; built, 700 checks pass; deployed to DOOM,
+  not yet tested in game).** GyroLib 1.3.1's source (MIT; `src/mouse_bridge.cpp`, `src/detail/mouse_hook.hpp`,
+  `mouse_route.hpp`) detects Steam's mouse as: selected controller under Steam Input (`steam_input_available()`) +
+  at least 3 device-less relative `WM_INPUT` packets within 100 ms of injected motion (`WH_MOUSE_LL` `LLMHF_INJECTED`, or
+  `WM_MOUSEMOVE` with `GetCurrentInputMessageSource` = `IMO_INJECTED`); then its low-level hook returns 1 for injected
+  motion while the game window is in front (lease renewed by each update, 100 ms). No `dwExtraInfo` check. Convert uses
+  the raw packets' deltas at 0.05 deg/count. The raw-packet step is what DOOM never satisfies.
+  Ours: the same low-level hook route without the raw-packet confirmation. A `WH_MOUSE_LL` hook on its own thread
+  (installed the first time blocking applies) drops injected `WM_MOUSEMOVE` while the game's process owns the foreground
+  window and a 150 ms lease is fresh. The game thread renews the lease each frame when: gameplay (view, camera allowed,
+  focused, not paused), the panel closed, GyroLib's DX12 panel not attached (`overlay::gyrolib_panel()`: GyroLib's own
+  option applies there), and the selected SDL pad has a Steam handle (`SDL_GetGamepadSteamHandle`). So menus keep Steam's
+  mouse cursor. `SteamMouse=1` (default) / `0` in Gyro4All.ini, read once. Log: `steam mouse: SteamMouse=...`, state
+  changes (`blocked during gameplay`, `passes through (...)`, `left to GyroLib's own option`), and `N injected mouse
+  motions blocked in the last 10 s`. Looser than GyroLib: any injected motion counts while Steam Input has the
+  controller (another injector, e.g. AutoHotkey or DS4Windows' mouse, would be blocked too during gameplay). Convert not
+  done (the hook gives cursor positions, clamped at the screen edges, not counts). Games reading Steam's gyro through
+  their own Steam Input actions (Days Gone) are unaffected by design.
+  - **First DOOM test (user, same day): menus keep Steam's mouse as intended, but gameplay still turns with it**, although
+    the log shows `blocked during gameplay` and 971-2646 injected motions dropped per 10 s. Cause (likely): dinput8.dll
+    imports `SetWindowsHookExW`: its exclusive mouse reads motion through its own `WH_MOUSE_LL` hook, installed on
+    Acquire. Windows calls the newest low-level hook first, and DOOM acquires the mouse when gameplay starts, after ours
+    was installed, so DirectInput saw Steam's motion before we dropped it. Fix: `dinputpad::mouse_acquires()` counts
+    successful mouse Acquires (the game's and the panel's re-acquire); our hook thread unhooks and hooks again
+    (`kReinstall`) each time blocking starts and after every new acquisition. Built, 700 checks; deployed to DOOM.
+  - **Second DOOM test: still turns with Steam's mouse** (thousands of injected motions dropped per 10 s, re-install
+    after each Acquire changed nothing). dinput8.dll holds the strings `RegisterRawInputDevices` and `GetRawInputData`
+    (resolved at run time; not in its import table): its mouse reads Raw Input, which still carries injected motion after
+    a low-level hook drops it (GyroLib's OVERLAY.md says the same of its own hook). Fix: inline hooks (MinHook,
+    `hooks::hook_function`) on user32 `GetRawInputData` and `GetRawInputBuffer`, installed with the low-level hook;
+    while blocking (lease fresh, the game in front) device-less relative mouse packets get `lLastX/lLastY = 0`,
+    buttons and wheel kept. Log: `Raw Input reads hooked (...)`, `in the last 10 s, N injected mouse motions blocked,
+    M injected Raw Input packets emptied`. Built, 700 checks; deployed to DOOM.
+  - **Third DOOM test (user): Block works in gameplay** (with the Raw Input emptying). User asks for GyroLib parity: the
+    choice in the panel (Pass through / Block / Convert movement) and Block everywhere in the game, menus included.
+  - **Panel row and parity (built, 700 checks; deployed to DOOM, not tested):** the setting is now GyroLib's own per-view
+    `context.<view>.input.steam_mouse` (`gl_setting_get`), so the row, its text and translations, per-view values,
+    inheritance and saving in gyrolib.ini are GyroLib's. GyroLib shows that row only while one of its mouse bridges exists
+    (`settings.cpp`: visible when `c->virtual_mouse && steam_input_available()`), so `overlay.cpp` again creates a
+    `gl_overlay` next to the static panel (`attach_bridge`, `gl_overlay_process` before `gl_update`), but this time it is
+    never fed window messages: GyroLib's bridge then never confirms a stream and never intercepts, and only shows the row.
+    `steammouse.cpp` reads the row for the view given to GyroLib (the last one when there is none, starting with view 1).
+    Block and Convert take Steam's mouse everywhere while the game is focused and the panel closed, menus included, as
+    GyroLib does. Convert: the emptied Raw Input packets' counts are summed (hook threads, atomics) and turned into the
+    camera at GyroLib's 0.05 deg/count (yaw += x, pitch -= y), added to the gyro's turn only while the camera may turn
+    (otherwise dropped, like GyroLib). Convert needs Raw Input packets: in a game read only through the cursor or legacy
+    messages it blocks but turns nothing. The `SteamMouse=` INI key is gone. Log: `steam mouse: blocked (Block) (view
+    N)`, `converted (Convert movement)`, `passes through (...)`, and the 10 s counts.
+  - **Fourth DOOM test (user):** the row shows and the three choices switch (`blocked (Block)`, `converted (Convert
+    movement)`, `passes through (Pass through)` in the log). Two issues: (1) Steam's mouse got through while the F10
+    panel was open (by design then, as GyroLib suspends interception with its panel open); the user wants it blocked
+    there too, so Block/Convert now also apply with the panel open (only focus and Steam Input gate it). (2) With Block
+    and GyroLib's activation changed to always on (gyrolib.ini reloaded 16:09:32-40), the stick fallback switched on and
+    off repeatedly (`the game undid the gyro's camera writes 8 frames in a row`, model "explains 99%", saved
+    `StickFallbackLearned=axial,0.300,1.00,1025.9,197.4,1` into the game's profile). Not explained yet: no fallback in the
+    same session with Pass through or Convert while the gyro was on (status 16:09:01 `enabled=1`). Needs an A/B run:
+    always-on gyro with Pass through vs Block, right stick untouched.
+  - **A/B (user): the stick fallback fires only with Block, when looking all the way up or down.** Cause: the id Tech
+    module had no `limit_turn` (4A, Glacier, Northlight and Swarm have one). Its `apply` clamps the pitch to +-89, but
+    DOOM's view stops short of that, so a gyro pushing past the top/bottom looked like writes the game undid. With Pass
+    through, Steam's own mouse motion moved the view meanwhile and masked it. Fix (`idtech_engine.cpp`, id Tech 6+
+    deltaViewAngles path only): `limit_turn` learns the limit: a view beyond 45 degrees that stays put for 40 ms
+    (`kStuckMs`, a few 60 Hz ticks) while each turn asks for more pitch is taken as the limit (logged `idtech: the view
+    stops at N degrees up/down`), and turns stop there from then on; raised if the view ever goes past it. Per session,
+    not saved; the first push to each limit may still trip the fallback once before it is learnt. Built, 700 checks;
+    deployed to DOOM. The `StickFallbackLearned=` line those episodes saved in DOOM's profile is still there.
+  - **Convert double count (found reading the code, not seen in a test):** Gyro4All's own PeekMessage hook
+    (`host_raw_input`) reads each `WM_INPUT` with `GetRawInputData(RID_INPUT)` before the game does, through the same
+    inline hook, so in games that read `WM_INPUT` Convert would have counted Steam's motion twice. `hk_get_data` now
+    counts a handle once (the last counted `HRAWINPUT` is remembered; a repeat read is emptied but not counted). DOOM
+    (DirectInput, no `WM_INPUT` on the game's thread) wasn't affected. Built, 700 checks; not deployed (DOOM running).
+  - **Mass Effect 3 LE (user, DX11, protected exe / inline hook mode): not working.** Log: `Raw Input reads hooked
+    (GetRawInputData failed, GetRawInputBuffer failed)`: in inline mode xinput.cpp/nativepad.cpp already hook user32's
+    `GetRawInputData`/`GetRawInputBuffer` exports with MinHook, and MinHook hooks a target once. The game's mouse is
+    DirectInput, non-exclusive (0x6). Fix: steammouse.cpp hooks win32u's `NtUserGetRawInputData` and
+    `NtUserGetRawInputBuffer` (user32's are thin wrappers; same signatures; present on this Windows 11), falling back to
+    user32's exports. Log names the module. Built, 700 checks; deployed to ME3 and DOOM, not tested.
+  - **User-verified (2026-10-31): Steam Input mouse Block and Convert work in DOOM 2016 (Vulkan, exclusive DirectInput
+    mouse) and Mass Effect 3 LE (DX11, protected exe, non-exclusive DirectInput mouse)**, with the row in the
+    gyro4all.dll panel (DualSense under Steam Input, gyro to mouse; connection not reported). Not yet verified: a game
+    reading `WM_INPUT` itself (UE), the DOOM pitch-limit learning (no report yet), DX10/DX9/OpenGL games.

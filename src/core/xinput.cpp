@@ -126,8 +126,14 @@ void add_stick(XINPUT_GAMEPAD& g) {
     add(g.sThumbRY, y);
 }
 
+// The watcher thread: its XInput calls always get the real controllers. Whatever chain the system XInput DLLs take
+// (one export calling another, each hooked), an answer with the translated controller would count it as a real one
+// and hide it again every other second (Mass Effect 3 LE on some systems).
+thread_local bool t_watcher = false;
+
 // Our slot's state, or false for the real XInput.
 bool our_state(DWORD user, XINPUT_STATE* state, bool guide) {
+    if (t_watcher) return false;
     if (user < 4) g_polls[user].fetch_add(1, std::memory_order_relaxed);
     std::lock_guard lock(g_mutex);
     if (!g_exposed || user != g_slot || !state) return false;
@@ -252,7 +258,7 @@ GetCaps_t g14_get_caps = nullptr;
 Enable_t g14_enable = nullptr;
 
 bool passes_through(const void* return_address) {
-    if (t_inside) return true;
+    if (t_inside || t_watcher) return true;
     HMODULE caller = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                             static_cast<LPCWSTR>(return_address), &caller))
@@ -533,6 +539,7 @@ void trace_pass() {
 }
 
 void watch() {
+    t_watcher = true;
     GetState_t real = original(g_get_state, "XInputGetState", "xinput1_4.dll");
     if (!real) log("xinput: the real XInputGetState could not be resolved; real controllers count as absent");
     // Protected exes: the protector's import table is filled before the game's first frame; a few passes are enough.
@@ -547,7 +554,7 @@ void watch() {
             XINPUT_STATE s{};
             if (real(i, &s) == ERROR_SUCCESS) mask |= 1u << i;
         }
-        g_real_mask = mask;
+        if (g_real_mask.exchange(mask) != mask) log("xinput: real XInput controllers in slots 0x%X (bit per slot)", mask);
         if (g_settings.mode == Auto) scan_modules();
         if (g_settings.trace) trace_pass();
         hooks::verify();  // an overlay may rewrite the game's XInput imports after Gyro4All patched them (Mortal Shell: EOS)

@@ -163,7 +163,9 @@ All diagnostics go to `Gyro4All\Gyro4All.log` (probe results, if enabled, to `Gy
 | The gyro stops mid-game, `gyro on` still logged | Look at the lines just before: `focus: lost to <program> (window class ...)` (another window is in front), `gyro: GyroLib suspends the gyro` (activation mode, focus, pause, menus or calibration), `gyro: motion data lost`, `gyro: GyroLib's sample count restarted` (the controller was reopened) or `gyro: the controller reads as lying still` while you hold it (no real gyro data). If `applied yaw` keeps changing, `camera: stopped following the gyro (...) - target ..., camera manager ..., CameraStyle ...` names the camera that took over. |
 | Camera drifts slowly | Rest the pad in a menu for a few seconds (`bias=` in the status line should become non-zero) or use "Recalibrate gyro". |
 | Panel doesn't open | Look for `overlay:` lines (DX11/DX10/DX9 games: also `panel:` lines, e.g. `panel: captured D3D11 swapchain ...`, `panel: D3D11 renderer ready ...`, `panel: no frame presented for N ms: panel closed`). Try from the game's pause menu. As a fallback, edit `gyrolib.ini` directly. |
-| Double motion | Steam Input or another tool is also converting the gyro to mouse. |
+| Double motion | Steam Input or another tool is also converting the gyro to mouse. In the F10 panel, set "Steam Input mouse" to Block (or Convert movement). |
+| `steam mouse: blocked (Block) (view N)` / `converted (Convert movement)` / `passes through (<why>)` | Games using the gyro4all.dll panel: what happens to Steam Input's mouse, per the panel's "Steam Input mouse" row for view N. `left to GyroLib's own option (DX12 panel)` in DX12 games. Every 10 s while it acts: `N injected mouse motions blocked, M injected Raw Input packets emptied`. `Raw Input reads hooked (... failed)`: Block still stops the cursor, but a game reading Raw Input or DirectInput still gets Steam's motion. |
+| `idtech: the view stops at N degrees up` (or `down`) | id Tech 6+ (DOOM 2016, Eternal): the view's pitch limit, learnt the first time the gyro pushes against it; the gyro's turn stops there from then on (otherwise the stick fallback took the stopped view for undone writes). |
 | `ue: core classes not found` (and a notice after 60 s) | Gyro4All can't read this game's engine data, so nothing can turn the camera and the probe can't help. Report the game with the log: the `ue: core classes missing:` line says what was found instead. |
 | `xinput: ... shown as XInput controller N` | The controller is translated to an Xbox controller in slot N. |
 | `xinput: ... not shown: <reason>` | Why it isn't: an Xbox/Steam Input/remapper controller is connected, or the game reads pads itself (Sony's pad library, its own SDL, Raw Input for gamepads, the controller's HID device, a DirectInput game controller it reads). `XInput=2` overrides the last group. |
@@ -310,9 +312,22 @@ DualSense --HID--> SDL3 (inside gyrolib.dll)
   `dxgi.dll`, `d3d11.dll` or `d3d9.dll`) the panel draws on the real swapchain or device inside them, after their effects
   and overlay (`overlay: swapchain ... not used: the panel draws on the real swapchain inside it`). Its own ImGui exports
   nothing, writes no `imgui.ini` and never changes the mouse cursor. It navigates with GyroLib's selected controller,
-  like the DX12 panel; Escape closes it. Not available there yet: the Steam Input mouse option, which needs GyroLib's DX12
-  window bridge. Set `ui.menu_key=` (empty) and `ui.gamepad_menu_shortcut=0` to run with no graphics hooks
+  like the DX12 panel; Escape closes it. Set `ui.menu_key=` (empty) and `ui.gamepad_menu_shortcut=0` to run with no graphics hooks
   at all.
+- **Steam Input mouse in the gyro4all.dll panel.** GyroLib's per-view "Steam Input mouse" row (Pass through / Block /
+  Convert movement, saved in `gyrolib.ini`) appears when the selected controller is under Steam Input. In DX12 games
+  GyroLib applies it itself. In the other games Gyro4All applies it, because GyroLib's own bridge needs window messages
+  that DirectInput games never get. A low-level mouse hook drops Steam's injected motion before it moves the cursor.
+  Hooks on Raw Input reads (win32u's `NtUserGetRawInputData`/`NtUserGetRawInputBuffer`, every caller, DirectInput's
+  own reads included) empty Steam's packets, the ones from no device. Physical mice, buttons and the wheel pass. Block
+  and Convert act everywhere in the game while it is in front, menus and the open panel included. Convert turns the
+  emptied packets into camera turn at GyroLib's 0.05 degrees per count (Steam's own mouse sensitivity sets how many
+  counts it sends), only while the camera may turn; GyroLib's gyro sensitivity and smoothing don't apply to it, nor its
+  FOV compensation. Convert needs a game that reads Raw Input (directly or through DirectInput): in one that only
+  reads the cursor it blocks but turns nothing. Unlike GyroLib, any injected mouse motion counts as Steam's while
+  Steam Input has the controller (another tool's mouse emulation, e.g. DS4Windows or AutoHotkey, is blocked too). A
+  game that reads Steam's gyro through its own Steam Input actions (Days Gone) gets no mouse to block: turn the gyro
+  off in its Steam layout instead.
 - The panel finds the game's swapchain through the game's own `dxgi.dll` factory imports (protected exes: the real
   System32 factory). Some protectors resolve the graphics imports themselves, so those imports are never called; for
   games that ship NVIDIA Streamline (DLSS), Gyro4All also hooks Streamline's proxy factory (`sl.interposer.dll`: its

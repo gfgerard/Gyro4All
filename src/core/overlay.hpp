@@ -23,6 +23,8 @@ bool available();
 void draw(SDL_Gamepad* pad);
 // Mask of GL_OVERLAY_CAPTURE_* bits while the panel is open.
 unsigned capture();
+// True once GyroLib's DX12 panel is attached (it brings GyroLib's own Steam Input mouse option).
+bool gyrolib_panel();
 // Game thread: poll the configured F-key (gl_get_menu_key) and toggle the panel on its press.
 // Window messages for that key are no longer forwarded to GyroLib, so it never toggles twice.
 void poll_menu_key(gl_context* ctx, bool focused);
