@@ -96,3 +96,7 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 | BioShock | Unreal Engine 2.5 (modified) | 2007 | 32bit |
 | BioShock 2 | Unreal Engine 2.5 (modified) | 2010 | 32bit |
 | BioShock Infinite | Unreal Engine 3 | 2013 | 32bit |
+| Subnautica | Unity | 2018 | |
+| Zombie Army 4: Dead War | Asura (Rebellion) | 2020 | Denuvo: no debugging. Solo / offline testing only (online co-op game) |
+| Red Dead Redemption 2 | RAGE | 2019 | Never online (Rockstar anti-cheat) |
+| Cyberpunk 2077 | REDengine 4 | 2020 | |
