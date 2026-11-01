@@ -433,6 +433,11 @@ Unreal Engine 3 views read the displayed `Camera CameraCache.FOV` (the `TPOV` st
 it from horizontal to vertical with the game window's client aspect. Games without the reflected
 `Camera.CameraCache`/`TPOV.FOV` properties get no compensation (the setting stays in the panel but never engages).
 
+Glacier views (HITMAN 3) read the third-person camera controller's FOV (a float it keeps at +0x200) and convert it from
+horizontal to vertical with the game window's client aspect. With no `ZoomReferenceFOV=`, the reference is the widest
+FOV seen since the controller was found (aiming only narrows the FOV in HITMAN 3). 007 First Light's orbit and
+transition cameras have no known FOV source, so its view declares no zoom support.
+
 The unzoomed reference is the engine's own default (`PlayerCameraManager.DefaultFOV`, `PlayerController.DefaultFOV`)
 unless `ZoomReferenceFOV=` says otherwise (horizontal degrees, like the engine reports). The most specific place wins:
 a view section (`[View.*]`) for Unreal, `[Unreal3]` for Unreal Engine 3, then the generic `[Gyro4All] ZoomReferenceFOV=`

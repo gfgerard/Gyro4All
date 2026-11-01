@@ -22,12 +22,16 @@
 // kYawSense/kPitchSense, checked in game). The controller is found by its vtable with
 // a heap scan on a thread of its own, again whenever it goes away. Without the vtable, or while no controller matches
 // the local Hitman, the gyro goes to the game as right-stick input (the core's blind stick fallback).
+// The controller's FOV (float, horizontal degrees) is at +0x200 (40 on foot -> 25 aiming, copies at +0x2D0, not read;
+// 2026-10-31): the zoom compensation's source for HITMAN 3. 007 First Light's orbit and transition cameras have no
+// known FOV source, so no zoom compensation there (its L2 zoom is a short-lived transition camera).
 #include "glacier.hpp"
 #include "glacier_look.hpp"
 #include "glacier_xinput.hpp"
 
 #include "dinputpad.hpp"
 #include "engine.hpp"
+#include "fov.hpp"
 #include "log.hpp"
 #include "mem.hpp"
 #include "settings.hpp"
@@ -38,8 +42,10 @@
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <format>
+#include <optional>
 #include <vector>
 
 namespace gyro4all::glacier {
@@ -68,6 +74,10 @@ constexpr uintptr_t kTypeInterfaces = 0x20, kMainCamera = 0x1348, kPaused = 0x70
 // The controller: the main camera's interface, the local ZHitman5, the angles (radians).
 constexpr uintptr_t kCtlCamera = 0x10, kCtlHitman = 0x20, kYaw = 0x2C, kPitch = 0x30;
 constexpr uintptr_t kPendingYaw = 0x3E4, kPendingPitch = 0x3E0;  // the update's working copies
+// The controller's FOV, float, horizontal degrees (40 on foot -> 25 aiming; copies at +0x2D0, not read). An offset of
+// HITMAN 3's controller class, not of Glacier in general: each Glacier game's camera components differ (007 First
+// Light's orbit cameras have none), so a new game adds its own FOV source in zoom_fov().
+constexpr uintptr_t kFov = 0x200;
 // The camera's look-at blend (the update's +0x2F0 struct +0x6C4, exe+0x727E05): while this byte is set, every update
 // pulls the pending angles toward a fixed world point (+0x990) over +0x860 seconds (0.54) and clears it at the end. It
 // starts at aim-in when the gyro turns (never seen with the stick) and holds the view still: a gyro freeze.
@@ -396,7 +406,9 @@ public:
     }
 
 
-    std::vector<ViewInfo> views() const override { return {{1, "Default", 0}}; }
+    // zoom_available for the games whose FOV source this module knows (HITMAN 3's camera controller); 007 First
+    // Light's orbit cameras have none (loop_mode_), so no zoom compensation is declared for it.
+    std::vector<ViewInfo> views() const override { return {{1, "Default", 0, !loop_mode_}}; }
 
     // Test switches (MODLOG 2026-10-28): GlacierInputDelta=1 turns through the input delta (flaps while aimed), and
     // GlacierPendingWrites=1 writes the angles' pending copies too (crashed the game twice, GPU hang, with the Present frame
@@ -407,6 +419,14 @@ public:
         loop_mode_ = !exe_imports_peek();
         input_delta_ = settings::get(L"GlacierInputDelta", 0) != 0;
         pending_writes_ = settings::get(L"GlacierPendingWrites", 0) != 0;
+        // The unzoomed horizontal FOV for zoom compensation: the generic [Gyro4All] ZoomReferenceFOV= (profile or
+        // Gyro4All.ini); 0 or implausible uses the widest FOV seen in game instead.
+        zoom_reference_fov_ = std::atof(settings::get_string(L"ZoomReferenceFOV", L"0").c_str());
+        if (zoom_reference_fov_ > 0 && (zoom_reference_fov_ < 5 || zoom_reference_fov_ > 170)) {
+            log("glacier: ZoomReferenceFOV=%.1f implausible: ignored", zoom_reference_fov_);
+            zoom_reference_fov_ = 0;
+        }
+        if (zoom_reference_fov_ > 0) log("glacier: zoom reference FOV %.1f degrees ([Gyro4All] ZoomReferenceFOV)", zoom_reference_fov_);
         log("settings: GlacierInputDelta=%d GlacierPendingWrites=%d", int(input_delta_), int(pending_writes_));
         dinputpad::on_create(&hook_xinput_device_check);
     }
@@ -443,11 +463,13 @@ public:
             turned_ = controller_;
             write_ = {};
             angles_mode_ = false;
+            zoom_reference_ = 0;
         }
         f.in_game = true;
         f.view_id = 1;
         f.no_camera = !controller_;
         f.target = controller_ ? "camera controller" : "ZHitman5 (gyro as right stick)";
+        if (auto z = zoom_fov()) f.zoom_fov = *z;
         return f;
     }
 
@@ -547,13 +569,14 @@ public:
 
     std::string status_scene() const override {
         if (loop_mode_) return std::format("{} cursor={}", look::status(), int(cursor_));
-        float a[2] = {}, up = 0, down = 0;
+        float a[2] = {}, up = 0, down = 0, fov = 0;
         if (controller_) mem::guarded_copy(a, controller_ + kYaw, sizeof a);
+        if (controller_ && !mem::rd(controller_ + kFov, fov)) fov = 0;
         pitch_limits(up, down);
         return std::format("glacier: hitman={} camera={} controller={} yaw={:.3f} pitch={:.3f} (limits {:.3f}..{:.3f}, rad) "
-                           "turning {} ({} switches) paused={} cursor={}",
+                           "fov={:.1f} turning {} ({} switches) paused={} cursor={}",
                            hitman_ ? mem::module_offset(hitman_) : "-", camera_ ? mem::module_offset(camera_) : "-",
-                           controller_ ? mem::module_offset(controller_) : "-", a[0], a[1], up, down,
+                           controller_ ? mem::module_offset(controller_) : "-", a[0], a[1], up, down, fov,
                            !input_delta_ || angles_mode_ ? "angles" : "input delta", switches_, int(paused_), int(cursor_));
     }
 
@@ -587,6 +610,52 @@ private:
         }
         up = -kMaxUp;
         down = kMaxDown;
+    }
+
+    // The current and unzoomed reference FOV, both vertical degrees for GyroLib's zoom compensation. The FOV source is
+    // per game (Glacier games' camera components differ): HITMAN 3's camera controller holds its horizontal FOV at
+    // +0x200 (40 on foot -> 25 aiming); 007 First Light (loop_mode_) has no known one. Nullopt (compensation bypassed
+    // this update): no source, or a value outside the plausible range.
+    std::optional<ZoomFov> zoom_fov() {
+        if (loop_mode_ || !controller_) return std::nullopt;
+        float current = 0;
+        if (!mem::rd(controller_ + kFov, current) || !std::isfinite(current) || current < 5 || current > 170)
+            return std::nullopt;
+        // The unzoomed reference: [Gyro4All] ZoomReferenceFOV= when set, else the widest FOV seen with this
+        // controller (aiming only ever narrows it in this game; there is no DefaultFOV-like property to read).
+        const double reference =
+            zoom_reference_fov_ > 0 ? zoom_reference_fov_ : (zoom_reference_ = std::max(zoom_reference_, double(current)));
+        ZoomFov z;
+        z.current_vertical = fov::vertical_from_horizontal(current, window_aspect());
+        z.reference_vertical = fov::vertical_from_horizontal(reference, window_aspect());
+        if (!fov::is_valid(z.current_vertical) || !fov::is_valid(z.reference_vertical)) return std::nullopt;
+        return z;
+    }
+
+    // The game window's client aspect (width/height) for the horizontal-to-vertical FOV conversion. The largest visible
+    // top-level window of this process, as in core/notify.cpp.
+    static double window_aspect() {
+        struct Search {
+            HWND best = nullptr;
+            long long area = 0;
+        } search;
+        EnumWindows(
+            [](HWND hwnd, LPARAM p) -> BOOL {
+                auto& s = *reinterpret_cast<Search*>(p);
+                DWORD pid = 0;
+                GetWindowThreadProcessId(hwnd, &pid);
+                if (pid != GetCurrentProcessId() || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
+                RECT r{};
+                if (!GetClientRect(hwnd, &r)) return TRUE;
+                const long long area = 1ll * (r.right - r.left) * (r.bottom - r.top);
+                if (area > s.area) s.best = hwnd, s.area = area;
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM>(&search));
+        RECT r{};
+        return search.best && GetClientRect(search.best, &r) && r.right > 0 && r.bottom > 0
+                   ? double(r.right) / r.bottom
+                   : 0;
     }
 
     // The game's frames: Gyro4All's own, one per pump of the game thread.
@@ -739,6 +808,8 @@ private:
     uintptr_t controller_ = 0;
     ULONGLONG next_scan_ = 0;
     uintptr_t turned_ = 0;  // the controller write_ and angles_mode_ are about
+    double zoom_reference_ = 0;  // the widest FOV seen with the current controller (the unzoomed reference)
+    double zoom_reference_fov_ = 0;  // [Gyro4All] ZoomReferenceFOV=, horizontal degrees; 0 = learn it in game
     bool paused_ = false;
     bool pending_writes_ = false;
     bool input_delta_ = true;

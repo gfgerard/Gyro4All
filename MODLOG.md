@@ -6348,3 +6348,17 @@ or gyro to stick.
   stay: different views can have different unzoomed FOVs, which one folder-wide value can't express); `Unreal3`'s
   `configure()` falls back to `settings::get_string("ZoomReferenceFOV")` (profile wins over Gyro4All.ini, as other mod
   settings). `docs/ADVANCED.md`: the Zoom compensation section documents the precedence.
+- 2026-10-31 **Glacier (HITMAN 3): zoom compensation** (built, 709 checks pass; not tested in game): the camera
+  controller (the vtable-exe+0x1E1BA10 class the module scans the heap for) holds the game's FOV as a float at **+0x200**:
+  **40 on foot -> 25 aiming** (L2), with copies at +0x2D0 (not read — +0x200 is the one the user verified live).
+  The module reports it through the core's zoom contract: `zoom_fov()` reads controller+0x200 (implausible values
+  bypass the update), converts horizontal->vertical with the game window's client aspect (the same EnumWindows helper
+  as UE3), and the reference is the generic `[Gyro4All] ZoomReferenceFOV=` when set, else the widest FOV seen with the
+  current controller (reset when the controller changes; aiming only ever narrows the FOV in this game). The FOV is
+  treated as **horizontal — to verify in game** (if it is vertical, drop the conversion; the ratio barely differs in
+  this range). `views()` declares `zoom_available` only for the PeekMessage path (HITMAN 3); **007 First Light has no
+  FOV source**: its L2 zoom is a short-lived transition camera without orbit state, and its orbit/kinetic camera
+  components have no known FOV (the FOV source is per game on purpose — Glacier games' camera components differ; a new
+  game adds its branch in `zoom_fov()`). The status line prints the controller's FOV. **Next step for 007 (hypothesis,
+  not tested)**: the Gameplay World's derived view (+0x88: yaw +0x10C, pitch +0x110, MODLOG 2026-10-29) likely has the
+  FOV as a neighboring float — check +0x114 and nearby while the L2 transition camera is active.
