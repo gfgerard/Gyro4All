@@ -71,4 +71,9 @@ void set_stick(float x, float y);
 // with GyroLib's suppress_native_right_stick; the stick click still reaches it).
 bool frame(gl_context* ctx, gl_sdl* reader, const gl_output& out, bool suppress_right = false);
 
+// WriteWatch's xi and ri addresses (writewatch.cpp), any thread: the buffer the game last passed to XInputGetState(Ex),
+// and to GetRawInputBuffer or GetRawInputData (RID_INPUT); 0 = none yet. on_stack: it was on the calling thread's stack.
+uintptr_t last_state_buffer(bool& on_stack);
+uintptr_t last_raw_input_buffer(bool& on_stack);
+
 }  // namespace gyro4all::xinput

@@ -12,7 +12,8 @@ game's files.
 
 **Start with the guided search** (`guided.py`, below): a minute of sound-cued moves, nothing saved to disk, no debugger
 and no writes, so it also works on Denuvo and Themida games. It finds the view's copies and any stored source in one go.
-Then write-test what it lists, and only use `bp` when every candidate is a copy the game rewrites.
+Then write-test what it lists, and only use `bp` when every candidate is a copy the game rewrites. **On games with
+anti-debugging (Denuvo, Themida) use Gyro4All's own write watcher instead of `bp`** (below).
 
 ## Guided search (start here)
 
@@ -41,6 +42,25 @@ times some degrees for "any unit"). The one that keeps the write and moves the v
 follow a copy with `bp` (step 3 below, not on anti-debugging games). Zombie Army 4 (MODLOG 2026-11-02): only copies,
 no stored source; the view is rebuilt every frame.
 
+## Without a debugger: Gyro4All's WriteWatch (Denuvo, Themida)
+
+The same breakpoints from inside the game: Gyro4All sets the hardware breakpoint on the game's threads itself and
+catches it with its own exception handler, so no debugger is attached (it found Dead Space's camera source, with Denuvo,
+without a reaction). Install Gyro4All in the game and put `WriteWatch=on` in `Gyro4All\Gyro4All.ini` before starting
+the game; then, while it runs, set `WriteWatch=` to an address (re-read every 500 ms) and turn the camera for
+`WriteWatchSeconds` (10). Every instruction that writes there is logged once in `Gyro4All.log` (`writewatch:` lines)
+with its registers, callers and code bytes, then how often each wrote: the same as `bp`, without the debugger.
+
+- Addresses: hex, `exe+<hex offset>` (as `guided.py` and `vectors` print them) or an engine module's name.
+- `WriteWatch=r:<address>`: reads and writes; `WriteWatch=x:<address>`: a function's entry (`WriteWatchFields`).
+- **Forward from the input**, when following copies back leads nowhere: the game's own input buffers, plus a hex offset.
+  `r:ri+24` is the X movement of the first mouse report the game reads with Raw Input (`+28` the Y), `r:xi+c` the right
+  stick's X in its last `XInputGetState`, `r:di+8` a DirectInput pad's. The code that reads it is the game's input
+  layer; watch where it stores the value (`r:` on that), and so on, until the code that adds it to the view angles:
+  that store is the source, or the place to hook. A buffer on the caller's stack (the log says so) is reused by other
+  code: there, keep only the reads right after the call.
+- Remove `WriteWatch` for playing: each hit stops a game thread for an exception.
+
 ## Commands
 
 | Command | What it does | Writes game memory |
@@ -48,6 +68,7 @@ no stored source; the view is rebuilt every frame.
 | `snap <out> [--heap]` | Snapshot of the exe's static data (and the heap, not thread stacks) | No |
 | `vectors <a> <b> [--turn D]` | Unit 3-vectors that turned between two snapshots: copies of the view direction | No |
 | `find-vec x,y,z` | Every copy of a direction in memory (stride 1, 2, 4 floats); thread stacks marked | No |
+| `ptrs <addr> [--range R] [--outer R]` | Pointer paths to an object from the exe's static data: `[exe+X]+off` and through one heap object, `[[exe+X]+a]+off` (`--range`: how far before addr the object may start; `--outer`: the same for the holding object). Check the candidates survive a level change | No |
 | `dump <addr>` / `watch <addr>` | Memory around an address; values while you move | No |
 | `write-test <addr> --add R` or `--yaw D` | Waits for the game in front, writes once, shows whether the game kept it | **Yes** |
 | `bp <addr>` | One-hit hardware write breakpoint through cdb (`-pd`), prints who wrote it, detaches | No (debugger) |
@@ -61,7 +82,7 @@ Addresses are absolute hex, exe-relative (`exe+0x30021e0`) or pointer paths (`[[
 ## Before you start
 
 - Single-player or offline games without anti-cheat **or anti-debugging** (Themida, Denuvo and similar may detect the
-  debugger): don't use `bp` on those.
+  debugger): don't use `bp` on those; use Gyro4All's WriteWatch (above).
 - Back up the saves (`um backup create`) and have the user save in game: a debugger session ended once with the game
   gone (no crash report), and an attach without `-pd` kills the game when the debugger quits.
 - Python 3 with numpy (`pefile` and `capstone` for `refs`/`sig`), from the repository root:

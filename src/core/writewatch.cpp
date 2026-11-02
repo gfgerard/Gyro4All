@@ -4,6 +4,7 @@
 #include "log.hpp"
 #include "mem.hpp"
 #include "settings.hpp"
+#include "xinput.hpp"
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -314,8 +315,13 @@ uintptr_t parse(const std::string& s) {
     }
 }
 
-// The address of a WriteWatch value after its mode prefix: hex, or di[+<hex offset>] = the buffer of the game's last
-// DirectInput GetDeviceState (dinputpad), e.g. di+8 = lZ of a DIJOYSTATE (the right stick's X on PlayStation pads).
+// The address of a WriteWatch value after its mode prefix: hex, exe+<hex offset> (an offset in the game's exe, as
+// camtrace prints them), an engine's name (provide()), or one of the game's input buffers plus a hex offset:
+// - di: the game's last DirectInput GetDeviceState buffer (dinputpad), e.g. di+8 = lZ of a DIJOYSTATE (the right
+//   stick's X on PlayStation pads);
+// - xi: its last XInputGetState(Ex) XINPUT_STATE, e.g. xi+c = sThumbRX;
+// - ri: its last GetRawInputBuffer or GetRawInputData buffer, e.g. ri+24 = the first mouse report's lLastX (lLastY at
+//   +28).
 // what: how it was resolved, for the log ("" for a plain address).
 uintptr_t resolve(const std::string& s, std::string& what) {
     what.clear();
@@ -335,17 +341,37 @@ uintptr_t resolve(const std::string& s, std::string& what) {
         what = text;
         return base + offset;
     }
-    if (s.rfind("di", 0) != 0) return parse(s);
+    const std::string name = s.substr(0, s.find('+'));
+    const uintptr_t offset = name.size() + 1 < s.size() ? parse(s.substr(name.size() + 1)) : 0;
     uintptr_t buffer = 0;
-    uint32_t size = 0;
-    if (!dinputpad::last_state(buffer, size)) {
-        what = "the game hasn't read a DirectInput controller with GetDeviceState yet";
-        return 0;
+    bool on_stack = false;
+    char text[192];
+    if (name == "exe") {
+        std::snprintf(text, sizeof text, "%s", s.c_str());
+        what = text;
+        return g_image_begin + offset;
+    } else if (name == "di") {
+        uint32_t size = 0;
+        if (!dinputpad::last_state(buffer, size)) {
+            what = "the game hasn't read a DirectInput controller with GetDeviceState yet";
+            return 0;
+        }
+        std::snprintf(text, sizeof text, "%s = the game's GetDeviceState buffer 0x%llX (%u bytes) +0x%llX", s.c_str(),
+                      (unsigned long long)buffer, size, (unsigned long long)offset);
+    } else if (name == "xi" || name == "ri") {
+        const bool xi = name == "xi";
+        buffer = xi ? xinput::last_state_buffer(on_stack) : xinput::last_raw_input_buffer(on_stack);
+        if (!buffer) {
+            what = xi ? "the game hasn't called XInputGetState yet" : "the game hasn't read Raw Input yet";
+            return 0;
+        }
+        // A buffer on the caller's stack is reused by other code between reads: hits there may be unrelated.
+        std::snprintf(text, sizeof text, "%s = the game's %s buffer 0x%llX%s +0x%llX", s.c_str(),
+                      xi ? "XInputGetState" : "Raw Input", (unsigned long long)buffer,
+                      on_stack ? " (on the caller's stack: other code reuses it)" : "", (unsigned long long)offset);
+    } else {
+        return parse(s);
     }
-    const uintptr_t offset = s.size() > 3 && s[2] == '+' ? parse(s.substr(3)) : 0;
-    char text[128];
-    std::snprintf(text, sizeof text, "%s = the game's GetDeviceState buffer 0x%llX (%u bytes) +0x%llX", s.c_str(),
-                  (unsigned long long)buffer, size, (unsigned long long)offset);
     what = text;
     return buffer + offset;
 }

@@ -8,8 +8,12 @@
 // this) and the floats at WriteWatchFields=<hex offset>,... from it on every call, logged every 200 ms when time is up.
 // WriteWatch=r:<hex address> logs the instructions that read or write it (x86 has no read-only breakpoint), to follow
 // an input value forward into the code that uses it.
-// Instead of a hex address, di[+<hex offset>] is the buffer of the game's last DirectInput GetDeviceState (dinputpad):
-// r:di+8 watches lZ of a DIJOYSTATE, the right stick's X on PlayStation controllers. Engine modules can provide more
+// Instead of a hex address: exe+<hex offset> (an offset in the game's exe, as camtrace prints them), or one of the
+// game's input buffers plus a hex offset, to follow the input forward: di is the buffer of its last DirectInput
+// GetDeviceState (dinputpad; r:di+8 watches lZ of a DIJOYSTATE, the right stick's X on PlayStation controllers), xi its
+// last XInputGetState XINPUT_STATE (r:xi+c: sThumbRX), ri its last GetRawInputBuffer/GetRawInputData buffer (r:ri+24:
+// the first mouse report's lLastX). No debugger is attached, so it also works on games with anti-debugging (Denuvo:
+// Dead Space, Zombie Army 4). Engine modules can provide more
 // names (provide()); those are resolved again every 500 ms while armed and the breakpoint follows when the object moves
 // (Frostbite's cam: the active camera's rotation interface, which the game replaces every few seconds).
 // Not for playing: the game stops for an exception on every hit (the watch disarms itself after 100,000 hits).

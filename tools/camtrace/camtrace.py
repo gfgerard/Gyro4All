@@ -252,6 +252,41 @@ def cmd_find_vec(p, a):
         print(f"  {where:5s} {p.name(h):18s} stride {stride}")
 
 
+# --- ptrs: pointer paths from the exe's static data to an object ------------------------------------------------------
+
+def pointers_into(np, p, regions, lo, hi):
+    """[(where, value)] of 8-aligned qwords in regions [(start, size)] pointing into [lo, hi)."""
+    out = []
+    for base, size in regions:
+        for off in range(0, size, 64 << 20):
+            b = p.read(base + off, min(64 << 20, size - off))
+            if not b: continue
+            u = np.frombuffer(b[: len(b) // 8 * 8], np.uint64)
+            for i in np.nonzero((u >= lo) & (u < hi))[0]: out.append((base + off + 8 * int(i), int(u[i])))
+    return out
+
+
+def cmd_ptrs(p, a):
+    import numpy as np
+    target = addr(p, a.addr)
+    exe = p.exe_rw()
+    direct = pointers_into(np, p, exe, target - a.range, target + 1)
+    print(f"static pointers to {target:#x} (object start up to {a.range:#x} before it):")
+    for w, v in direct: print(f"  [{p.name(w)}] = {v:#x}  -> [{p.name(w)}]+{target - v:#x}")
+    if not direct: print("  none")
+    if a.depth < 2: return
+    st = p.stacks()
+    heap = [(b, s) for b, s, t, _ in p.regions() if t != MEM_IMAGE and s < 1 << 31 and not any(lo <= b < hi for lo, hi in st)]
+    mids = pointers_into(np, p, heap, target - a.range, target + 1)
+    print(f"{len(mids)} heap pointers to it; static pointers to the objects holding them:")
+    shown = 0
+    for w, v in mids:
+        for w2, v2 in pointers_into(np, p, exe, w - a.outer, w + 1):
+            print(f"  [[{p.name(w2)}]+{w - v2:#x}]+{target - v:#x}"); shown += 1
+            if shown >= a.limit: return
+    if not shown: print("  none")
+
+
 # --- dump / watch ------------------------------------------------------------------------------------------------------
 
 def cmd_dump(p, a):
@@ -400,6 +435,10 @@ def main():
     s = sub.add_parser("vectors", help="unit vectors that turned between two snapshots"); s.add_argument("a"); s.add_argument("b")
     s.add_argument("--min-turn", type=float, default=20); s.add_argument("--min-pitch", type=float, default=3); s.add_argument("--show", type=int, default=40); s.add_argument("--turn", type=float, help="the turn you made (sorts by it)"); s.add_argument("--limit", type=int, default=40)
     s = sub.add_parser("find-vec", help="every copy of a direction (x,y,z, or an address holding one) in memory"); s.add_argument("vec"); s.add_argument("--tol", type=float, default=2e-3); s.add_argument("--limit", type=int, default=60)
+    s = sub.add_parser("ptrs", help="pointer paths from the exe's static data to an object (one or two levels)"); s.add_argument("addr")
+    s.add_argument("--range", type=lambda x: int(x, 0), default=0x1000, help="how far before addr the pointed-to object may start")
+    s.add_argument("--outer", type=lambda x: int(x, 0), default=0x2000, help="the same for the heap objects holding a pointer to it")
+    s.add_argument("--depth", type=int, choices=[1, 2], default=2); s.add_argument("--limit", type=int, default=40)
     s = sub.add_parser("dump", help="memory around an address"); s.add_argument("addr"); s.add_argument("--size", type=lambda x: int(x, 0), default=0x80); s.add_argument("--before", type=lambda x: int(x, 0), default=0x20)
     s = sub.add_parser("watch", help="print values while you move"); s.add_argument("addr"); s.add_argument("--count", type=int, default=3)
     s.add_argument("--type", choices=["f32", "f64", "i32"], default="f32"); s.add_argument("--seconds", type=float, default=30); s.add_argument("--interval", type=float, default=0.1)
@@ -419,7 +458,7 @@ def main():
     a = ap.parse_args()
     offline = a.cmd in ("refs", "sig")
     p = None if offline else Proc(a.exe, write=a.cmd == "write-test")
-    {"snap": cmd_snap, "vectors": cmd_vectors, "find-vec": cmd_find_vec, "dump": cmd_dump, "watch": cmd_watch,
+    {"snap": cmd_snap, "vectors": cmd_vectors, "find-vec": cmd_find_vec, "dump": cmd_dump, "ptrs": cmd_ptrs, "watch": cmd_watch,
      "write-test": cmd_write_test, "bp": cmd_bp, "refs": cmd_refs, "sig": cmd_sig}[a.cmd](p, a)
 
 

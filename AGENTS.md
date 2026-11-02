@@ -38,7 +38,9 @@ find the camera** (no reflection, no known global, value searches that only turn
 minute of cued moves, read-only, nothing saved to disk, no debugger) lists the view's copies and any stored angle,
 direction or quaternion; write-test those. Only if every candidate is a copy the game rewrites, follow the writes back
 with one-hit hardware breakpoints until a write sticks and the view follows (steps in its README). It found Metro Exodus's view in three breakpoints after hours of value searches had failed. Ask
-the user before attaching the debugger and have them save first; never on games with anti-debugging (Themida, Denuvo).
+the user before attaching the debugger and have them save first; never on games with anti-debugging (Themida, Denuvo):
+there, use Gyro4All's own write watcher (`WriteWatch` in `Gyro4All.ini`, no debugger; camtrace README), which can also
+follow the game's mouse or pad input forward (`r:ri+24`, `r:xi+c`) when the copies lead nowhere.
 After finding the camera, remember to search for FOV data for zoom compensation feature.
 
 ## Ground rules

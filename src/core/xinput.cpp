@@ -89,6 +89,18 @@ std::atomic<uint32_t> g_polls_ours{0};        // ... of those, answered with the
 std::atomic<uint32_t> g_listed{0};            // vendor << 16 | product the game lists as XInput (listed_as_xinput)
 std::atomic<bool> g_listed_pending{false};    // ... and the frame hasn't decided about it yet
 std::atomic<uint32_t> g_real_mask{0};         // real XInput controllers connected (the watcher thread), bit per slot
+std::atomic<uintptr_t> g_state_buffer{0};     // the game's last XInputGetState(Ex) buffer (WriteWatch's xi)
+std::atomic<uintptr_t> g_raw_buffer{0};       // ... and GetRawInputBuffer/GetRawInputData one (WriteWatch's ri)
+std::atomic<bool> g_state_on_stack{false}, g_raw_on_stack{false};  // ... each on the calling thread's stack
+
+void note_buffer(std::atomic<uintptr_t>& buffer, std::atomic<bool>& on_stack, const void* data) {
+    const auto at = reinterpret_cast<uintptr_t>(data);
+    if (!at || buffer.load(std::memory_order_relaxed) == at) return;
+    ULONG_PTR low = 0, high = 0;
+    GetCurrentThreadStackLimits(&low, &high);
+    on_stack.store(at >= low && at < high, std::memory_order_relaxed);
+    buffer.store(at, std::memory_order_relaxed);
+}
 
 // ------------------------------------------------------------------ native pad support (Auto mode)
 
@@ -187,6 +199,7 @@ struct Inside {
 DWORD get_state(GetState_t real, DWORD user, XINPUT_STATE* state) {
     Inside inside;
     if (!g_game_polls.exchange(true)) log("xinput: the game polls XInputGetState");
+    note_buffer(g_state_buffer, g_state_on_stack, state);
     if (our_state(user, state, false)) return ERROR_SUCCESS;
     return real_state(real ? real(user, state) : ERROR_DEVICE_NOT_CONNECTED, state);
 }
@@ -197,6 +210,7 @@ DWORD WINAPI hk_get_state(DWORD user, XINPUT_STATE* state) {
 
 DWORD WINAPI hk_get_state_ex(DWORD user, XINPUT_STATE* state) {
     if (!g_game_polls.exchange(true)) log("xinput: the game polls XInputGetStateEx");
+    note_buffer(g_state_buffer, g_state_on_stack, state);
     if (our_state(user, state, true)) return ERROR_SUCCESS;
     GetState_t real = original(g_get_state_ex, "XInputGetStateEx", "xinput1_4.dll", 100);
     return real_state(real ? real(user, state) : ERROR_DEVICE_NOT_CONNECTED, state);
@@ -382,8 +396,10 @@ BOOL WINAPI hk_register_raw(PCRAWINPUTDEVICE devices, UINT count, UINT size) {
 UINT WINAPI hk_get_raw_data(HRAWINPUT input, UINT command, LPVOID data, PUINT size, UINT header_size) {
     GetRawInputData_t real = original(g_get_raw_data, "GetRawInputData", "user32.dll");
     const UINT result = real ? real(input, command, data, size, header_size) : UINT(-1);
-    if (data && command == RID_INPUT && result != UINT(-1) && result >= sizeof(RAWINPUTHEADER))
+    if (data && command == RID_INPUT && result != UINT(-1) && result >= sizeof(RAWINPUTHEADER)) {
         overlay::filter_raw_input(data);
+        note_buffer(g_raw_buffer, g_raw_on_stack, data);
+    }
     if (data && command == RID_INPUT && result != UINT(-1) && result >= sizeof(RAWINPUTHEADER) &&
         static_cast<const RAWINPUT*>(data)->header.dwType == RIM_TYPEHID) {
         const DWORD error = GetLastError();
@@ -414,6 +430,7 @@ UINT WINAPI hk_get_raw_buffer(PRAWINPUT data, PUINT size, UINT header_size) {
     GetRawInputBuffer_t real = original(g_get_raw_buffer, "GetRawInputBuffer", "user32.dll");
     const UINT n = real ? real(data, size, header_size) : UINT(-1);
     if (data && n != UINT(-1)) {
+        if (n) note_buffer(g_raw_buffer, g_raw_on_stack, data);
         PRAWINPUT block = data;
         // NEXTRAWINPUTBLOCK: the next block starts 8-byte aligned after this one.
         for (UINT i = 0; i < n; ++i) {
@@ -1027,6 +1044,16 @@ bool frame(gl_context* ctx, gl_sdl* reader, const gl_output& out, bool suppress_
             notify::show(L"Xbox controller translation stopped: " + widen(reason) + L".", 10);
     }
     return show;
+}
+
+uintptr_t last_state_buffer(bool& on_stack) {
+    on_stack = g_state_on_stack.load(std::memory_order_relaxed);
+    return g_state_buffer.load(std::memory_order_relaxed);
+}
+
+uintptr_t last_raw_input_buffer(bool& on_stack) {
+    on_stack = g_raw_on_stack.load(std::memory_order_relaxed);
+    return g_raw_buffer.load(std::memory_order_relaxed);
 }
 
 }  // namespace gyro4all::xinput
