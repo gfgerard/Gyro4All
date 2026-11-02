@@ -36,6 +36,40 @@ thread_local int t_presenting = 0;
 
 void log_line(const char* line) { log("panel: %s", line); }
 
+// ---------------------------------------------------------------- the Gyro4All window's settings access (ABI 6)
+
+std::wstring widen(const char* utf8) {
+    if (!utf8 || !*utf8) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
+    std::wstring out(size_t(n ? n - 1 : 0), L'\0');
+    if (n > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, out.data(), n);
+    return out;
+}
+
+// The panel's get: the effective value (the game's profile wins over Gyro4All.ini, as at run time), utf-8.
+uint32_t settings_get(const char* key, char* out, uint32_t out_size) {
+    if (!out || !out_size) return 0;
+    out[0] = '\0';
+    const std::wstring wkey = widen(key);
+    std::wstring value;
+    if (!settings::read(settings::profile_path(), wkey.c_str(), value) &&
+        !settings::read(settings::settings_path(), wkey.c_str(), value))
+        return 0;
+    const std::string utf8 = narrow(value);
+    const size_t n = std::min<size_t>(utf8.size(), out_size - 1);
+    std::memcpy(out, utf8.data(), n);
+    out[n] = '\0';
+    return 1;
+}
+
+// The panel's set: written to Gyro4All.ini (never the profile), so it persists between sessions.
+int32_t settings_set(const char* key, const char* value) {
+    settings::set_string(widen(key).c_str(), widen(value).c_str());
+    return G4A_OK;
+}
+
+const g4a_settings g_settings_callbacks = {sizeof(g4a_settings), G4A_ABI_VERSION, &settings_get, &settings_set};
+
 // ---------------------------------------------------------------- D3D9
 //
 // Direct3DCreate9(Ex) (import hooks) -> IDirect3D9::CreateDevice (16) / IDirect3D9Ex::CreateDeviceEx (20) -> the device's
@@ -238,7 +272,7 @@ HRESULT WINAPI hk_direct3d_create9ex(UINT sdk, IDirect3D9Ex** out) {
 
 // ---------------------------------------------------------------- the DLL
 
-const g4a_api* load(gl_context* ctx, HWND window) {
+const g4a_api* load(gl_context* ctx, HWND window, uint32_t flags) {
     const std::wstring path = settings::install_dir() + L"\\gyro4all.dll";
     HMODULE dll = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!dll) {
@@ -251,8 +285,8 @@ const g4a_api* load(gl_context* ctx, HWND window) {
         log("panel: gyro4all.dll doesn't match this winmm.dll (interface %u); no settings panel", G4A_ABI_VERSION);
         return nullptr;
     }
-    if (a->create(ctx, window, &log_line) != G4A_OK) return nullptr;
-    log("panel: gyro4all.dll loaded");
+    if (a->create(ctx, window, &log_line, &g_settings_callbacks, flags) != G4A_OK) return nullptr;
+    log("panel: gyro4all.dll loaded%s", flags & G4A_CREATE_DX12 ? " (DX12: the Gyro4All window)" : "");
     return a;
 }
 
@@ -332,7 +366,20 @@ bool attach(gl_context* ctx) {
     if (g_api.load()) return true;
     if (g_load_failed || (!g_target.load() && !g_vk_target.load() && !g_gl_target.load()) || !g_window.load()) return false;
     const HWND window = g_window.load();
-    const g4a_api* a = load(ctx, window);
+    const g4a_api* a = load(ctx, window, 0);
+    if (!a) {
+        g_load_failed = true;
+        return false;
+    }
+    g_panel_window = window;
+    g_api = a;
+    return true;
+}
+
+bool attach_dx12(gl_context* ctx, HWND window) {
+    if (g_api.load()) return true;
+    if (g_load_failed || !window) return false;
+    const g4a_api* a = load(ctx, window, G4A_CREATE_DX12);
     if (!a) {
         g_load_failed = true;
         return false;
@@ -405,6 +452,27 @@ void dxgi_present(void* swapchain) {
 void dxgi_before_resize(void* swapchain) {
     const g4a_api* a = g_api.load();
     if (a && is_dxgi_target(swapchain)) a->dxgi_before_resize(swapchain);
+}
+
+void dx12_present(void* swapchain, void* command_queue, uint32_t color_space) {
+    const g4a_api* a = g_api.load();
+    if (a) a->dx12_present(swapchain, command_queue, color_space);
+}
+
+void dx12_before_resize(void* swapchain) {
+    const g4a_api* a = g_api.load();
+    if (a) a->dx12_before_resize(swapchain);
+}
+
+void dx12_lost() {
+    const g4a_api* a = g_api.load();
+    if (a) a->dx12_lost();
+}
+
+// host.cpp's L3+R3 chord while the panel is open: fold/unfold the Gyro4All settings window.
+void expand_toggle() {
+    const g4a_api* a = g_api.load();
+    if (a) a->toggle_expanded();
 }
 
 }  // namespace gyro4all::panel_host

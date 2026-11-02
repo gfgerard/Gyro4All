@@ -82,6 +82,8 @@ ULONG refs_of(IUnknown* object) {
 }
 HWND g_hwnd = nullptr;
 std::atomic<gl_overlay*> g_overlay{nullptr};
+// The DX12 swapchain's colour space (what the game last passed to SetColorSpace1), for the panel's HDR handling.
+std::atomic<uint32_t> g_dx12_color_space{G4A_COLOR_SPACE_UNKNOWN};
 // Next to gyro4all.dll's static panel: a gl_overlay that never renders and is never fed window messages. GyroLib shows
 // its per-view "Steam Input mouse" row (input.steam_mouse) only while one of its mouse bridges exists; this one gives
 // that row to the static panel. GyroLib's bridge confirms Steam's mouse from Raw Input messages it never gets here, so
@@ -214,9 +216,18 @@ void render_job() {
     // Closed: nothing is drawn, so release the backbuffer references now; a resize then never has to
     // wait for GyroLib.
     if (cap == 0 && gl_overlay_dx12_before_resize(overlay) == GL_OK) g_buffers_held = false;
+    // The Gyro4All window, after GyroLib's panel, on the same queue (gyro4all.dll's DX12 renderer; no-op when the
+    // panel DLL isn't there or the window has no frame).
+    panel_host::dx12_present(swapchain, queue, g_dx12_color_space.load());
 }
 
 void before_resize_job() {
+    IDXGISwapChain3* swapchain = nullptr;
+    {
+        std::lock_guard lock(g_mutex);
+        swapchain = g_render_swapchain;
+    }
+    panel_host::dx12_before_resize(swapchain);
     gl_overlay* overlay = g_overlay.load();
     if (!overlay || !g_renderer_ready || !g_buffers_held) return;
     const int32_t r = gl_overlay_dx12_before_resize(overlay);
@@ -288,7 +299,8 @@ HRESULT STDMETHODCALLTYPE hk_present1(IDXGISwapChain1* sc, UINT sync, UINT flags
 void before_resize(IDXGISwapChain* sc, UINT count, DXGI_FORMAT format) {
     panel_host::dxgi_before_resize(sc);  // D3D10/D3D11 target only (it holds no backbuffer, only size-dependent textures)
     if (!g_overlay.load() || !is_captured(sc) || !g_renderer_ready) return;
-    if (g_buffers_held) on_worker(&before_resize_job);
+    // The panel's DX12 renderer holds references too (its RTVs): run on the worker also when GyroLib holds none.
+    if (g_buffers_held || panel_host::api()) on_worker(&before_resize_job);
     const bool changed = (count != 0 && count != g_buffer_count) || (format != DXGI_FORMAT_UNKNOWN && format != g_buffer_format);
     if (changed) {
         g_reinit = true;
@@ -336,7 +348,17 @@ SetColorSpace1_t g_set_color_space1 = nullptr;
 
 HRESULT STDMETHODCALLTYPE hk_set_color_space1(IDXGISwapChain3* sc, DXGI_COLOR_SPACE_TYPE space) {
     const HRESULT hr = original_of(sc, 38, g_set_color_space1)(sc, space);
-    if (SUCCEEDED(hr)) panel_host::set_color_space(sc, uint32_t(space));
+    if (SUCCEEDED(hr)) {
+        {
+            std::lock_guard lock(g_mutex);
+            if (static_cast<IUnknown*>(sc) == static_cast<IUnknown*>(g_swapchain)) {
+                if (g_dx12_color_space.exchange(uint32_t(space)) != uint32_t(space))
+                    log("overlay: the game sets colour space %u on the captured DX12 swapchain", uint32_t(space));
+                return hr;
+            }
+        }
+        panel_host::set_color_space(sc, uint32_t(space));
+    }
     return hr;
 }
 
@@ -500,12 +522,14 @@ void on_swapchain(IUnknown* device, HWND hwnd, IUnknown* created) {
     patch_swapchain_slot(vtable, 8, reinterpret_cast<void*>(&hk_present), reinterpret_cast<void**>(&g_present));
     patch_swapchain_slot(vtable, 13, reinterpret_cast<void*>(&hk_resize), reinterpret_cast<void**>(&g_resize));
     patch_swapchain_slot(vtable, 22, reinterpret_cast<void*>(&hk_present1), reinterpret_cast<void**>(&g_present1));
+    patch_swapchain_slot(vtable, 38, reinterpret_cast<void*>(&hk_set_color_space1), reinterpret_cast<void**>(&g_set_color_space1));
     patch_swapchain_slot(vtable, 39, reinterpret_cast<void*>(&hk_resize1), reinterpret_cast<void**>(&g_resize1));
     if (g_release_with_game) patch_swapchain_slot(vtable, 2, reinterpret_cast<void*>(&hk_release), reinterpret_cast<void**>(&g_release));
     const ULONG held = render_sc == sc3 ? 2 : 1;
     {
         std::lock_guard lock(g_mutex);
         g_held_refs = held;
+        g_dx12_color_space = G4A_COLOR_SPACE_UNKNOWN;
         if (g_swapchain) g_reinit = true;  // replaced swapchain: old buffers are released on the render worker
         std::swap(g_swapchain, sc3);
         std::swap(g_queue, queue);
@@ -635,6 +659,7 @@ void release_job() {
     g_renderer_ready = false;
     g_buffers_held = false;
     g_reinit = false;
+    panel_host::dx12_lost();  // the panel's RTVs hold references to this swapchain's buffers: release them first
     IUnknown* objects[4];
     IUnknown* released = nullptr;
     IDXGISwapChain3* native = nullptr;  // under Streamline's proxy: its references left are logged
@@ -887,16 +912,29 @@ LRESULT CALLBACK hk_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     const bool menu_key = (msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) &&
                           g_menu_vk != 0 && wp == g_menu_vk;
     const bool alt_f4 = msg == WM_SYSKEYDOWN && wp == VK_F4;
-    if (gl_overlay* overlay = g_overlay.load(); overlay && !menu_key) {
-        const uint32_t cap = gl_overlay_win32_message(overlay, hwnd, msg, wp, lp);
-        if (((cap & GL_OVERLAY_CAPTURE_MOUSE) && is_mouse(msg)) || ((cap & GL_OVERLAY_CAPTURE_KEYBOARD) && is_keyboard(msg) && !alt_f4))
-            return 0;  // consumed by the panel (GyroLib already cleaned up WM_INPUT)
-    } else if (const g4a_api* panel = panel_host::api(); panel && !menu_key) {
-        const uint32_t cap = panel->window_message(hwnd, msg, wp, lp);
-        if (((cap & G4A_CAPTURE_MOUSE) && is_mouse(msg)) || ((cap & G4A_CAPTURE_KEYBOARD) && is_keyboard(msg) && !alt_f4)) {
-            if (msg == WM_INPUT) DefWindowProcW(hwnd, msg, wp, lp);  // a consumed WM_INPUT still needs its cleanup
-            return 0;
+    // DX12 games have two frontends on this window (GyroLib's overlay and the panel DLL's Gyro4All window), each with
+    // its own ImGui context. The panel DLL's claims are consulted first: a message it claims (the mouse over one of
+    // its windows or holding one of its items, the keyboard while one of its windows is focused) never reaches
+    // GyroLib's overlay, so the two panels don't react to the same click and GyroLib's tooltips don't show beneath
+    // the Gyro4All window. A message the panel doesn't claim goes to both; it is kept from the game when either
+    // consumes it.
+    uint32_t cap = 0;
+    if (!menu_key) {
+        if (const g4a_api* panel = panel_host::api()) {
+            cap |= panel->window_message(hwnd, msg, wp, lp);
+            const bool ours = ((cap & G4A_CLAIM_MOUSE) && is_mouse(msg)) ||
+                              ((cap & G4A_CLAIM_KEYBOARD) && is_keyboard(msg) && !alt_f4);
+            if (!ours) {
+                if (gl_overlay* overlay = g_overlay.load())
+                    cap |= gl_overlay_win32_message(overlay, hwnd, msg, wp, lp);
+            }
+        } else if (gl_overlay* overlay = g_overlay.load()) {
+            cap |= gl_overlay_win32_message(overlay, hwnd, msg, wp, lp);
         }
+    }
+    if (((cap & GL_OVERLAY_CAPTURE_MOUSE) && is_mouse(msg)) || ((cap & GL_OVERLAY_CAPTURE_KEYBOARD) && is_keyboard(msg) && !alt_f4)) {
+        if (msg == WM_INPUT) DefWindowProcW(hwnd, msg, wp, lp);  // a consumed WM_INPUT still needs its cleanup
+        return 0;  // consumed by a panel (GyroLib already cleaned up WM_INPUT)
     }
     return CallWindowProcW(g_wndproc, hwnd, msg, wp, lp);
 }
@@ -1250,7 +1288,7 @@ void attach_bridge(gl_context* ctx) {
 
 bool attach(gl_context* ctx) {
     if (!g_enabled) return false;
-    if (panel_host::api()) {  // the static panel came first (D3D10/D3D11/D3D9): one frontend per context
+    if (panel_host::api()) {  // the panel DLL is in (the static panel came first, or the DX12 window below)
         if (HWND moved = panel_host::follow_window()) {
             unsubclass();
             subclass(moved);
@@ -1263,7 +1301,26 @@ bool attach(gl_context* ctx) {
         std::lock_guard lock(g_mutex);
         hwnd = g_swapchain ? g_hwnd : nullptr;
     }
-    if (!hwnd && !g_overlay.load()) {  // no DX12 swapchain: a D3D10/D3D11/D3D9 game's panel, once it has a target
+    if (hwnd) {  // a DX12 game: GyroLib's DX12 overlay draws its panel, gyro4all.dll the Gyro4All window
+        if (!g_overlay.load()) {
+            gl_overlay* overlay = gl_overlay_create(ctx, GL_OVERLAY_ABI_VERSION);
+            if (!overlay) {
+                log("overlay: gl_overlay_create failed: %s", gl_overlay_error());
+                g_enabled = false;
+                return false;
+            }
+            g_overlay = overlay;
+            log("overlay: settings panel attached");
+        }
+        // One frontend per context used to keep the panel DLL from a not-yet-presented D3D11 swapchain (see below);
+        // with a captured DX12 swapchain the game's API is decided.
+        if (panel_host::attach_dx12(ctx, hwnd)) {
+            subclass(hwnd);
+            attach_bridge(ctx);
+        }
+        return true;
+    }
+    if (!g_overlay.load()) {  // no DX12 swapchain: a D3D10/D3D11/D3D9 game's panel, once it has a target
         // A D3D10/D3D11 swapchain the game doesn't present to (Alan Wake 2 makes a D3D11 one ~2 s before its D3D12 one,
         // MODLOG 2026-10-30) gets no panel yet: one frontend per context, so it would keep it from the DX12 swapchain.
         if (panel_host::target() && (!panel_host::target_has_presented() || panel_host::target_idle_ms() >= kAdoptIdleMs))
@@ -1273,19 +1330,7 @@ bool attach(gl_context* ctx) {
         attach_bridge(ctx);
         return true;
     }
-    if (!hwnd) return false;
-    if (!g_overlay.load()) {
-        gl_overlay* overlay = gl_overlay_create(ctx, GL_OVERLAY_ABI_VERSION);
-        if (!overlay) {
-            log("overlay: gl_overlay_create failed: %s", gl_overlay_error());
-            g_enabled = false;
-            return false;
-        }
-        g_overlay = overlay;
-        log("overlay: settings panel attached");
-    }
-    subclass(hwnd);
-    return true;
+    return false;
 }
 
 void process() {
@@ -1334,8 +1379,8 @@ bool gyrolib_panel() { return g_overlay.load() != nullptr; }
 
 unsigned capture() {
     unsigned cap = 0;
-    if (gl_overlay* overlay = g_overlay.load()) cap = gl_overlay_capture(overlay);
-    else if (const g4a_api* panel = panel_host::api()) cap = panel->capture();
+    if (gl_overlay* overlay = g_overlay.load()) cap |= gl_overlay_capture(overlay);
+    if (const g4a_api* panel = panel_host::api()) cap |= panel->capture();
     g_mouse_captured = (cap & GL_OVERLAY_CAPTURE_MOUSE) != 0;
     return cap;
 }

@@ -13,6 +13,7 @@
 #include "nativepad.hpp"
 #include "notify.hpp"
 #include "overlay.hpp"
+#include "panel_host.hpp"
 #include "perf.hpp"
 #include "sensor_pacer.hpp"
 #include "settings.hpp"
@@ -785,6 +786,17 @@ void frame() {
     // the game as XInput, or when the game reads the controller itself through a checked report layout.
     SDL_Gamepad* pad = xinput::selected_gamepad(g_gyro->get(), g_input->get(), out);
     overlay::draw(pad);  // D3D11/D3D10/D3D9 games: GyroLib's static panel, built after gl_update
+    // Gamepad access to the Gyro4All settings window: L3+R3 (both stick clicks) while the panel is open folds or
+    // unfolds it. ImGui's gamepad nav cannot cross windows (the panel of GyroLib and the settings window are
+    // separate), so the chord drives it through the panel API; the window itself is d-pad navigable once focused.
+    {
+        static bool expand_chord = false;
+        const bool both_sticks =
+            pad && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_STICK) &&
+            SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+        if (both_sticks && !expand_chord && gl_panel_open(g_gyro->get())) panel_host::expand_toggle();
+        expand_chord = both_sticks;
+    }
     const bool neutral = panel_has_pad(g_gyro->get(), pad);
     update_sensitivity_profiles(pad, default_view && host.camera_allowed && host.focused && !f.paused && !neutral);
     xinput::set_neutral(neutral);

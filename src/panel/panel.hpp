@@ -57,5 +57,10 @@ void device_destroyed(void* device);
 namespace gl {
 bool present(HDC hdc);
 }  // namespace gl
+namespace dx12 {
+bool present(void* swapchain, void* command_queue, uint32_t color_space);
+void before_resize(void* swapchain);
+void lost();
+}  // namespace dx12
 
 }  // namespace g4a

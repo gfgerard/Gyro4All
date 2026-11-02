@@ -5,6 +5,164 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-02 **DX12 HDR still crashes at first open; select the panel's own ImGui context on its render worker.** The
+  startup-format correction above was tested in 007 First Light with the game already in HDR10: F10 reached the first
+  `the window drawn as HDR10` log and the process still crashed. `gyro4all.dll` creates its own ImGui context on the
+  game thread, but its DX12 backend was initialized and rendered on the Present worker without selecting that context;
+  `ImGui_ImplDX12_*` stores and retrieves its renderer data through the current context. `api_dx12_present`,
+  `api_dx12_before_resize` and `api_dx12_lost` now select the saved panel context and restore the previous one. Built,
+  709 checks pass; the in-game retest still crashed. Temporary first-draw tracing narrowed it to
+  `ImGui_ImplDX12_RenderDrawData`: its 512x128 font texture and 262144-byte upload-buffer creations both return
+  `0x887A0005` (device removed), then the stock backend dereferences the null upload buffer. The device was therefore
+  already removed before ImGui's upload; the null dereference is a secondary crash, not the original cause. Further
+  temporary probes bracket the composite pipeline/target creation to find the earlier device removal.
+- 2026-11-02 **DX12 HDR device removal found: zero MipLevels in the two composite SRVs.** The probes showed a healthy
+  device through root-signature, PSO and both 4K texture creation, then `0x887A0001` immediately after creating their
+  SRVs. Both explicit `D3D12_SHADER_RESOURCE_VIEW_DESC`s left `Texture2D.MipLevels` at zero, which is invalid; GyroLib's
+  Composer passes `nullptr` and gets the valid default view. Gyro4All now does the same for the panel and scene SRVs.
+  All temporary tracing is removed and the vendored ImGui DX12 backend is byte-identical to GyroLib's stock copy again.
+  Verified in 007 First Light with the game started directly in HDR10: F10 opens the panel without a crash. No
+  minidump handler remains (the earlier `g4a_crash.dmp` handler was already removed).
+- 2026-11-02 **DX12 HDR at startup: backend format corrected (in-game verification pending).** The current build opens
+  correctly in DX12 SDR, but a game already configured for HDR starts in HDR10 and breaks on the panel, so this is not
+  only an SDR -> HDR transition bug. `init()` built ImGui for the RGB10A2 backbuffer even when the captured colour space
+  already said HDR10, then `present()` destroyed and rebuilt it for the composite's RGBA8 target on the first open.
+  GyroLib builds its backend for RGBA8 from the start; Gyro4All now does the same. Also waits for the last submission
+  before any mode-dependent backend, composite pipeline or HDR target replacement, and rejects a backbuffer index outside
+  the swapchain's buffer count as GyroLib does. Built, 709 checks pass. Needs a real-HDR launch with F10 folded and
+  expanded, then repeated HDR toggles; not verified in game yet.
+- 2026-11-02 **DX12 panel crash hunt in 007 First Light (HDR10): cause confirmed, fixed, diagnostics out.** The
+  HDR10 composite removed the device ~30 draws in (`font texture failed` -> `0x887A0005`). The dxc-built **DXIL**
+  shader was the prime suspect but is exonerated: the composite is now compiled at **runtime with D3DCompile
+  (DXBC) exactly like GyroLib's composer** (`overlay_hdr.hpp`), whose identical path works in HDR10 games --
+  D3D12 accepts DXBC (the "D3D12 can't consume DXBC" note in this log was wrong; the old dxc/DXIL build was a
+  confounder and is gone). The real cause was sync/lifetime bugs, all fixed to GyroLib's DX12 frontend model
+  (`overlay.cpp`):
+  - **Unbounded fence waits** (INFINITE `WaitForSingleObject`): one stalled or removed device froze winmm's
+    render worker, which also hosts GyroLib's panel and every overlay job. Now GyroLib's wait: a removed device
+    fails immediately (`GetDeviceRemovedReason` / `GetCompletedValue` == UINT64_MAX), otherwise
+    `SetEventOnCompletion` + a 5 s timeout; on failure the renderer disables itself (the game keeps running,
+    the panel stops drawing on its 250 ms heartbeat) -- the game can no longer freeze on a device loss.
+  - **No one-outstanding-submission rule**: the ImGui backend's cyclic per-frame vertex/index buffers and its
+    dynamic font uploads were reused while the previous frame still executed (GyroLib waits `o->submitted`
+    before every frame). `wait_submissions()` now precedes every submission.
+  - **GPU objects released while in flight**: the backend Shutdown / re-init / `before_resize` released the font
+    texture, per-frame buffers and pipelines without the queue being done with them. `shutdown()` now waits
+    first, and if the wait fails on a healthy (stalled) device it skips the cleanup entirely -- releasing over
+    in-flight objects could remove the device; a removed device is safe to release (COM does).
+  - Zero-init `FillMode` (invalid, PSO never built) and zero `RenderTargetWriteMask` (composite wrote nothing)
+    in a `D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{}`; per-frame PSO-create retries on failure (slow driver call
+    every frame = stutter); `ImGui_ImplDX12_CreateDeviceObjects()` must be called after Init (GyroLib does; left
+    lazy it fired inside the first open panel's NewFrame and, on failure, killed the game via a null
+    dereference in `ImGui_ImplDX12_UpdateTexture` -- Release `IM_ASSERT` compiles out).
+  - Every reset/close/execute/signal/creation HRESULT is checked; each failure logs once and disables the
+    renderer (no per-frame retries: a failed backend build, composite pipeline or target is remembered per
+    format/size for the session).
+  - The temporary `Dx12Composite` INI gate (the 0/1/2/3 bisect) is gone: the composite is the normal path on an
+    scRGB/HDR10 swapchain; the SDR fallback (wrong colours on the HDR swapchain) is only for an MSAA swapchain
+    or a composite that failed to build, each logged once. `pick_mode` checks the explicit colour space against
+    the real backbuffer format (GyroLib's `Composer::supported`): HDR10 = PQ on RGB10A2, scRGB = G10 on FP16.
+  - Temporary diagnostics removed: the minidump handler in panel_main.cpp (`g4a_crash.dmp`), `imgui_assert.hpp`
+    (IM_ASSERT force-enabled via /FI), the `g4a::dx12_failed` hooks in the vendored `imgui_impl_dx12.cpp`
+    (restored stock, verified identical to GyroLib's copy of the same tag), the device-removed probes in
+    present()/api_frame, and the "first draw"/"UI: trace" logs.
+  - **In-game verification pending**: 007 First Light with real HDR10 (F10 folded + expanded, visual parity
+    against GyroLib's panel, minutes open, repeated close/reopen, scene changes); the log must say `the window
+    drawn as HDR10` with no DEVICE_REMOVED.
+- 2026-11-01 **Gyro4All's own settings window in the panel (g4a ABI 6), DX9–DX12 + Vulkan + OpenGL**:
+  - GyroLib's panel (its DX12 frontend in gyrolib.dll, or the static `gl_panel_draw` this DLL draws in
+    non-DX12 games) has no host-extension API, and ImGui objects must not cross gyrolib's ABI. So the
+    Gyro4All settings (Gyro4All.ini) get their **own ImGui window in gyro4all.dll**, drawn next to GyroLib's
+    panel whenever that is open (F10): folded it is a small "Gyro4All settings" button at the top centre of
+    the screen; clicking expands the full window. One code path for every API.
+  - `gyro4all_panel.h` **ABI 5 → 6** (both DLLs ship together, so no cross-version support): `create` gains
+    `const g4a_settings* settings, uint32_t flags` (G4A_CREATE_DX12 = the DLL draws no gl_panel, only the
+    Gyro4All window); new `dx12_present` / `dx12_before_resize` / `dx12_lost` at the end of `g4a_api`.
+    `g4a_settings`: `get` (effective value, profile wins, utf-8) / `set` (writes [Gyro4All] in Gyro4All.ini
+    via `settings::set_string`, new). winmm side: `panel_host::attach_dx12(ctx, hwnd)` +
+    `panel_host::dx12_present/before_resize/lost`.
+  - **DX12 renderer** (`src/panel/panel_dx12.cpp`, ImGui's DX12 backend): drawn inside the game's Present on
+    winmm's render worker (`overlay.cpp render_job`), **after** `gl_overlay_dx12_render` on the same queue.
+    Own RTV heap (one RTV per buffer, created lazily), own command allocators/list/fence per buffer index.
+    No backbuffer reference between frames; `dx12_before_resize` releases the RTVs before ResizeBuffers
+    (`overlay.cpp before_resize` now runs the worker job also when only the panel holds refs);
+    `dx12_lost` from `release_job` before the captured swapchain is released. SDR: direct into the
+    backbuffer. **scRGB (FP16)**: window rendered into an SDR RGBA8 texture, composited over the backbuffer
+    in linear light at 203 nits white (`src/panel/dx12_composite.hlsl`, compiled at runtime with D3DCompile,
+    exactly like GyroLib's DX12 composer — D3D12 takes the resulting DXBC; the earlier dxc/DXIL build removed
+    the device in 007, see the 2026-11-02 entry). **HDR10 (RGB10A2) composited too** (2026-11-01, 007 First
+    Light showed the window glowing with extreme contrast on its PQ swapchain: the first pick_mode only knew
+    scRGB and fell back to SDR, drawing ImGui's [0,1] colours straight into the PQ-encoded backbuffer): the
+    composite is now GyroLib's own overlay_hdr.hpp shader verbatim (one pass for both spaces: the window is
+    rendered into an SDR RGBA8 texture, composited in-shader over a per-frame copy of the backbuffer — no
+    hardware blending — UI white 203 nits; HDR10 PQ-decodes the copy, converts the UI Rec.709 -> Rec.2020 and
+    PQ-encodes; pixels without UI are discarded, so the scene's bits and the backbuffer's alpha pass through).
+    The root signature is param 0 = a table of the two SRVs (panel, scene), param 1 = {whiteNits, pq}; the PSO
+    (no blend) is rebuilt when the backbuffer format changes (FP16 vs RGB10A2). `pick_mode` now returns Hdr10
+    for the explicit PQ colour space (12), the same rule as the D3D11 panel (no auto-detect: an RGB10A2
+    swapchain stays SDR until the game calls SetColorSpace1). Built + 709 checks; deployed to 007 First Light;
+    **in-game HDR10 verification pending** (the user's display is in HDR mode; launch the game with the panel
+    open and the log must say `the window drawn as HDR10`, the window looking like SDR next to GyroLib's panel).
+  - `overlay.cpp`: DX12 swapchain now hooks `SetColorSpace1` (slot 38) and tracks `g_dx12_color_space` for the
+    panel's mode pick. `attach()` loads gyro4all.dll in DX12 games too (GyroLib overlay + Gyro4All window
+    coexist; one frontend per context still applies to the static panel vs the DX12 swapchain). `hk_wndproc`
+    forwards every message to **both** frontends (capture = union; a consumed WM_INPUT still gets its
+    `DefWindowProcW`); `capture()` is the union too. `panel_main.cpp`: in DX12 mode `api_frame` never calls
+    `gl_set_panel_open` (the overlay owns the open state; its own 250 ms heartbeat closes it) — on heartbeat
+    timeout it only stops drawing. Escape closes the static panel only, not the DX12 overlay's.
+  - Settings shown (all via the g4a_settings callbacks): XInput (Off/Auto/Always), NativeFlickStick,
+    StickCamera + Speed/SpeedPitch/Deadzone/Curve/InvertY, ZoomReferenceFOV. Labels say what applies live vs
+    on save/restart. `StickCamera*` reloads live via the settings-file watcher; `XInput`/`NativeFlickStick`
+    need a restart. Two fixes from testing: the windows call `ImGui::BringWindowToDisplayFront` every frame —
+    GyroLib's panel is opaque and a click focuses it, which used to bury the Gyro4All window behind it until a
+    restart (static panel games; both windows share the context there); and `settings::set_string` edits
+    Gyro4All.ini line by line, replacing the commented `;Key=default` in place, because
+    `WritePrivateProfileString` doesn't count a commented line as the key and appended a duplicate at the
+    section's end. The line edit is unit-verified against the shipped defaults layout (commented defaults,
+    active keys, LF/CRLF, insertion before the next section, missing file). More fixes from testing: the
+    expanded window only calls `BringWindowToDisplayFront` while no popup is open (fronting it every frame buried
+    the combo dropdowns, drawn as their own windows, behind the opaque window — the selects "never opened");
+    sliders and checkboxes take the real defaults as fallbacks (`StickCamera::Settings`: speed 360, pitch 200,
+    deadzone 10, curve 2.0, edge 90, edge speed 720, edge ramp 400; SensorPacing=1, delay -1, Notices=1,
+    XInputTouchpadBack=1); the profile-button selects label their entries with `gl_get_button_label(ctx, SDL
+    ordinal)` so they adapt to the connected controller (Square on PlayStation, X on Xbox) like GyroLib's own
+    activator rows (LT/RT are not SDL buttons: literal labels; ordinals from the SDL3 header: SOUTH 0 .. TOUCHPAD
+    20, paddles 16-19); sections are separated by `SeparatorText` with extra `Dummy` margins. The profile-button
+    selects ended up as two fixed naming sets chosen by the connected controller (PlayStation: L2 R2 L1 R1 L3 R3
+    Cross Circle Square Triangle; anything else: LT RT LB RB LS RS A B X Y; shared: Back Start d-pad Touchpad Misc
+    paddles) instead of `gl_get_button_label` — that API fell back to positional "South/North..." in game (a local
+    probe with the DualSense over USB returns Cross/Circle/... correctly, so the game path sees a different
+    selection/connection state); detection reads the selected endpoint's name (dualsense/dualshock/playstation/ps4/
+    ps5). The stored value uses the shown set and the selection matches by ordinal, so a value written with the
+    other naming set (LT on a PlayStation pad) still displays.
+  - **Gamepad access (ABI 7, `toggle_expanded`)**: ImGui's gamepad nav cannot cross windows, so winmm.dll polls an
+    L3+R3 chord while the panel is open (`host.cpp`, rising edge on both stick clicks) and folds/unfolds the window
+    through the panel API. Unfolding moves ImGui's nav focus into the window (`FocusWindow` +
+    `RestoreFocusedChild`; the folded button lost its `NoNav` and the body is d-pad navigable up to the × in the
+    header); folding returns focus to GyroLib's panel window by name ("GyroLib###GyroLibPanel") — only meaningful
+    in the shared-context games; in DX12 that window lives in gyrolib.dll's context and isn't touched.
+  - The window replicates **GyroLib's own scaling recipe**, from its MIT-licensed source
+    (`src/panel.cpp gl_panel_draw`): `scale = clamp(max(1, dpi, height/1080), 0.75, max(0.75, min(3,
+    height/760)))`, `PushFont(nullptr, 18*scale)`, and the panel's exact centred geometry (`min(w-24s, 960s) x
+    min(h-24s, 870s)`, header bar 44*scale = frame 18s+2*5s padding +16s). The folded button is placed in the
+    middle of the footer: on the "Reset all settings" action row (footer_height = calibration row + action row +
+    12*s in gl_panel_draw, so the row's centre is ~32*s above the window's bottom edge), left-aligned at the
+    window's 22*s inset. The row's position is recomputed from the same geometry, so it also works in DX12 games,
+    where GyroLib's window is drawn inside gyrolib.dll and invisible to this DLL. The expanded window opens above
+    the button and replicates GyroLib's draw_header style: an opaque window with a TitleBgActive header bar 44*s
+    tall, the title at 18*s, a × button that folds it back, content at (22*s, bar+18*s). The cog icon on the folded
+    button is drawn ImDrawList geometry (outer circle + 8 teeth + hub), not text: ImGui's default font has no
+    U+2699.
+  - Settings shown (all via the g4a_settings callbacks), grouped: XInput (Off/Auto/Always), XInputNintendoLabels,
+    XInputTouchpadBack, NativeFlickStick, StickCamera + Speed/SpeedPitch/Deadzone/Curve/Edge/EdgeSpeed/EdgeRamp/
+    InvertY/PassButtons (free text, committed on focus loss or Enter), the ADS/ALT_ADS/OTHER sensitivity profiles
+    (button + mode combos, "(disabled)" maps to the empty INI value), ZoomReferenceFOV, SensorPacing +
+    SensorPacingDelayUs, Notices. Each (?) help states live vs restart, from host.cpp's actual reload behaviour:
+    only the pacer (`load_pacer`) and the stick camera (`load_stick_camera`) reload via the per-second
+    settings-file watcher (apply on save); everything else is read in `host_configure` at start (restart).
+  - Verified: build + 709 unit checks pass. In-game (F10 window, live edits persisting to Gyro4All.ini, resize,
+    Streamline swapchain recreation, gamepad/mouse) still to test per game, as with every panel change.
+
 (Record exact class/function/property names, signatures, offsets, UE versions and what worked or failed.)
 
 - 2026-10-08 **GyroLib accepts external samples**: `gl_register_endpoint(ctx, &gl_endpoint)` +

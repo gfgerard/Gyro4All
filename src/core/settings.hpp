@@ -41,6 +41,9 @@ bool read(const std::wstring& path, const wchar_t* key, std::wstring& value);
 // A mod setting: the game's profile wins over Gyro4All.ini, then the fallback.
 int get(const wchar_t* key, int fallback);
 std::string get_string(const wchar_t* key, const wchar_t* fallback = L"");
+// Writes a mod setting into Gyro4All.ini's [Gyro4All] (never the profile), so an edit from the settings panel
+// persists. What applies live is re-read by each frame's code paths or the settings-file watcher (host.cpp).
+void set_string(const wchar_t* key, const wchar_t* value);
 // A mod setting from the game's profile only ("" if it has none).
 std::string profile_setting(const wchar_t* key);
 

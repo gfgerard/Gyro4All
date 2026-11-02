@@ -14,6 +14,7 @@
 // hooks of its own (winmm.dll forwards the game window's messages).
 #include "gyro4all_panel.h"
 #include "panel.hpp"
+#include "settings_ui.hpp"
 
 #include <d3d10_1.h>
 #include <d3d11.h>
@@ -22,6 +23,7 @@
 
 #include <imgui.h>
 #include <imgui_impl_win32.h>
+#include <imgui_internal.h>  // g.ErrorCallback: recoverable user errors go to the log (the red border around a window)
 
 #include <gyrolib/gyrolib.h>
 #include <gyrolib/panel.h>
@@ -29,6 +31,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
@@ -45,12 +48,16 @@ namespace {
 
 g4a_log_fn g_log = nullptr;
 gl_context* g_ctx = nullptr;  // owner thread only
-gl_panel* g_panel = nullptr;
+ImGuiContext* g_imgui = nullptr;  // DX12's render worker must select this before calling its renderer backend
+gl_panel* g_panel = nullptr;  // GyroLib's static panel (not in a DX12 game: its DX12 frontend draws GyroLib's UI)
+bool g_dx12 = false;          // DX12 game: this DLL draws only the Gyro4All window, rendered through dx12_present
 HWND g_hwnd = nullptr;
 
 std::atomic<bool> g_open{false};    // the panel's ImGui frames are running (set and cleared on the owner thread)
 std::atomic<bool> g_escape{false};  // Escape pressed while open: closes the panel unless a popup is open
 std::atomic<uint32_t> g_capture{0};
+std::atomic<bool> g_claims_mouse{false};     // the last frame's state: the mouse is over one of our windows (or an
+std::atomic<bool> g_claims_keyboard{false};  // item is held) / one of our windows is focused (input routing claims)
 std::atomic<bool> g_renderer{false};
 std::atomic<ULONGLONG> g_last_present{0};
 std::atomic<uint32_t> g_bb_width{0}, g_bb_height{0};
@@ -195,12 +202,15 @@ void stop_frames(const char* why) {
         g_has_frame = false;
     }
     g_capture = 0;
+    g_claims_mouse = false;
+    g_claims_keyboard = false;
     log("panel closed (%s)", why);
 }
 
-int32_t api_create(gl_context* ctx, void* hwnd, g4a_log_fn log_fn) {
-    if (g_panel) return G4A_OK;
+int32_t api_create(gl_context* ctx, void* hwnd, g4a_log_fn log_fn, const g4a_settings* settings, uint32_t flags) {
+    if (g_panel || g_dx12) return G4A_OK;
     g_log = log_fn;
+    g_dx12 = (flags & G4A_CREATE_DX12) != 0;
     if (!ctx || !hwnd) return G4A_FAILED;
     Lock lock;
     if (!ImGui::DebugCheckVersionAndDataLayout(IMGUI_VERSION, sizeof(ImGuiIO), sizeof(ImGuiStyle), sizeof(ImVec2),
@@ -208,7 +218,11 @@ int32_t api_create(gl_context* ctx, void* hwnd, g4a_log_fn log_fn) {
         log("ImGui %s headers don't match GyroLib's ImGui library; panel disabled", IMGUI_VERSION);
         return G4A_FAILED;
     }
-    ImGui::CreateContext();
+    g_imgui = ImGui::CreateContext();
+    // Recoverable user errors (they draw a thin red border around the offending window and an error tooltip): log the
+    // message too, so a red flash is diagnosable from Gyro4All.log.
+    if (ImGuiContext* imgui = ImGui::GetCurrentContext())
+        imgui->ErrorCallback = [](ImGuiContext*, void*, const char* msg) { log("ImGui user error: %s", msg); };
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;  // no imgui.ini in the game folder (nor reading another ImGui user's)
     io.LogFilename = nullptr;
@@ -222,6 +236,13 @@ int32_t api_create(gl_context* ctx, void* hwnd, g4a_log_fn log_fn) {
         log("ImGui's Win32 backend did not start on window %p; panel disabled", hwnd);
         ImGui::DestroyContext();
         return G4A_FAILED;
+    }
+    settings_ui::set_settings(settings, ctx);
+    if (g_dx12) {
+        g_ctx = ctx;
+        g_hwnd = static_cast<HWND>(hwnd);
+        log("Gyro4All settings window ready (ImGui %s, DX12) on window %p", IMGUI_VERSION, hwnd);
+        return G4A_OK;
     }
     g_panel = gl_panel_create(ctx, nullptr);
     if (!g_panel) {
@@ -259,7 +280,7 @@ int32_t api_function_key(uint32_t number, uint32_t pressed, uint32_t repeat) {
 }
 
 int32_t api_frame(const g4a_gamepad* pad) {
-    if (!g_panel) return G4A_UNAVAILABLE;
+    if (!g_panel && !g_dx12) return G4A_UNAVAILABLE;
     if (!gl_panel_open(g_ctx)) {
         g_opened_at = 0;
         stop_frames("by the panel");
@@ -268,12 +289,16 @@ int32_t api_frame(const g4a_gamepad* pad) {
     const ULONGLONG now = GetTickCount64();
     if (!g_opened_at) g_opened_at = now;
     // Like GyroLib's DX12 frontend: no render for 250 ms closes the panel, so an invisible panel never keeps the gyro
-    // and the controller suspended (renderer failed, game minimized or not presenting).
+    // and the controller suspended (renderer failed, game minimized or not presenting). With the static panel this DLL
+    // closes it itself; in a DX12 game GyroLib's overlay owns the open state (and its own heartbeat), so this DLL only
+    // stops drawing: closing there would need gl_overlay_set_open, which only winmm.dll has.
     const ULONGLONG last = std::max(g_last_present.load(), g_opened_at);
     if (!g_renderer || now - last > kHeartbeatMs) {
         if (now - last > kHeartbeatMs) {
-            gl_set_panel_open(g_ctx, 0);
-            g_opened_at = 0;
+            if (!g_dx12) {
+                gl_set_panel_open(g_ctx, 0);
+                g_opened_at = 0;
+            }
             log("no frame presented for %llu ms%s: panel closed", now - last, g_renderer ? "" : " (renderer not ready)");
             stop_frames("not presented");
         }
@@ -304,6 +329,8 @@ int32_t api_frame(const g4a_gamepad* pad) {
         g_has_frame = false;
         g_open = false;
         g_capture = 0;
+        g_claims_mouse = false;
+        g_claims_keyboard = false;
         log("panel closed (Escape)");
         return G4A_OK;
     }
@@ -325,14 +352,24 @@ int32_t api_frame(const g4a_gamepad* pad) {
     io.MouseDrawCursor = hidden;
     ImGui::NewFrame();
     const UINT dpi = GetDpiForWindow(g_hwnd);
-    gl_panel_draw(g_panel, io.DisplaySize.x, io.DisplaySize.y, dpi ? float(dpi) / 96.0f : 1.0f);
+    if (g_panel) gl_panel_draw(g_panel, io.DisplaySize.x, io.DisplaySize.y, dpi ? float(dpi) / 96.0f : 1.0f);
+    settings_ui::draw(dpi ? float(dpi) / 96.0f : 1.0f);  // next to GyroLib's panel (DX12 games: the only window here)
     ImGui::Render();
     log_input_state(io, pad, now - g_opened_at);
     g_has_frame = true;
     g_capture = G4A_CAPTURE_MOUSE | G4A_CAPTURE_KEYBOARD | G4A_CAPTURE_GAMEPAD;
-    if (const int32_t r = gl_panel_last_result(g_panel); r != g_last_result) {
-        g_last_result = r;
-        log("gl_panel_draw result %d", r);
+    // Input routing for winmm.dll's wndproc hook (overlay.cpp hk_wndproc): while the mouse is over one of our windows
+    // (or one of our items is held) the mouse messages are ours alone and must not also reach GyroLib's panel drawn
+    // underneath (it answered clicks and showed tooltips through our window); same for the keyboard while one of our
+    // windows holds the focus. io.WantCaptureMouse covers both hover and held items.
+    g_claims_mouse = io.WantCaptureMouse;
+    g_claims_keyboard = ImGui::IsWindowFocused(ImGuiFocusedFlags_AnyWindow);
+    if (g_panel) {
+        const int32_t r = gl_panel_last_result(g_panel);
+        if (r != g_last_result) {
+            g_last_result = r;
+            log("gl_panel_draw result %d", r);
+        }
     }
     return G4A_OK;
 }
@@ -367,11 +404,16 @@ uint32_t api_window_message(void* hwnd, uint32_t message, uint64_t wparam, int64
         if (g_open && !mouse_button(ImGui::GetIO(), message, wparam))
             ImGui_ImplWin32_WndProcHandler(static_cast<HWND>(hwnd), message, WPARAM(wparam), LPARAM(lparam));
     }
-    if (message == WM_KEYDOWN && wparam == VK_ESCAPE && !(lparam & (1ll << 30))) g_escape = true;
+    // Escape closes the static panel; in a DX12 game GyroLib's overlay owns the open state and its own Escape.
+    if (!g_dx12 && message == WM_KEYDOWN && wparam == VK_ESCAPE && !(lparam & (1ll << 30))) g_escape = true;
     const bool mouse = (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) || message == WM_INPUT;
     const bool keyboard = (message >= WM_KEYFIRST && message <= WM_KEYLAST) || message == WM_INPUT;
     const uint32_t cap = g_capture;
-    return (mouse ? cap & G4A_CAPTURE_MOUSE : 0) | (keyboard ? cap & G4A_CAPTURE_KEYBOARD : 0);
+    uint32_t ret = (mouse ? cap & G4A_CAPTURE_MOUSE : 0) | (keyboard ? cap & G4A_CAPTURE_KEYBOARD : 0);
+    // Claims gate which panel sees a message (see G4A_CLAIM_*): attach the last frame's, for winmm.dll's routing.
+    if (g_claims_mouse) ret |= G4A_CLAIM_MOUSE;
+    if (g_claims_keyboard) ret |= G4A_CLAIM_KEYBOARD;
+    return ret;
 }
 
 uint32_t api_capture() { return g_capture; }
@@ -427,11 +469,46 @@ int32_t api_gl_present(void* hdc) {
     return gl::present(static_cast<HDC>(hdc)) ? G4A_OK : G4A_UNAVAILABLE;
 }
 
+// DX12 games: winmm.dll calls these inside the game's Present hooks (on its render worker), after GyroLib's DX12
+// overlay rendered on the same queue.
+int32_t api_dx12_present(void* swapchain, void* queue, uint32_t color_space) {
+    if (!g_dx12 || !g_imgui || !swapchain || !queue) return G4A_UNAVAILABLE;
+    ImGuiContext* previous = ImGui::GetCurrentContext();
+    ImGui::SetCurrentContext(g_imgui);
+    const bool ok = dx12::present(swapchain, queue, color_space);
+    ImGui::SetCurrentContext(previous);
+    return ok ? G4A_OK : G4A_FAILED;
+}
+
+void api_dx12_before_resize(void* swapchain) {
+    if (!g_dx12 || !g_imgui) return;
+    ImGuiContext* previous = ImGui::GetCurrentContext();
+    ImGui::SetCurrentContext(g_imgui);
+    dx12::before_resize(swapchain);
+    ImGui::SetCurrentContext(previous);
+}
+
+void api_dx12_lost(void) {
+    if (!g_dx12 || !g_imgui) return;
+    ImGuiContext* previous = ImGui::GetCurrentContext();
+    ImGui::SetCurrentContext(g_imgui);
+    dx12::lost();
+    ImGui::SetCurrentContext(previous);
+}
+
+// The L3+R3 chord (polled by winmm.dll while the panel is open): fold/unfold the Gyro4All settings window.
+int32_t api_toggle_expanded(void) {
+    if (!g_panel && !g_dx12) return G4A_UNAVAILABLE;
+    settings_ui::toggle();
+    return G4A_OK;
+}
+
 const g4a_api kApi = {
     sizeof(g4a_api),      G4A_ABI_VERSION,        &api_create,      &api_function_key,     &api_frame,
     &api_window_message,  &api_capture,           &api_ready,       &api_dxgi_present,     &api_dxgi_before_resize,
     &api_dx9_present,     &api_dx9_before_reset,  &api_vk_present,  &api_vk_swapchain_destroyed,
-    &api_vk_device_destroyed, &api_gl_present,   &api_set_window,
+    &api_vk_device_destroyed, &api_gl_present,   &api_set_window,  &api_dx12_present,     &api_dx12_before_resize,
+    &api_dx12_lost,       &api_toggle_expanded,
 };
 
 }  // namespace

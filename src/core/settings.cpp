@@ -5,7 +5,11 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <iterator>
 #include <string>
+#include <vector>
 
 namespace gyro4all::settings {
 namespace {
@@ -180,6 +184,79 @@ std::string get_string(const wchar_t* key, const wchar_t* fallback) {
     for (const std::wstring* path : {&g_profile_path, &g_settings_path})
         if (read(*path, key, value)) return narrow(value);
     return narrow(fallback);
+}
+
+// Writes a mod setting into Gyro4All.ini's [Gyro4All] (never the profile), so an edit from the settings panel
+// persists. What applies live is re-read by each frame's code paths or the settings-file watcher (host.cpp).
+// The file is edited line by line, replacing the key in place: the shipped defaults document most keys as a
+// commented ";Key=default", which WritePrivateProfileString does not count as the key — it would append a second
+// copy at the section's end ("added instead of replaced"). The commented line becomes the active setting.
+void set_string(const wchar_t* key, const wchar_t* value) {
+    const std::string k = narrow(key), v = narrow(value);
+    const std::string section = "[" + narrow(kSection) + "]";
+    std::ifstream in(g_settings_path, std::ios::binary);
+    if (!in) {
+        if (GetFileAttributesW(g_settings_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            // No file yet: create the section and the key through the profile API.
+            if (WritePrivateProfileStringW(kSection, key, value, g_settings_path.c_str()))
+                log("settings: %s = %s", k.c_str(), v.c_str());
+        } else {
+            log("settings: could not open %s to write %s", narrow(g_settings_path).c_str(), k.c_str());
+        }
+        return;
+    }
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    const bool crlf = text.find("\r\n") != std::string::npos;
+    const std::string eol = crlf ? "\r\n" : "\n";
+    std::vector<std::string> lines;
+    for (size_t start = 0; start < text.size();) {
+        size_t end = text.find('\n', start);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(start, end - start);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        lines.push_back(line);
+        start = end + 1;
+    }
+    bool in_ours = false, replaced = false;
+    size_t insert_at = std::string::npos;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const std::string& line = lines[i];
+        const size_t first = line.find_first_not_of(" \t");
+        if (first == std::string::npos) continue;
+        if (line[first] == '[') {
+            if (in_ours && insert_at == std::string::npos) insert_at = i;
+            std::string name = line.substr(first);
+            while (!name.empty() && (name.back() == ' ' || name.back() == '\t' || name.back() == '\r')) name.pop_back();
+            in_ours = _stricmp(name.c_str(), section.c_str()) == 0;
+            continue;
+        }
+        if (!in_ours || replaced) continue;
+        size_t name_at = first + (line[first] == ';' ? 1 : 0);
+        while (name_at < line.size() && (line[name_at] == ' ' || line[name_at] == '\t')) ++name_at;
+        const size_t eq = line.find('=', name_at);
+        if (eq == std::string::npos) continue;
+        std::string name = line.substr(name_at, eq - name_at);
+        while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+        if (_stricmp(name.c_str(), k.c_str()) == 0) {
+            lines[i] = k + "=" + v;
+            replaced = true;
+        }
+    }
+    if (!replaced) {
+        if (insert_at == std::string::npos) {
+            if (!in_ours) lines.push_back(section);  // no [Gyro4All] section at all: start one
+            insert_at = lines.size();
+        }
+        lines.insert(lines.begin() + insert_at, k + "=" + v);
+    }
+    std::string out;
+    for (const std::string& line : lines) out += line + eol;
+    std::ofstream file(g_settings_path, std::ios::binary | std::ios::trunc);
+    if (file << out)
+        log("settings: %s = %s", k.c_str(), v.c_str());
+    else
+        log("settings: could not write %s to %s", k.c_str(), narrow(g_settings_path).c_str());
 }
 
 std::string profile_setting(const wchar_t* key) {

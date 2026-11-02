@@ -37,6 +37,9 @@ void set_color_space(const void* swapchain, uint32_t color_space);
 // Game thread, every frame: loads gyro4all.dll and creates the panel once a target exists. False until then (or when
 // the DLL can't be used). window(): the game window the panel works on.
 bool attach(gl_context* ctx);
+// overlay.cpp, DX12 games: attach the panel DLL for the Gyro4All window (no swapchain target of its own; window is
+// the captured DX12 swapchain's). The panel draws through dx12_present, after GyroLib's DX12 overlay.
+bool attach_dx12(gl_context* ctx, HWND window);
 // Game thread, after attach: the window the game presents to now when it isn't the panel's any more (the panel's input
 // moved there), else nullptr.
 HWND follow_window();
@@ -49,5 +52,12 @@ void frame(SDL_Gamepad* pad);
 // overlay.cpp's DXGI hooks, on the game's presenting/resizing threads.
 void dxgi_present(void* swapchain);
 void dxgi_before_resize(void* swapchain);
+// overlay.cpp's DX12 swapchain hooks, on the render worker (inside the game's Present/ResizeBuffers calls, after
+// GyroLib's overlay rendered on the same queue).
+void dx12_present(void* swapchain, void* command_queue, uint32_t color_space);
+void dx12_before_resize(void* swapchain);
+void dx12_lost();
+// host.cpp's L3+R3 chord while the panel is open: fold/unfold the Gyro4All settings window.
+void expand_toggle();
 
 }  // namespace gyro4all::panel_host

@@ -59,7 +59,10 @@ play.
   show no cursor.
 - **In-game settings panel** (GyroLib's DX12 overlay, `F10` by default): sensitivity, activation button or
   trigger, invert axes, smoothing and more, saved to `gyrolib.ini`. Edits to `gyrolib.ini` are also reloaded
-  live while the game runs. Gyro4All declares `GL_HOST_MENU_STATE` to GyroLib, plus native right-stick
+  live while the game runs. Next to it, **Gyro4All's own settings window** opens (a small "Gyro4All settings"
+  button at the top of the screen; click it to expand): the XInput emulation mode, native flick stick, stick
+  camera and the zoom-compensation FOV, edited live and saved to `Gyro4All.ini` (what needs a restart or a
+  save says so). The same window appears in the panel of non-DX12 games (drawn by `gyro4all.dll`). Gyro4All declares `GL_HOST_MENU_STATE` to GyroLib, plus native right-stick
   suppression while it translates the controller to XInput or while the game reads a PlayStation controller itself
   through a checked report layout (`NativeFlickStick`), and long-press blocking (`GL_HOST_LONG_PRESS_BLOCKING`)
   wherever it can change the buttons the game reads (the controller shown as XInput, a real XInput controller, or
@@ -306,12 +309,13 @@ DualSense --HID--> SDL3 (inside gyrolib.dll)
   the game window to forward input. These hooks are only installed if the panel is enabled in
   `gyrolib.ini`.
 - DirectX 11, 10 and 9 games (GyroLib's DX12 panel can't draw there) get GyroLib's static ImGui panel, the same widgets
-  and settings, from `Gyro4All\gyro4all.dll`. `winmm.dll` loads it only once such a game has made its swapchain (D3D10/
-  D3D11) or device (D3D9): DX12 games never load it. The panel's frame is built on the game thread after `gl_update`
+  and settings, from `Gyro4All\gyro4all.dll`. `winmm.dll` loads it once such a game has made its swapchain (D3D10/
+  D3D11) or device (D3D9); in DX12 games it loads it for the Gyro4All settings window, drawn by its own DX12 renderer
+  after GyroLib's overlay, on the same queue. The panel's frame is built on the game thread after `gl_update`
   (GyroLib's context has one owner thread) and drawn just before the game's `Present`: D3D11 inside a device context
   state of its own (the game's whole pipeline state is swapped out and back), D3D10 with a state block, D3D9 with a state
   block plus its render targets. On an HDR swapchain (scRGB or HDR10, D3D11) the panel is composed in linear light with
-  the UI white at 203 nits, as GyroLib's DX12 panel does. Under wrappers that hand the game proxy objects (ReShade as
+  the UI white at 203 nits, as GyroLib's DX12 panel does; the DX12 renderer composes the same way. Under wrappers that hand the game proxy objects (ReShade as
   `dxgi.dll`, `d3d11.dll` or `d3d9.dll`) the panel draws on the real swapchain or device inside them, after their effects
   and overlay (`overlay: swapchain ... not used: the panel draws on the real swapchain inside it`). Its own ImGui exports
   nothing, writes no `imgui.ini` and never changes the mouse cursor. It navigates with GyroLib's selected controller,
