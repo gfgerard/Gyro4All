@@ -189,8 +189,12 @@ def cmd_vectors(p, a):
     A, B = (pickle.load(open(x, "rb")) for x in (a.a, a.b))
     if A["pid"] != B["pid"]: sys.exit("the two snapshots are from different runs of the game")
     hits = []
-    for (s, ba), (_, bb) in zip(A["data"], B["data"]):
+    # Pair the regions by start address: allocations come and go between snapshots, so the lists don't line up.
+    bm = {s: b for s, b in B["data"] if b}
+    for s, ba in A["data"]:
+        bb = bm.get(s)
         if not ba or not bb: continue
+        n = min(len(ba), len(bb)); ba, bb = ba[:n], bb[:n]
         for st in (1, 4):
             va, vb = unit_vectors(np, ba, st), unit_vectors(np, bb, st)
             for i in va.keys() & vb.keys():

@@ -10,6 +10,39 @@ searches had failed for hours: the angles were fine, but every searchable copy w
 value search that turns up only copies the game rewrites). Research tool: never shipped, it writes nothing into the
 game's files.
 
+**Start with the guided search** (`guided.py`, below): a minute of sound-cued moves, nothing saved to disk, no debugger
+and no writes, so it also works on Denuvo and Themida games. It finds the view's copies and any stored source in one go.
+Then write-test what it lists, and only use `bp` when every candidate is a copy the game rewrites.
+
+## Guided search (start here)
+
+`uv run --with numpy python -I tools/camtrace/guided.py <exe> [--ref ADDR] [--eye ADDR] [--poses 6] [--exe-only] [--out FILE]`
+
+The user stands still in gameplay (solo, nothing moving nearby helps) with the game in front. Three rising beeps: the
+first snapshot is taken. Then at each **high beep** the user turns left or right (30-170 degrees) **and** looks up or
+down (15-60 degrees), alternating directions, for 2.5 s; at **two low beeps** they stop and stay still until the next
+high beep (after the second move the comparison takes up to a minute). Three falling beeps: done.
+
+- Poses 0-2 are full snapshots held in memory (exe static data + heap, not thread stacks: about twice the game's working
+  set of RAM); later poses re-read only the candidates, so they take a fraction of a second.
+- The view at each pose comes from a forward-vector copy: `--ref`, or by itself the biggest group of identical unit
+  vectors that turned in both of the first two moves (it prints the groups; check the reference it picks).
+- What it keeps, through every move: angles (float32/64, int16/32) in degrees, radians, turn fractions, grads, 3600,
+  4096, 16384, 65536 or 2^32 per turn, either sign; values proportional to the turn at any scale (accumulated mouse
+  counts, fixed point), with the ratio per degree; unit directions in rows or columns of a matrix; quaternions of the
+  camera or of a yaw-only body; non-unit directions; with `--eye` (an eye position, often right after a view copy),
+  points whose direction from the eye follows the view (aim or look-at targets). Yaw and pitch separately.
+- The first two moves must each change yaw and pitch by 5 degrees or more, otherwise those tests are dropped (it says so).
+- `--exe-only` searches only the exe's static data: much faster, but misses heap objects.
+
+Read the result: the directions and quaternions are mostly copies (expected). Write-test every listed value
+(`write-test <addr> --yaw 20` for a direction, `--add 5` or `--add 0.1` for an angle in degrees or radians, or the ratio
+times some degrees for "any unit"). The one that keeps the write and moves the view is the source. If nothing keeps it,
+follow a copy with `bp` (step 3 below, not on anti-debugging games). Zombie Army 4 (MODLOG 2026-11-02): only copies,
+no stored source; the view is rebuilt every frame.
+
+## Commands
+
 | Command | What it does | Writes game memory |
 |---|---|---|
 | `snap <out> [--heap]` | Snapshot of the exe's static data (and the heap, not thread stacks) | No |

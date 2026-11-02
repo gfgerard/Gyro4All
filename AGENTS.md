@@ -34,9 +34,10 @@ Read these first:
 
 Start with the engine's own route (reflection, the engine module's probe, `tools/<engine>/`). **As soon as that doesn't
 find the camera** (no reflection, no known global, value searches that only turn up copies the game rewrites), switch to
-`tools/camtrace/` before spending more time on whole-memory searches: find a copy of the view at a fixed address,
-write-test it, and follow the writes back with one-hit hardware breakpoints until a write sticks and the view follows
-(steps in its README). It found Metro Exodus's view in three breakpoints after hours of value searches had failed. Ask
+`tools/camtrace/` before spending more time on whole-memory searches. First its sound-guided search (`guided.py`: about a
+minute of cued moves, read-only, nothing saved to disk, no debugger) lists the view's copies and any stored angle,
+direction or quaternion; write-test those. Only if every candidate is a copy the game rewrites, follow the writes back
+with one-hit hardware breakpoints until a write sticks and the view follows (steps in its README). It found Metro Exodus's view in three breakpoints after hours of value searches had failed. Ask
 the user before attaching the debugger and have them save first; never on games with anti-debugging (Themida, Denuvo).
 After finding the camera, remember to search for FOV data for zoom compensation feature.
 
@@ -132,7 +133,8 @@ Key rules:
   tools go in `tools/<engine>/` (same names as `src/engines/`), each with a `README.md` of step-by-step instructions:
   `tools/reEngine/` (`tdbdump.py`, `camera_finder.lua`), `tools/unrealEngine/` (the built-in camera probe),
   `tools/unrealEngine3/` (`ue3tool.py`: UE3 reflection, scene, snapshot diff and camera write test on a running game).
-  Engine-neutral: `tools/camtrace/` (`camtrace.py`: copies of the view at fixed addresses, write tests, one-hit
+  Engine-neutral: `tools/camtrace/` (`guided.py`: sound-cued read-only search for the view's copies and sources, the
+  first step; `camtrace.py`: copies of the view at fixed addresses, write tests, one-hit
   hardware write breakpoints through cdb, code references and signatures).
 - `tests/`: unit tests of the parts that need no game (`profile_tests.cpp`, target `gyro4all_tests`, never shipped).
 - `bench/`: benchmark method and results.

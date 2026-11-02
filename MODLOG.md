@@ -6591,3 +6591,48 @@ or gyro to stick.
   itself"), so clicks no longer reach the game behind the panel. Hover still does: the game's menus follow
   `GetCursorPos`, whose import EOS's overlay rewrote ("left to it"), so the panel's frozen cursor position doesn't apply.
   Accepted as is. Gyro aiming in ZA4 still needs an Asura engine module (camera not found yet).
+
+## 2026-11-02 Zombie Army 4: camera search without a debugger (read-only, write-tests only)
+
+DX12 exe (image base 0x140000000), solo campaign, mouse. Denuvo: no `bp`; camtrace `snap`/`vectors`/`dump`/`write-test`
+plus guided scripts (sound cues: turn on a high beep, still at two low beeps; three full snapshots of exe static data +
+heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 170 degrees, pitch +-60).
+- Bug in camtrace `vectors` (and any two-snapshot compare that zips the region lists): snapshots of one run don't have
+  the same regions (1642 vs 1644: allocations come and go), so pairing them by list position compares unrelated
+  memory after the first difference. Pair them by start address. Fixed in `camtrace.py` (`cmd_vectors`).
+- The view exists only as rewritten copies. A forward vector (y up, heading = atan2(x, z), pitch = asin(y)) follows the
+  view in 26 places: the exe's static data `exe+0x1a0ebd4`, `+0x1a20bd0`, `+0x1a88a30`, `+0x1a92428`, `+0x20c7ee0`,
+  `+0x26f4810` (eye position right after it, `+0x26f481c`), `+0x2730980` (3x3 rows right, up, forward); heap copies in
+  the render camera blocks (view, projection 1.2063/2.1445, world matrix, frustum), and column-major copies. A camera
+  quaternion sits at `exe+0x1a0ebec`. Write-tests (`--yaw 30`) of the 7 static copies and 4 heap ones: all undone within
+  a frame (one within 0.3 s), the view never moved.
+- No source value found: nothing follows the view over 6 poses as an angle (float32/64 in degrees, radians, turn
+  fraction, +-1, grads, 3600, 4096, 16384, 65536; int16/int32 binary angles), as a value proportional to the turn at
+  any scale (accumulated mouse counts, fixed point), as a quaternion (camera or yaw only), as a non-unit direction, or
+  as an aim point seen from the eye. The camera is probably rebuilt every frame from state this search can't see
+  (thread stacks, or a form not covered); with no debugger, read-only search is exhausted for now.
+- Camera object (heap, address changes per run; seen at `0x1cf452d40`): matrix, eye position, near 0.1, far 2000,
+  aspect 1.7778, and the vertical FOV in radians (0.8727 = 50 degrees, twice) next to 0.3491 (20 degrees). Useful for
+  zoom compensation once a stable path to it is known.
+- Way forward without the camera: an Asura module that only reads the view from a static copy (e.g. `exe+0x1a0ebd4`,
+  later by code signature) for gating and for the stick fallback's learning, and turns the camera through the stick
+  fallback (or Raw Input mouse injection through the existing `GetRawInputBuffer` hook).
+- Tool: the guided scripts became `tools/camtrace/guided.py` (README "Guided search"), now the first step for a new
+  game's camera before `snap`/`vectors` dumps to disk or `bp`. It finds the view's copies by itself (no `--ref` needed)
+  and keeps every angle, any-unit value, direction, quaternion or aim point that follows the view. Its match rules are
+  checked on synthetic values.
+- `guided.py` in game (Vulkan exe, mouse, 6 poses, no `--ref`). First run: it picked a group of vertical up vectors as
+  the reference (their heading is noise), so every test was dropped; fixed (near-vertical vectors rejected, groups whose
+  pitch changes preferred, each group's heading/pitch logged). Second run: reference `exe+0x19302c0` (30 copies), 84 s
+  after the second move, under 1 s for the others. Beyond the direction copies it found what the DX12 searches hadn't:
+  `float pitch, yaw` in radians at `exe+0x18ab450` (pitch with the opposite sign, yaw = heading), with the camera
+  quaternion at `exe+0x18ab45c`; the same pair at `exe+0x18bc160` and on the heap, and the yaw as a turn fraction
+  (-1/360 per degree) at `exe+0x18a66f0`. Write-tests (`--add 0.35` rad, 0.055 turn): all four undone within a frame
+  (the heap one within 0.3 s), the view didn't move. Copies again: the camera is rebuilt every frame from a source the
+  read-only search doesn't see.
+- Bug (user, DX12 and Vulkan): a hitch every 1-2 s. The Unreal fallback's per-second search of the plain data sections
+  (GUObjectArray, then the name pool) ran on the game thread: 47 ms for the array alone in ZA4 (25 MB `.xcode` RW
+  section), plus the name search. Fix (`ue.cpp`, `start_data_scan`): a try over 8 ms moves the search to its own thread
+  for good ("the data-section search took N ms on the game thread: from now on it runs on its own thread"); init()
+  validates the array address the pass found and leaves the name globals alone while a pass runs. Games where it's
+  cheap keep the synchronous search. Not yet verified in game.
