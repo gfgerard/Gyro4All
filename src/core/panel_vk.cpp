@@ -80,6 +80,8 @@ struct Swapchain {
     uint32_t format = 0, width = 0, height = 0;
     int path = kLoader;       // the one that made it
     bool concurrent = false;  // VK_SHARING_MODE_CONCURRENT images
+    uint32_t color_space = 0;      // VkColorSpaceKHR
+    bool input_attachment = false; // images usable as input attachments (added to HDR10 swapchains)
 };
 
 std::mutex g_mutex;  // the maps below; creation and destruction calls come from any game thread
@@ -281,7 +283,22 @@ VkResult VKAPI_CALL hk_create_swapchain(VkDevice device, const VkSwapchainCreate
                                         const VkAllocationCallbacks* alloc, VkSwapchainKHR* swapchain) {
     const Call call;
     const auto fn = real<P>(&Originals::create_swapchain, "vkCreateSwapchainKHR");
-    const VkResult r = fn ? fn(device, info, alloc, swapchain) : VK_ERROR_INITIALIZATION_FAILED;
+    if (!fn) return VK_ERROR_INITIALIZATION_FAILED;
+    // HDR10: the panel blends over the game's pixel in linear light, reading it as an input attachment in its render
+    // pass, so that usage is added (the game's own use of the images is unchanged). Refused: made as the game asked,
+    // and the panel blends in PQ instead.
+    bool added_input = false;
+    VkResult r = VK_ERROR_INITIALIZATION_FAILED;
+    if (!call.nested && info && info->imageColorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+        (info->imageUsage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+        !(info->imageUsage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)) {
+        VkSwapchainCreateInfoKHR with_input = *info;
+        with_input.imageUsage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+        r = fn(device, &with_input, alloc, swapchain);
+        added_input = r == VK_SUCCESS;
+        if (!added_input) log("panel: Vulkan HDR10 swapchain: input-attachment usage refused (%d); made without it", int(r));
+    }
+    if (!added_input) r = fn(device, info, alloc, swapchain);
     if (call.nested || r != VK_SUCCESS || !swapchain || !info) return r;
     if (!(info->imageUsage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
         log("panel: Vulkan swapchain %llx (through %s) has no color-attachment usage: the panel can't draw on it",
@@ -295,6 +312,8 @@ VkResult VKAPI_CALL hk_create_swapchain(VkDevice device, const VkSwapchainCreate
     sc.height = info->imageExtent.height;
     sc.path = P;
     sc.concurrent = info->imageSharingMode == VK_SHARING_MODE_CONCURRENT;
+    sc.color_space = uint32_t(info->imageColorSpace);
+    sc.input_attachment = added_input || (info->imageUsage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);
     // Through the path that made it: the interposer may hand the game other images than the driver's.
     if (const auto get_images = real<P>(&Originals::get_swapchain_images, "vkGetSwapchainImagesKHR")) {
         uint32_t n = 0;
@@ -315,9 +334,10 @@ VkResult VKAPI_CALL hk_create_swapchain(VkDevice device, const VkSwapchainCreate
     // The surface was made where these hooks don't see it: the process's largest visible top-level window instead.
     const bool fallback = !window;
     if (!window) window = main_window();
-    log("panel: Vulkan swapchain %llx through %s: %zu images %ux%u format %u, window %p%s",
+    log("panel: Vulkan swapchain %llx through %s: %zu images %ux%u format %u color space %u%s, window %p%s",
         static_cast<unsigned long long>(uint64_t(*swapchain)), kPathName[P], sc.images.size(), sc.width, sc.height,
-        sc.format, static_cast<void*>(window), fallback ? " (the process's main window: its surface wasn't seen)" : "");
+        sc.format, sc.color_space, added_input ? " (input-attachment usage added)" : "", static_cast<void*>(window),
+        fallback ? " (the process's main window: its surface wasn't seen)" : "");
     if (window && !sc.images.empty()) panel_host::set_vk_target(uint64_t(*swapchain), window);
     return r;
 }
@@ -404,6 +424,8 @@ VkResult VKAPI_CALL hk_queue_present(VkQueue queue, const VkPresentInfoKHR* info
         p.width = g_target_info.width;
         p.height = g_target_info.height;
         p.concurrent = g_target_info.concurrent ? 1 : 0;
+        p.color_space = g_target_info.color_space;
+        p.input_attachment = g_target_info.input_attachment ? 1 : 0;
         p.lock_queue = &lock_queue;
         if (const auto dq = g_draw_queues.find(g_target_info.device); dq != g_draw_queues.end()) {
             p.draw_queue = dq->second.first;

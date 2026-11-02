@@ -6,6 +6,7 @@
 #include "log.hpp"
 #include "nativepad.hpp"
 #include "notify.hpp"
+#include "overlay.hpp"
 
 #include <windows.h>
 #include <psapi.h>
@@ -51,6 +52,8 @@ GetCaps_t g_get_caps = nullptr;
 Enable_t g_enable = nullptr;
 RegisterRawInputDevices_t g_register_raw = nullptr;
 GetRawInputData_t g_get_raw_data = nullptr;
+using GetRawInputBuffer_t = UINT(WINAPI*)(PRAWINPUT, PUINT, UINT);
+GetRawInputBuffer_t g_get_raw_buffer = nullptr;
 
 // The original of an import: from the hook, else from the DLL the game imports it from (loaded on demand; never
 // called from DllMain: the game only calls these once it runs).
@@ -379,6 +382,8 @@ BOOL WINAPI hk_register_raw(PCRAWINPUTDEVICE devices, UINT count, UINT size) {
 UINT WINAPI hk_get_raw_data(HRAWINPUT input, UINT command, LPVOID data, PUINT size, UINT header_size) {
     GetRawInputData_t real = original(g_get_raw_data, "GetRawInputData", "user32.dll");
     const UINT result = real ? real(input, command, data, size, header_size) : UINT(-1);
+    if (data && command == RID_INPUT && result != UINT(-1) && result >= sizeof(RAWINPUTHEADER))
+        overlay::filter_raw_input(data);
     if (data && command == RID_INPUT && result != UINT(-1) && result >= sizeof(RAWINPUTHEADER) &&
         static_cast<const RAWINPUT*>(data)->header.dwType == RIM_TYPEHID) {
         const DWORD error = GetLastError();
@@ -402,6 +407,21 @@ UINT WINAPI hk_get_raw_data(HRAWINPUT input, UINT command, LPVOID data, PUINT si
         SetLastError(error);
     }
     return result;
+}
+
+// Buffered Raw Input (Zombie Army 4 reads its mouse this way): only the panel's mouse filter.
+UINT WINAPI hk_get_raw_buffer(PRAWINPUT data, PUINT size, UINT header_size) {
+    GetRawInputBuffer_t real = original(g_get_raw_buffer, "GetRawInputBuffer", "user32.dll");
+    const UINT n = real ? real(data, size, header_size) : UINT(-1);
+    if (data && n != UINT(-1)) {
+        PRAWINPUT block = data;
+        // NEXTRAWINPUTBLOCK: the next block starts 8-byte aligned after this one.
+        for (UINT i = 0; i < n; ++i) {
+            overlay::filter_raw_input(block);
+            block = reinterpret_cast<PRAWINPUT>((reinterpret_cast<uintptr_t>(block) + block->header.dwSize + 7) & ~uintptr_t(7));
+        }
+    }
+    return n;
 }
 
 // DirectInput (dinputpad.cpp): creating it is no sign (RE7, RE8 and Monster Hunter Wilds create it, and devices, only
@@ -809,6 +829,7 @@ void install(const Settings& settings) {
     // through Sony's pad library DLL: nativepad.cpp; and Raw Input for game controllers).
     hooks::add(nullptr, "RegisterRawInputDevices", reinterpret_cast<void*>(&hk_register_raw), reinterpret_cast<void**>(&g_register_raw));
     hooks::add(nullptr, "GetRawInputData", reinterpret_cast<void*>(&hk_get_raw_data), reinterpret_cast<void**>(&g_get_raw_data));
+    hooks::add(nullptr, "GetRawInputBuffer", reinterpret_cast<void*>(&hk_get_raw_buffer), reinterpret_cast<void**>(&g_get_raw_buffer));
     nativepad::refuse_pads(g_settings.mode == Always);
     if (g_settings.mode == Always)
         log("xinput: XInput=2: the game's own access to PlayStation/Nintendo controllers is refused; it only gets the Xbox controller");

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <memory>
 #include <cstdio>
 #include <cstring>
 #include <format>
@@ -213,13 +214,18 @@ int flat_object_array_stride(uintptr_t a, int* object_out = nullptr) {
 }
 
 // diagnose: log every candidate that passes the header checks and why its items were rejected.
-bool find_object_array(const std::vector<Range>& sections, bool diagnose = false) {
+// found_at: only report the address (background scans; the game thread validates it again and sets the globals).
+bool find_object_array(const std::vector<Range>& sections, bool diagnose = false, uintptr_t* found_at = nullptr) {
     int candidates = 0;
     for (const Range& r : sections) {
         for (uintptr_t a = r.begin; a + 0x20 <= r.end; a += 8) {
             uintptr_t chunk0 = 0;
             int object = 0;
             const int stride = object_array_stride(a, &chunk0, &object);
+            if (found_at && (stride > 0 || flat_object_array_stride(a) > 0)) {
+                *found_at = a;
+                return true;
+            }
             if (stride > 0) {
                 g_obj_array = a;
                 g_item_stride = stride;
@@ -416,6 +422,37 @@ void start_heap_scan() {
     g_heap_scan_running = true;
     if (HANDLE thread = CreateThread(nullptr, 0, &heap_scan_thread, nullptr, 0, nullptr)) CloseHandle(thread);
     else g_heap_scan_running = false;
+}
+
+// The exe's writable+executable sections (protected exes merge data into them) can be hundreds of MB: Zombie Army 4's
+// Denuvo build has a 358 MB RWX section, a ~1 s scan. On the game thread that froze the game every 10 s, so it runs on
+// its own thread too and init() picks the address up.
+struct SectionScan {
+    std::vector<Range> sections;
+    bool diagnose;
+};
+std::atomic<uintptr_t> g_section_array{0};
+std::atomic<bool> g_section_scan_running{false};
+
+DWORD WINAPI section_scan_thread(void* arg) {
+    const std::unique_ptr<SectionScan> scan(static_cast<SectionScan*>(arg));
+    uintptr_t found = 0;
+    if (find_object_array(scan->sections, scan->diagnose, &found)) g_section_array = found;
+    else if (scan->diagnose) log("ue: GUObjectArray not found yet (retrying every 10 s)");
+    g_section_scan_running = false;
+    return 0;
+}
+
+void start_section_scan(bool diagnose) {
+    if (g_section_scan_running) return;
+    g_section_scan_running = true;
+    auto* scan = new SectionScan{writable_sections(true), diagnose};
+    if (HANDLE thread = CreateThread(nullptr, 0, &section_scan_thread, scan, 0, nullptr)) {
+        CloseHandle(thread);
+    } else {
+        delete scan;
+        g_section_scan_running = false;
+    }
 }
 
 void log_sections() {
@@ -685,7 +722,13 @@ bool init() {
 
     const std::vector<Range> sections = writable_sections();
     if (!g_obj_array) {
+        const ULONGLONG scan_start = GetTickCount64();
         bool found = find_object_array(sections);
+        if (static bool timed = false; !timed) {
+            timed = true;
+            log("ue: GUObjectArray search in the data sections took %llu ms on the game thread (repeated every second "
+                "until found)", static_cast<unsigned long long>(GetTickCount64() - scan_start));
+        }
         // Heap FUObjectArray behind an XOR-encoded global (cheap after the one-time code scan).
         if (!found && g_array_tries >= 2) found = find_encoded_object_array();
         // Otherwise look for it in the whole heap, in the background.
@@ -695,14 +738,18 @@ bool init() {
             found = g_item_stride > 0;
             if (!found) g_obj_array = g_heap_array = 0;
         }
+        if (!found && g_section_array) {
+            const uintptr_t a = g_section_array.exchange(0);
+            found = find_object_array({{a, a + 0x20}});
+        }
         if (!found && g_array_tries >= 3) start_heap_scan();
         // Not in the plain data sections after ~10 s: protected exes can merge data into writable+executable
-        // sections. Scan those every 10 s (slow), and the first time log the section table and the candidates.
+        // sections. Scan those every 10 s in the background, and the first time log the section table and the
+        // candidates.
         if (!found && ++g_array_tries % 10 == 0) {
             const bool diagnose = g_array_tries == 10;
             if (diagnose) log_sections();
-            found = find_object_array(writable_sections(true), diagnose);
-            if (!found && diagnose) log("ue: GUObjectArray not found yet (retrying every 10 s)");
+            start_section_scan(diagnose);
         }
         if (found)
             log("ue: GUObjectArray.ObjObjects at %s (%s, item stride 0x%X, object at +0x%X, %d objects)",

@@ -1377,6 +1377,19 @@ void poll_menu_key(gl_context* ctx, bool focused) {
 
 bool gyrolib_panel() { return g_overlay.load() != nullptr; }
 
+void filter_raw_input(void* raw_input) {
+    auto* raw = static_cast<RAWINPUT*>(raw_input);
+    if (!raw || raw->header.dwType != RIM_TYPEMOUSE || !g_mouse_captured.load(std::memory_order_relaxed)) return;
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) log("overlay: the game reads Raw Input mouse data itself: emptied while the panel has the mouse");
+    raw->data.mouse.lLastX = raw->data.mouse.lLastY = 0;
+    raw->data.mouse.usButtonFlags = 0;
+    raw->data.mouse.usButtonData = 0;
+    raw->data.mouse.ulRawButtons = 0;
+    // MOUSE_MOVE_ABSOLUTE blocks (remote desktop, tablets) would jump to (0,0): relative zero moves nothing.
+    raw->data.mouse.usFlags = MOUSE_MOVE_RELATIVE;
+}
+
 unsigned capture() {
     unsigned cap = 0;
     if (gl_overlay* overlay = g_overlay.load()) cap |= gl_overlay_capture(overlay);

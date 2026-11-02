@@ -23,6 +23,10 @@ bool available();
 void draw(SDL_Gamepad* pad);
 // Mask of GL_OVERLAY_CAPTURE_* bits while the panel is open.
 unsigned capture();
+// Any thread: a RAWINPUT block the game read. While the panel has the mouse, a mouse block is made empty (no motion,
+// buttons or wheel): games that read Raw Input themselves (GetRawInputData in their own pump before any dispatch, or
+// GetRawInputBuffer, Zombie Army 4) never reach the window procedure that keeps the mouse from them.
+void filter_raw_input(void* raw_input);
 // True once GyroLib's DX12 panel is attached (it brings GyroLib's own Steam Input mouse option).
 bool gyrolib_panel();
 // Game thread: poll the configured F-key (gl_get_menu_key) and toggle the panel on its press.

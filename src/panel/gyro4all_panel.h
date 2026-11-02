@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define G4A_ABI_VERSION 7u
+#define G4A_ABI_VERSION 8u
 
 struct gl_context;
 
@@ -153,6 +153,11 @@ typedef struct g4a_vk_present {
     uint32_t draw_queue_family;
     uint32_t concurrent;             // the swapchain's images are VK_SHARING_MODE_CONCURRENT (no ownership transfers)
     void (*lock_queue)(void* queue, int32_t lock);
+    // ABI 8. The swapchain's VkColorSpaceKHR (scRGB: VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT, HDR10:
+    // VK_COLOR_SPACE_HDR10_ST2084_EXT), and whether its images can be input attachments (winmm.dll adds that usage to
+    // HDR10 swapchains, so the panel can blend over the game's pixel in linear light).
+    uint32_t color_space;
+    uint32_t input_attachment;
 } g4a_vk_present;
 
 // The DLL's only export.

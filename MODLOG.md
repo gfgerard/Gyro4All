@@ -6551,3 +6551,43 @@ or gyro to stick.
   game adds its branch in `zoom_fov()`). The status line prints the controller's FOV. **Next step for 007 (hypothesis,
   not tested)**: the Gameplay World's derived view (+0x88: yaw +0x10C, pitch +0x110, MODLOG 2026-10-29) likely has the
   FOV as a neighboring float — check +0x114 and nearby while the L2 transition camera is active.
+
+## 2026-11-02 Zombie Army 4: Dead War (Epic, Rebellion Asura, Denuvo): recon and a 1 s stall every 10 s
+
+- Recon (plan in `games/ZombieArmy4/MODDING_PLAN.md`): `bin\ZA4_dx12.exe` / `bin\ZA4_vulkan.exe`, Asura engine,
+  Denuvo Anti-Tamper (no debugger, so no camtrace), no anti-cheat, EOS for co-op. Imports WINMM and VERSION; the
+  `winmm.dll` proxy loads (tested on the Vulkan exe). No engine detected, so the Unreal module runs as the fallback.
+- Bug: the Unreal fallback's search of the writable+executable sections (every 10 s until GUObjectArray is found) ran
+  on the game thread. ZA4's exe has a 358 MB RWX section (`.xtls`), so each search froze the game for ~1 s
+  (`perf: idle max=1058536us`). That also closed the Vulkan panel ("no frame presented for 1078 ms"). Fix
+  (`ue.cpp`, `start_section_scan`): that search runs on its own thread like the heap scan; `init()` picks the
+  address up and validates it again. Also logs once how long the per-second data-section search takes on the game
+  thread. Not yet verified in game.
+- Open: the Vulkan panel has no HDR handling (format 97, R16G16B16A16_SFLOAT: washed-out colours); the DX11 panel's
+  scRGB/HDR10 composition needs a Vulkan port.
+- Verified (Vulkan exe, panel open ~20 s): the panel no longer closes by itself; the 1 s stalls are gone (perf idle
+  max 200-350 ms now, down from 1058 ms). The data-section search still on the game thread takes 47 ms once a second
+  (a remaining hitch while GUObjectArray isn't found).
+- Bug: on Vulkan the mouse moved the game behind the panel (not on DX12, whose panel is its own window). ZA4 registers
+  Raw Input mouse (page 1 usage 2, flags 0) and reads WM_INPUT itself from its pump, so the window-procedure filter
+  never sees it. Fix: `overlay::filter_raw_input`, called from xinput's `GetRawInputData` hook, empties mouse blocks
+  while the panel has the mouse. Not yet verified in game; a game reading through `GetRawInputBuffer` isn't covered.
+- Vulkan panel HDR (scRGB and HDR10), as the DX11 panel does it: ImGui draws in SDR into the panel's own RGBA8
+  attachment (subpass 0); subpass 1 composes it over the swapchain image in linear light, UI white 203 nits, reading it
+  as an input attachment (`panel_vk.cpp`: `Mode`, `make_render_pass`, `make_composite`). HDR10 also reads the game's
+  pixel as an input attachment (GENERAL layout): winmm.dll adds `VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT` to HDR10
+  swapchains in `hk_create_swapchain` (retried without it if refused; then `Hdr10Pq` blends in PQ). Interface: ABI 8,
+  `g4a_vk_present` gets `color_space` and `input_attachment`. Shaders: `src/panel/shaders/panel_vk_hdr.hlsl`, compiled to
+  SPIR-V by `tools/compile-vk-shaders.sh` into the checked-in `panel_vk_shaders.h`; needs DXC with SPIR-V output (the
+  Windows SDK's dxc has none): DXC v1.9.2609 GitHub release in `third_party/dxc-1.9.2609/`. Not yet verified in game;
+  HDR10 has no Vulkan test game yet.
+- Verified (Vulkan exe, HDR on): the swapchain is format 97 with color space 1000104002
+  (`VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT`), so the panel runs in scRGB mode ("color space 1000104002: scRGB"), with
+  no Vulkan errors in the log. The GetRawInputData mouse filter never fired: only 4 WM_INPUT in 3 s of mouse movement.
+  The exe also imports `GetRawInputBuffer` (buffered Raw Input), so xinput.cpp hooks that too and applies
+  `overlay::filter_raw_input` to every block. Not yet verified. EOS's overlay (`EOSOVH-Win64-Shipping.dll`) rewrites
+  some of our imports (GetCursorPos, LoadLibrary*); watch for "written back" lines on the Raw Input ones.
+- Verified by the user (Vulkan exe, HDR on): the GetRawInputBuffer filter fires ("the game reads Raw Input mouse data
+  itself"), so clicks no longer reach the game behind the panel. Hover still does: the game's menus follow
+  `GetCursorPos`, whose import EOS's overlay rewrote ("left to it"), so the panel's frozen cursor position doesn't apply.
+  Accepted as is. Gyro aiming in ZA4 still needs an Asura engine module (camera not found yet).
