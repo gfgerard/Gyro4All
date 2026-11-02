@@ -29,7 +29,7 @@
 | DOOM (2016) | ✅ Works (tested on the Steam version, Vulkan and OpenGL) | id Tech 6 | Install in the game's main folder, next to `DOOMx64vk.exe` and `DOOMx64.exe`. Gyro turns off in the pause menu, the map and during glory kills. Campaign only: never play multiplayer or SnapMap online with it. |
 | DOOM Eternal | ✅ Works (tested on the Steam version) | id Tech 7 | Install next to `DOOMEternalx64vk.exe` in the game's main folder. Turn Steam Input off for the game. Campaign only: never play BattleMode online with it. |
 | DOOM: The Dark Ages | ✅ Works (tested on the Steam version) | id Tech 8 | Install next to `DOOMTheDarkAges.exe` in the game's main folder. Turn Steam Input off for the game. |
-| Gears of War: E-Day (Game Pass) | ✅⚠️ Campaign only, **with EasyAntiCheat disabled** | Unreal Engine 5.6.1 | Install in `Binaries\WinGDK`. The gyro starts a few seconds after the main menu appears. Never play online with it. |
+| Gears of War: E-Day (Game Pass) | ⚠️ Campaign only, **with EasyAntiCheat disabled**. Only usable with "snap" aim assist | Unreal Engine 5.6.1 | Install in `Binaries\WinGDK`. The gyro starts a few seconds after the main menu appears. Never play online with it. |
 | Ghostrunner | ✅ Works | Unreal Engine 4.26.2 | |
 | Ghostrunner II | ✅ Works | Unreal Engine 4.27.2 | |
 | Ghostwire: Tokyo | ✅ Works | Unreal Engine 4.27.2 | |
