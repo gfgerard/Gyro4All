@@ -20,6 +20,7 @@
 #include "util.hpp"
 #include "writewatch.hpp"
 #include "xinput.hpp"
+#include "zoom.hpp"
 
 #include <windows.h>
 
@@ -79,6 +80,28 @@ std::string g_stick_camera_state;  // this frame's state for the status line (""
 // Sensor-time pacing (SensorPacing=1, sensor_pacer.hpp): each frame gets the motion of its own length, not whatever
 // reports SDL read at gl_update. Read again when Gyro4All.ini or the game's profile is saved.
 SensorPacer g_pacer;
+// Zoom compensation (zoom.hpp, GyroLib's Adapt to Zoom): ZoomStrength= for every FOV source, and manual zoom levels for
+// games whose FOV the engine can't report. Read again when Gyro4All.ini or the game's profile is saved.
+struct ZoomSettings {
+    double strength = 1;             // ZoomStrength= / 100
+    bool manual_only = false;        // ZoomSource=Manual: the levels even where the engine reports the game's FOV
+    double reference = 90;           // manual zoom's unzoomed horizontal FOV (ZoomReferenceFOV=, 90 when unset)
+    std::vector<double> levels;      // ZoomLevelsFOV=, horizontal degrees
+    int aim = -1, cycle = -1;        // ZoomAimButton=, ZoomCycleButton= (parse_button; -1 = none)
+    std::vector<int> reset;          // ZoomResetButtons=
+    uint64_t ramp_ns = 150'000'000;  // ZoomRampMs=
+};
+ZoomSettings g_zoom;
+ZoomLevels g_zoom_levels;
+ZoomRamp g_zoom_ramp;
+// This frame's FOV report, for the status line (view 0 = none).
+struct ZoomReport {
+    const char* source = "";
+    uint32_t view = 0;
+    double current = 0, reference = 0, scale = 1;
+    bool vertical = false;
+} g_zoom_report;
+bool manual_zoom() { return g_zoom.aim >= 0 && !g_zoom.levels.empty(); }
 FILETIME g_mod_ini_time{}, g_profile_ini_time{};
 // StickCameraPassButtons: held longer than kPassMs, the right stick goes to the game (a weapon wheel on R1).
 std::vector<int> g_pass_buttons;
@@ -325,10 +348,12 @@ void sync_zoom_support(const std::vector<ViewInfo>& views) {
         const int32_t result = gl_set_gameplay_context_zoom_available(ctx, id, available ? 1 : 0);
         if (result != GL_OK) log("zoom: view %u capability change failed (%d)", id, result);
     };
+    // Manual zoom levels (ZoomAimButton= and ZoomLevelsFOV=) make the default view zoom-capable in any game.
+    const auto available = [](const ViewInfo& v) { return v.zoom_available || (v.id == 1 && manual_zoom()); };
     for (const ViewInfo& v : views)
-        if (std::find(g_registered.begin(), g_registered.end(), v.id) != g_registered.end()) set(v.id, v.zoom_available);
-    const bool default_zoom = std::any_of(views.begin(), views.end(), [](const ViewInfo& v) {
-        return v.id == 1 && v.zoom_available;
+        if (std::find(g_registered.begin(), g_registered.end(), v.id) != g_registered.end()) set(v.id, available(v));
+    const bool default_zoom = std::any_of(views.begin(), views.end(), [&](const ViewInfo& v) {
+        return v.id == 1 && available(v);
     });
     for (const Profile& p : g_profiles)
         if (p.registered) set(p.id, default_zoom);
@@ -461,6 +486,98 @@ void load_stick_camera(const char* why) {
         c.invert_y ? ", Y inverted" : "");
 }
 
+// A button setting (parse_button), logging an unknown name; -1 = none.
+int button_setting(const wchar_t* key) {
+    const std::string name = settings::get_string(key);
+    const int button = name.empty() ? -1 : parse_button(name);
+    if (!name.empty() && button < 0) log("settings: %s=%s: unknown button", narrow(key).c_str(), name.c_str());
+    return button;
+}
+
+// Zoom compensation's settings (zoom.hpp): at start and when Gyro4All.ini or the game's profile is saved (logged when
+// they change). The zoom levels start over only when their own settings change.
+void load_zoom(const char* why) {
+    const auto lower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        return s;
+    };
+    ZoomSettings z;
+    z.strength = std::clamp(setting_number(L"ZoomStrength", 100), 0.0, 200.0) / 100;
+    const std::string source = lower(settings::get_string(L"ZoomSource", L"Auto"));
+    if (source != "auto" && source != "manual") log("settings: ZoomSource=%s not recognised (Auto or Manual)", source.c_str());
+    z.manual_only = source == "manual";
+    const double reference = setting_number(L"ZoomReferenceFOV", 0);
+    if (fov::is_valid(reference)) z.reference = reference;
+    for (const std::string& text : split(settings::get_string(L"ZoomLevelsFOV"), ',')) {
+        const double level = std::strtod(text.c_str(), nullptr);
+        if (fov::is_valid(level)) z.levels.push_back(level);
+        else log("settings: ZoomLevelsFOV: '%s' is not a field of view (degrees, 1-178)", text.c_str());
+    }
+    z.aim = button_setting(L"ZoomAimButton");
+    z.cycle = button_setting(L"ZoomCycleButton");
+    for (const std::string& name : split(settings::get_string(L"ZoomResetButtons"), ','))
+        if (const int b = parse_button(name); b >= 0) z.reset.push_back(b);
+        else log("settings: ZoomResetButtons: unknown button '%s'", name.c_str());
+    const std::string mode = lower(settings::get_string(L"ZoomAimMode", L"Hold"));
+    if (mode != "hold" && mode != "toggle") log("settings: ZoomAimMode=%s not recognised (Hold or Toggle)", mode.c_str());
+    z.ramp_ns = uint64_t(std::clamp(setting_number(L"ZoomRampMs", 150), 0.0, 2000.0) * 1e6);
+    const ZoomLevels::Settings levels{int(z.levels.size()), mode == "toggle", settings::get(L"ZoomRememberLevel", 0) != 0};
+
+    std::string fovs;
+    for (const double level : z.levels) fovs += std::format("{}{:g}", fovs.empty() ? "" : ",", level);
+    const std::string summary = std::format(
+        "ZoomStrength={:g} ZoomSource={} | manual zoom {}: aim {} ({}), cycle {}, levels {} against {:g} horizontal, "
+        "remember {}, {} reset button(s), ramp {} ms",
+        z.strength * 100, z.manual_only ? "Manual" : "Auto",
+        z.aim >= 0 && !z.levels.empty() ? "on" : "off (needs ZoomAimButton= and ZoomLevelsFOV=)",
+        settings::get_string(L"ZoomAimButton", L"-"), levels.toggle ? "Toggle" : "Hold",
+        settings::get_string(L"ZoomCycleButton", L"-"), fovs.empty() ? "-" : fovs, z.reference,
+        levels.remember ? "on" : "off", z.reset.size(), z.ramp_ns / 1'000'000);
+    static std::string logged;
+    if (summary != logged) {
+        logged = summary;
+        log("settings: %s (%s)", summary.c_str(), why);
+        for (const Profile& p : g_profiles)
+            if (z.aim >= 0 && p.button == z.aim)
+                log("settings: ZoomAimButton is also %sProfileButton: both apply (the profile's settings, the zoom's FOV)",
+                    p.key);
+    }
+    const ZoomLevels::Settings& old = g_zoom_levels.settings();
+    if (levels.count != old.count || levels.toggle != old.toggle || levels.remember != old.remember ||
+        z.levels != g_zoom.levels)
+        g_zoom_levels.configure(levels);
+    g_zoom = std::move(z);
+}
+
+// Before every gl_update: the FOVs for GyroLib's zoom compensation in the active view, with ZoomStrength applied. The
+// engine's (the game's own FOV) unless ZoomSource=Manual; else, in the default view and its sensitivity profiles, the
+// manual zoom level's, ramped. Nothing reported: GyroLib leaves the gyro unscaled this update.
+void report_zoom(const EngineFrame& f, uint32_t view, bool default_view, uint64_t now_ns) {
+    const int level = g_zoom_levels.level();
+    const double level_fov = level ? g_zoom.levels[size_t(level - 1)] : g_zoom.reference;
+    const double manual_scale = g_zoom_ramp.step(zoom_scale(level_fov, g_zoom.reference), now_ns, g_zoom.ramp_ns);
+    g_zoom_report = {};
+    if (!view) return;
+    double current = 0, reference = 0;
+    if (!g_zoom.manual_only && f.zoom_fov && fov::is_valid(f.zoom_fov->current_vertical) &&
+        fov::is_valid(f.zoom_fov->reference_vertical)) {
+        reference = f.zoom_fov->reference_vertical;
+        current = strengthened_fov(f.zoom_fov->current_vertical, reference, g_zoom.strength);
+        g_zoom_report = {"the game's", view, f.zoom_fov->current_vertical, reference,
+                         zoom_scale(f.zoom_fov->current_vertical, reference, g_zoom.strength), true};
+    } else if (manual_zoom() && default_view) {
+        // The tan ratio is the same for horizontal and vertical FOVs: 16:9 only makes them valid vertical FOVs.
+        reference = fov::vertical_from_horizontal(g_zoom.reference, 16.0 / 9);
+        const double scale = std::pow(manual_scale, g_zoom.strength);
+        current = fov_for_scale(reference, scale);
+        g_zoom_report = {"manual", view, level_fov, g_zoom.reference, scale, false};
+    } else {
+        return;
+    }
+    const int32_t result = gl_set_gameplay_context_fov(g_gyro->get(), view, current, reference);
+    if (result != GL_OK) log("zoom: view %u FOV report failed (%d)", view, result);
+}
+
 // Whether a file's last write time differs from the one seen (which is then updated); a missing file has none.
 bool file_changed(const std::wstring& path, FILETIME& seen) {
     WIN32_FILE_ATTRIBUTE_DATA data{};
@@ -480,6 +597,12 @@ void check_settings_file() {
         const char* why = mod ? "Gyro4All.ini saved" : "the game's profile saved";
         if (mod || profile) load_pacer(why, false);
         if (g_stick_camera_on && (mod || profile)) load_stick_camera(why);
+        if (mod || profile) {
+            const bool manual = manual_zoom();
+            load_zoom(why);
+            g_engine->settings_changed();
+            if (manual != manual_zoom()) sync_zoom_support(g_engine->views());  // Adapt to Zoom shown or hidden
+        }
     }
     const char* path = gl_get_settings_path(g_gyro->get());
     if (!path || !*path) return;
@@ -551,6 +674,17 @@ void status() {
         (unsigned long long)d.accepted_samples, d.stationary, d.bias.x, d.bias.y, d.bias.z, g_applied_yaw, g_applied_pitch);
     if (const std::string fallback = g_stick_fallback.status(); !fallback.empty()) log("status: %s", fallback.c_str());
     if (g_stick_camera_on) log("status: stick camera %s", g_stick_camera_state.c_str());
+    if (const ZoomReport& z = g_zoom_report; z.view) {
+        char key[64];
+        std::snprintf(key, sizeof key, "context.%u.gyro.zoom_compensation", z.view);
+        double on = 0;
+        gl_setting_get_effective(g_gyro->get(), key, &on);
+        log("status: zoom: %s field of view %.1f, unzoomed %.1f (%s degrees)%s, gyro x%.3f at ZoomStrength %.0f%%, "
+            "Adapt to Zoom %s in view %u",
+            z.source, z.current, z.reference, z.vertical ? "vertical" : "horizontal",
+            z.vertical ? "" : std::format(", level {}", g_zoom_levels.level()).c_str(), z.scale, g_zoom.strength * 100,
+            on != 0 ? "on" : "off", z.view);
+    }
     g_engine->status_details();
     Delivery& m = g_delivery;
     const uint64_t now_ns = SDL_GetTicksNS();
@@ -775,12 +909,7 @@ void frame() {
     g_input->poll(now_ns);
     poll_steam(now_ns);
     const uint32_t active_view = profile ? profile : f.view_id;
-    if (active_view && f.zoom_fov && fov::is_valid(f.zoom_fov->current_vertical) &&
-        fov::is_valid(f.zoom_fov->reference_vertical)) {
-        const int32_t result = gl_set_gameplay_context_fov(g_gyro->get(), active_view, f.zoom_fov->current_vertical,
-                                                           f.zoom_fov->reference_vertical);
-        if (result != GL_OK) log("zoom: view %u FOV report failed (%d)", active_view, result);
-    }
+    report_zoom(f, active_view, default_view, now_ns);
     const gl_output out = g_gyro->update(now_ns, host, active_view);
     // GyroLib's flick stick needs the game's own right-stick rotation suppressed: possible for the controller shown to
     // the game as XInput, or when the game reads the controller itself through a checked report layout.
@@ -798,7 +927,19 @@ void frame() {
         expand_chord = both_sticks;
     }
     const bool neutral = panel_has_pad(g_gyro->get(), pad);
-    update_sensitivity_profiles(pad, default_view && host.camera_allowed && host.focused && !f.paused && !neutral);
+    const bool aim_gameplay = default_view && host.camera_allowed && host.focused && !f.paused && !neutral;
+    update_sensitivity_profiles(pad, aim_gameplay);
+    // Manual zoom levels, like the profiles: read after gl_update, reported on the next frame.
+    if (manual_zoom()) {
+        const auto down = [&](int b) { return pad && b >= 0 && profile_button_down(pad, b); };
+        const bool reset = std::any_of(g_zoom.reset.begin(), g_zoom.reset.end(), down);
+        const int before = g_zoom_levels.level();
+        const int level = g_zoom_levels.update(aim_gameplay, down(g_zoom.aim), down(g_zoom.cycle), reset);
+        if (level != before)
+            log("zoom: %s", level ? std::format("level {} of {} ({:g} degrees)", level, g_zoom.levels.size(),
+                                                g_zoom.levels[size_t(level - 1)]).c_str()
+                                  : "not aiming");
+    }
     xinput::set_neutral(neutral);
     nativepad::set_neutral(neutral);
     dinputpad::frame(neutral, pad);
@@ -1029,6 +1170,7 @@ void host_configure(Engine& engine) {
         log("settings: StickFallbackLearned=%s %s", saved.c_str(), what.c_str());
     }
     load_pacer("Gyro4All.ini, the game's profile overrides", true);
+    load_zoom("Gyro4All.ini, the game's profile overrides");
     g_stick_camera_on = settings::get(L"StickCamera", 0) != 0;
     if (g_stick_camera_on) load_stick_camera("Gyro4All.ini, the game's profile overrides");
     file_changed(settings::settings_path(), g_mod_ini_time);

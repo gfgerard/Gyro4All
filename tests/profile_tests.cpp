@@ -1,7 +1,7 @@
 // Unit tests for the parts of Gyro4All that need no game: the Unreal module's game profile (ue_profile.cpp), the
 // core's Match=Camera choice (camera_match.hpp), FOV conversion (fov.hpp), stick fallback (stick_fallback.cpp,
-// stick_response.cpp), stick camera (stick_camera.cpp) and sensor-time pacing (sensor_pacer.cpp). Built with Gyro4All
-// (target gyro4all_tests); run with tools/test-gyro4all.sh.
+// stick_response.cpp), stick camera (stick_camera.cpp), sensor-time pacing (sensor_pacer.cpp) and zoom compensation
+// (zoom.hpp). Built with Gyro4All (target gyro4all_tests); run with tools/test-gyro4all.sh.
 #include "camera_match.hpp"
 #include "fov.hpp"
 #include "sensor_pacer.hpp"
@@ -10,6 +10,7 @@
 #include "ue_profile.hpp"
 #include "ue_update_rotation_match.hpp"
 #include "util.hpp"
+#include "zoom.hpp"
 
 #include <windows.h>
 
@@ -1311,6 +1312,131 @@ void test_pacer_fixed_delay() {
     CHECK(r.worst(200, 10'000'000) < 0.05);
 }
 
+// Zoom compensation (zoom.hpp), with Mass Effect 3 LE's fields of view (MODLOG 2026-10-30): 100 degrees horizontal
+// unzoomed at 16:9, 10 through the Black Widow's scope, 39.43 aiming the Shuriken, 120 sprinting.
+
+// The scale is GyroLib's tan ratio, wider fields of view included, and the same for horizontal and vertical FOVs.
+void test_zoom_scale() {
+    std::puts("zoom: the scale is the tan ratio, the same in horizontal and vertical degrees");
+    CHECK(std::abs(zoom_scale(10, 100) - 0.0734) < 1e-3);
+    CHECK(std::abs(zoom_scale(39.43, 100) - 0.300) < 1e-3);
+    CHECK(std::abs(zoom_scale(120, 100) - 1.453) < 1e-3);
+    CHECK(zoom_scale(100, 100) == 1);
+    CHECK(zoom_scale(10, 0) == 1);
+    CHECK(zoom_scale(0, 100) == 1);
+    for (const double aspect : {4.0 / 3, 16.0 / 9, 21.0 / 9})
+        for (const double f : {5.0, 10.0, 39.43, 90.0, 120.0})
+            CHECK(std::abs(zoom_scale(fov::vertical_from_horizontal(f, aspect), fov::vertical_from_horizontal(100, aspect)) -
+                           zoom_scale(f, 100)) < 1e-9);
+}
+
+// ZoomStrength: the scale raised to strength / 100, and the FOV reported for it gives GyroLib exactly that scale.
+void test_zoom_strength() {
+    std::puts("zoom: ZoomStrength raises the scale; the reported FOV gives GyroLib that scale");
+    const double full = zoom_scale(10, 100);
+    CHECK(std::abs(zoom_scale(10, 100, 0.75) - std::pow(full, 0.75)) < 1e-12);
+    CHECK(zoom_scale(10, 100, 0) == 1);
+    CHECK(zoom_scale(120, 100, 0) == 1);
+    // How much faster a zoom feels than at 100: its magnification^(1 - strength); 75%: the scope 1.92x, a 4x zoom 1.41x.
+    CHECK(std::abs(zoom_scale(10, 100, 0.75) / full - 1.92) < 0.01);
+    CHECK(std::abs(std::pow(0.25, 0.75) / 0.25 - 1.414) < 0.001);
+    for (const double strength : {0.0, 0.5, 0.75, 1.0, 1.5})
+        for (const double f : {5.0, 10.0, 39.43, 100.0, 120.0, 150.0}) {
+            const double reported = strengthened_fov(f, 100, strength);
+            CHECK(std::abs(std::tan(reported * kHalfDegree) / std::tan(100 * kHalfDegree) - zoom_scale(f, 100, strength)) <
+                  1e-9);
+            CHECK(fov::is_valid(reported));
+        }
+    CHECK(std::abs(strengthened_fov(10, 100, 1) - 10) < 1e-9);
+    CHECK(std::abs(fov_for_scale(60, 1) - 60) < 1e-9);
+    CHECK(fov_for_scale(60, 0) == 0.1);  // clamped inside what GyroLib takes
+}
+
+// Manual zoom levels: hold and toggle, cycling with wrap, aiming ends on release and on lost gameplay.
+void test_zoom_levels_basic() {
+    std::puts("zoom: manual levels, hold and toggle, cycle and wrap, reset on release and on lost gameplay");
+    ZoomLevels z;
+    z.configure({3, false, false});
+    CHECK(z.update(true, false, false, false) == 0);
+    CHECK(z.update(true, true, false, false) == 1);   // aim held
+    CHECK(z.update(true, true, true, false) == 2);    // cycle press
+    CHECK(z.update(true, true, true, false) == 2);    // still held: no new press
+    CHECK(z.update(true, true, false, false) == 2);
+    CHECK(z.update(true, true, true, false) == 3);
+    CHECK(z.update(true, true, false, false) == 3);
+    CHECK(z.update(true, true, true, false) == 1);    // after the last, back to the first
+    CHECK(z.update(true, false, false, false) == 0);  // released
+    CHECK(z.update(true, true, false, false) == 1);   // a new aim starts at the first level
+    CHECK(z.update(false, true, false, false) == 0);  // gameplay interrupted
+    CHECK(z.update(true, false, true, false) == 0);   // cycle without aiming does nothing
+    CHECK(z.update(true, false, false, false) == 0);
+
+    z.configure({2, true, false});  // toggle
+    CHECK(z.update(true, true, false, false) == 1);
+    CHECK(z.update(true, false, false, false) == 1);  // stays on after the release
+    CHECK(z.update(true, false, true, false) == 2);
+    CHECK(z.update(true, false, false, false) == 2);
+    CHECK(z.update(true, true, false, false) == 0);   // the second press turns it off
+    CHECK(z.update(true, false, false, false) == 0);
+    CHECK(z.update(true, true, false, false) == 1);
+    CHECK(z.update(false, false, false, false) == 0);  // a toggle is dropped when gameplay is interrupted
+    CHECK(z.update(true, false, false, false) == 0);
+
+    z.configure({1, false, false});  // one level: the cycle button changes nothing
+    CHECK(z.update(true, true, false, false) == 1);
+    CHECK(z.update(true, true, true, false) == 1);
+    z.configure({0, false, false});  // no levels: off
+    CHECK(z.update(true, true, false, false) == 0);
+}
+
+// ZoomRememberLevel and ZoomResetButtons.
+void test_zoom_levels_remember() {
+    std::puts("zoom: the remembered level, and the reset button while aiming and while not");
+    ZoomLevels z;
+    z.configure({3, false, true});
+    CHECK(z.update(true, true, false, false) == 1);
+    CHECK(z.update(true, true, true, false) == 2);
+    CHECK(z.update(true, false, false, false) == 0);
+    CHECK(z.update(true, true, false, false) == 2);   // the next aim starts where the last one ended
+    CHECK(z.update(true, true, false, true) == 1);    // reset while aiming: back to the first level now
+    CHECK(z.update(true, true, true, false) == 2);
+    CHECK(z.update(true, false, false, false) == 0);
+    CHECK(z.update(true, false, false, true) == 0);   // reset while not aiming (a weapon switch)
+    CHECK(z.update(true, false, false, false) == 0);
+    CHECK(z.update(true, true, false, false) == 1);   // ... the next aim starts at the first level
+    CHECK(z.update(true, false, false, false) == 0);
+    CHECK(z.update(false, false, false, true) == 0);  // a reset button outside gameplay (menus) doesn't count
+    z.update(true, true, false, false);
+    z.update(true, true, true, false);
+    CHECK(z.level() == 2);
+    z.update(true, false, false, false);
+    CHECK(z.update(false, false, false, true) == 0);
+    CHECK(z.update(true, true, false, false) == 2);
+
+    z.configure({3, false, false});  // without remember, a reset only matters while aiming
+    z.update(true, true, false, false);
+    CHECK(z.update(true, true, true, false) == 2);
+    CHECK(z.update(true, true, false, true) == 1);
+}
+
+// The manual zoom's ramp: linear in log-scale, every change takes the ramp's time, back to 1 the same way.
+void test_zoom_ramp() {
+    std::puts("zoom: the ramp reaches each target in ZoomRampMs, linear in log-scale");
+    constexpr uint64_t ms = 1'000'000;
+    ZoomRamp r;
+    CHECK(r.value() == 1);
+    CHECK(r.step(1, 0, 150 * ms) == 1);
+    CHECK(std::abs(r.step(0.25, 10 * ms, 150 * ms) - 1) < 1e-12);           // the change starts the ramp
+    CHECK(std::abs(r.step(0.25, 85 * ms, 150 * ms) - 0.5) < 1e-9);          // halfway in log-scale: sqrt(0.25)
+    CHECK(std::abs(r.step(0.25, 160 * ms, 150 * ms) - 0.25) < 1e-12);
+    CHECK(std::abs(r.step(0.25, 500 * ms, 150 * ms) - 0.25) < 1e-12);
+    CHECK(std::abs(r.step(1, 600 * ms, 150 * ms) - 0.25) < 1e-12);          // and back
+    CHECK(std::abs(r.step(1, 675 * ms, 150 * ms) - 0.5) < 1e-9);
+    CHECK(std::abs(r.step(0.25, 675 * ms, 150 * ms) - 0.5) < 1e-9);         // turned around mid-ramp: from there
+    CHECK(std::abs(r.step(0.25, 825 * ms, 150 * ms) - 0.25) < 1e-12);
+    CHECK(std::abs(r.step(1, 900 * ms, 0) - 1) < 1e-12);                    // no ramp: at once
+}
+
 int main() {
     test_rewritten_helper();
     test_match_single_member();
@@ -1380,6 +1506,11 @@ int main() {
     test_pacer_burst_passthrough_and_off();
     test_pacer_stall_at_once();
     test_pacer_fixed_delay();
+    test_zoom_scale();
+    test_zoom_strength();
+    test_zoom_levels_basic();
+    test_zoom_levels_remember();
+    test_zoom_ramp();
     std::printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

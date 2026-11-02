@@ -5,6 +5,37 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-02 **1.10.0 — Zoom compensation: ZoomStrength, manual zoom levels, live ZoomReferenceFOV** (built with MSVC
+  14.51, 851 checks pass; release zip `Gyro4All-v1.10.0.zip`; **not tested in game yet**).
+  Reviewed draft PR #13 (MERLev, Mass Effect 3 LE): written on a pre-1.9.0 base, it duplicated what main has since landed (`EngineFrame::fov` vs `zoom_fov`, a UE3 `FovPath` reading the same
+  `CameraCache` address, `offer_zoom` for every view instead of per-view `zoom_available`, a vertical `ZoomReference`
+  defaulting to 50.5 that made ME3 1.4x faster unzoomed). Taken from it: `ZoomStrength`, the zoom status line, its tests
+  and the ME3 finding below. Credit: MERLev.
+  - `src/core/zoom.hpp` (header-only, unit-tested): `zoom_scale` (tan ratio ^ strength), `fov_for_scale` /
+    `strengthened_fov` (GyroLib's formula is fixed: the core reports the FOV that gives the wanted scale), `ZoomLevels`
+    (aim Hold/Toggle, cycle with wrap, remember, reset), `ZoomRamp` (linear in log-scale, each change takes `ZoomRampMs`).
+    The tan ratio is aspect-invariant, so manual zoom needs no window aspect (16:9 only makes the values valid vertical
+    FOVs for GyroLib).
+  - `host.cpp`: `ZoomStrength=` (0..200, default 100) applies to the engine's FOV too; manual zoom (`ZoomAimButton`,
+    `ZoomAimMode`, `ZoomCycleButton`, `ZoomLevelsFOV` horizontal degrees, `ZoomRememberLevel`, `ZoomResetButtons`,
+    `ZoomRampMs`, `ZoomSource=Auto|Manual`; reference `ZoomReferenceFOV=` or 90) makes view 1 zoom-capable in any game
+    (`sync_zoom_support`; the profiles inherit the checkbox), level read with the profiles' gameplay gate after
+    `gl_update` and reported next frame (`report_zoom`). All reload on save (`load_zoom`, logged when changed); logs
+    `zoom: level N of M (F degrees)` / `not aiming`, status `status: zoom: <source> field of view ...`. The ADS profiles
+    stay for other settings while aiming; a profile on the aim button works together with it.
+  - `Engine::settings_changed()` (new, called on save): UE3 and Glacier re-read `ZoomReferenceFOV` (they only read it in
+    `configure()`, while the panel said "applies on save"); Unreal now also falls back to Gyro4All.ini's generic
+    `ZoomReferenceFOV=` (it read only the profile file's `[Gyro4All]`, so the panel's value never reached UE games).
+  - `fov::game_window_aspect()` (core, cached 500 ms) replaces UE3's and Glacier's identical `window_aspect()`, which ran
+    `EnumWindows` every frame.
+  - Panel: `ZoomReferenceFOV`'s help said "vertical degrees" while every engine reads horizontal: fixed. New rows for
+    strength, source, aim button + mode, next-level button, levels, remember, reset buttons, ramp; `profile_row`'s button
+    combo split out as `button_combo` / `button_mode_row`, plus a generic `text_setting`.
+  - **Mass Effect 3 LE**: the rendered unzoomed FOV is 100 horizontal (`Camera.CameraCache.POV.FOV`, PR #13's reads),
+    `PlayerController.DefaultFOV` is 85: main's automatic reference made unzoomed play ~1.3x faster with Adapt to Zoom
+    on. Profile: `[Unreal3] ZoomReferenceFOV=100`.
+  - To verify in game: ME3 (game FOV, strength 75), and a game without FOV source with manual levels (aim, cycle, wrap,
+    remember, reset, toggle, ramp); panel edits reloading without restart.
 - 2026-11-02 **DX12 HDR still crashes at first open; select the panel's own ImGui context on its render worker.** The
   startup-format correction above was tested in 007 First Light with the game already in HDR10: F10 reached the first
   `the window drawn as HDR10` log and the process still crashed. `gyro4all.dll` creates its own ImGui context on the

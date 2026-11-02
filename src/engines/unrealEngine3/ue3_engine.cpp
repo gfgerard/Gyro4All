@@ -446,15 +446,23 @@ public:
         // Dishonored keeps WorldInfo.bIsMenuLevel on in play: its profile turns the menu check off.
         use_menu_level_ = settings::profile_int(L"Unreal3", L"MenuLevel", 1) != 0;
         if (!use_menu_level_) log("ue3: WorldInfo.bIsMenuLevel ignored (profile: [Unreal3] MenuLevel=0)");
-        // The unzoomed horizontal FOV for zoom compensation: [Unreal3] ZoomReferenceFOV= wins, else the generic
-        // [Gyro4All] ZoomReferenceFOV= (any engine's fallback); 0 reads PlayerController.DefaultFOV.
-        zoom_reference_fov_ = std::atof(settings::profile_string(L"Unreal3", L"ZoomReferenceFOV", L"0").c_str());
-        if (zoom_reference_fov_ <= 0)
-            zoom_reference_fov_ = std::atof(settings::get_string(L"ZoomReferenceFOV", L"0").c_str());
-        if (zoom_reference_fov_ > 0)
-            log("ue3: zoom reference FOV %.1f degrees ([Unreal3]/[Gyro4All] ZoomReferenceFOV)", zoom_reference_fov_);
+        load_zoom_reference();
         // StickFallback=0 (the core's): with no camera hook the gyro turns nothing, which the log and status say.
         stick_fallback_ = settings::get(L"StickFallback", 1) != 0;
+    }
+
+    void settings_changed() override { load_zoom_reference(); }
+
+    // The unzoomed horizontal FOV for zoom compensation: [Unreal3] ZoomReferenceFOV= wins, else the generic
+    // [Gyro4All] ZoomReferenceFOV= (any engine's fallback); 0 reads PlayerController.DefaultFOV. At start and on save.
+    void load_zoom_reference() {
+        double fov = std::atof(settings::profile_string(L"Unreal3", L"ZoomReferenceFOV", L"0").c_str());
+        if (fov <= 0) fov = std::atof(settings::get_string(L"ZoomReferenceFOV", L"0").c_str());
+        if (!fov::is_valid(fov)) fov = 0;
+        if (fov != zoom_reference_fov_)
+            log("ue3: zoom reference FOV %.1f degrees ([Unreal3]/[Gyro4All] ZoomReferenceFOV%s)", fov,
+                fov > 0 ? "" : ": 0, PlayerController.DefaultFOV");
+        zoom_reference_fov_ = fov;
     }
 
     std::vector<ViewInfo> views() const override { return {{1, "Default", 0, true}}; }
@@ -635,36 +643,10 @@ private:
         if (!fov::is_valid(reference) &&
             (!g_off.default_fov || !mem::rd(pc + g_off.default_fov, reference)))
             return false;
-        const double aspect = window_aspect();
+        const double aspect = fov::game_window_aspect();
         current_vertical = fov::vertical_from_horizontal(current, aspect);
         reference_vertical = fov::vertical_from_horizontal(reference, aspect);
         return fov::is_valid(current_vertical) && fov::is_valid(reference_vertical);
-    }
-
-    // The game window's client aspect (width/height) for the horizontal-to-vertical FOV conversion. The largest visible
-    // top-level window of this process, as in core/notify.cpp.
-    static double window_aspect() {
-        struct Search {
-            HWND best = nullptr;
-            long long area = 0;
-        } search;
-        EnumWindows(
-            [](HWND hwnd, LPARAM p) -> BOOL {
-                auto& s = *reinterpret_cast<Search*>(p);
-                DWORD pid = 0;
-                GetWindowThreadProcessId(hwnd, &pid);
-                if (pid != GetCurrentProcessId() || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
-                RECT r{};
-                if (!GetClientRect(hwnd, &r)) return TRUE;
-                const long long area = 1ll * (r.right - r.left) * (r.bottom - r.top);
-                if (area > s.area) s.best = hwnd, s.area = area;
-                return TRUE;
-            },
-            reinterpret_cast<LPARAM>(&search));
-        RECT r{};
-        return search.best && GetClientRect(search.best, &r) && r.right > 0 && r.bottom > 0
-                   ? double(r.right) / r.bottom
-                   : 0;
     }
 
     static bool world_bool(uintptr_t world, const Bool& b) {

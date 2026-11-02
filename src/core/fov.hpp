@@ -17,4 +17,9 @@ inline double vertical_from_horizontal(double horizontal, double aspect_ratio) {
     return is_valid(vertical) ? vertical : 0;
 }
 
+// The game window's client aspect (width / height) for the horizontal-to-vertical conversion: the largest visible
+// top-level window of this process, as in notify.cpp. Looked up again at most every 500 ms (EnumWindows is too costly
+// for every frame); 0 while there is no such window. Game thread.
+double game_window_aspect();
+
 }  // namespace gyro4all::fov

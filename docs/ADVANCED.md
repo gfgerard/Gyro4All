@@ -190,6 +190,9 @@ All diagnostics go to `Gyro4All\Gyro4All.log` (probe results, if enabled, to `Gy
 | `stick fallback: the game undid the gyro's camera writes 8 frames in a row: gyro as right-stick input; game's stick: ...` (or `forced on (StickFallbackTest)`) / `stick fallback off: <why>` | The game kept putting the camera back after each gyro write (a scripted aim, or a camera rebuilt from other state), so the gyro went to the game as right-stick input until `<why>`: the game keeps the writes again, another camera, or no readable view. `the stick turns nothing` means the game doesn't read the controller through a path Gyro4All can change (Steam Input, its own SDL): no fallback for that camera. `game's stick: radial dead zone 0.20, curve 1.50, yaw 160 and pitch 110 deg/s at full stick, 2 frames late (default, to learn)` is the model of the game's stick it starts with (`(saved)`: from `StickFallbackLearned=`, `(learnt)`: this session). `stick fallback: the game's stick, learnt: ... (the model explains N% of the camera's motion)`: the model learnt from the camera (again when it changes); `(inverted)` after an axis the game turns the other way. `stick fallback: StickFallbackLearned=... saved to <profile>`: kept for the next session. While it runs, a `status: stick fallback: stick (x, y), game's stick: ... (learnt, explains N% / saved for this game, learning / default, learning)` line follows the status line. With `MotionTrace=1`, `K,x,y,yaw,pitch,used` lines in `motion-trace.csv` give each frame's deflection, the camera's turn and which axes the learner took (with `StickFallbackTest=1` the trace starts with the fallback). `stick fallback test: forced on / detection only for a minute`: `StickFallbackTest=1`. `settings: StickFallback=0`: the fallback is off (never starts); with an engine that has no camera hook, `stick fallback: off (StickFallback=0), and the engine has no hook for this game's camera` follows, and the gyro turns nothing. |
 | `settings: SensorPacing=1 (...): motion played back in sensor time, delay automatic` (or `delay N ms`, `SensorPacing=0`) | Sensor-time pacing's settings, at start and when `Gyro4All.ini` or the profile is saved with a change. Every 30 s while the gyro turns: `status: sensor pacing: delay D ms (automatic), N frames paced, P% past the last report (extrapolated), B left to GyroLib's burst delivery, S stalls`: D is how far behind each frame the motion is played; P the frames whose time came after the last report read (its rate carried forward); B frames turned as GyroLib gave them while it spreads a Bluetooth pad's bursts itself; S game stalls (a frame over 100 ms), whose turn goes out at once. In `motion-trace.csv` (`MotionTrace=1`) the F lines' raw yaw/pitch are GyroLib's, the last two the paced turn. |
 | `settings: StickCamera=1 (...): yaw ... deg/s, pitch ...` | The stick camera's settings, at start and each time `Gyro4All.ini` or the profile is saved. |
+| `settings: ZoomStrength=100 ZoomSource=Auto \| manual zoom on: aim LT (Hold), cycle R3, levels 55,30 against 90 horizontal, remember off, 1 reset button(s), ramp 150 ms (...)` | Zoom compensation's settings, at start and when a save changes them. `manual zoom off (needs ZoomAimButton= and ZoomLevelsFOV=)`: no manual zoom. |
+| `zoom: level 2 of 2 (30 degrees)` / `zoom: not aiming` | Manual zoom's level changed (aim button, cycle button, reset button, end of gameplay). |
+| `status: zoom: manual field of view 30.0, unzoomed 90.0 (horizontal degrees), level 2, gyro x0.268 at ZoomStrength 100%, Adapt to Zoom on in view 1` | With the status block: the FOV reported this frame (`the game's` ... `vertical degrees` when the engine reports it), the gyro's scale and whether *Adapt to Zoom* is on in the active view. No line: nothing reported (no FOV source, or not in a gameplay view). |
 | `stick camera: on (the controller shown as XInput)` / `on (the game's own controller reports)` | The right stick turns the camera through Gyro4All; the game reads it centred. |
 | `stick camera: off while GyroLib's flick stick uses the right stick` / `off while the stick fallback turns the camera` | Flick stick (priority) or the stick fallback has the right stick. |
 | `stick camera: unavailable: Gyro4All can't hide the right stick from the game here (...)` | Steam Input or a real Xbox controller, or the game's own controller reports aren't checked yet (move the right stick). The game keeps its own stick. A `status: stick camera <state>` line follows the status line every 30 s. |
@@ -426,8 +429,8 @@ apply without a restart. Its `[Gyro4All]` settings still apply from the next sta
 The core supports GyroLib's `gyro.zoom_compensation` for every engine through the same contract: an engine view declares
 support and reports the current and unzoomed reference **vertical FOV**, in degrees and with matching projections, before
 each update. Missing or invalid values bypass compensation for that update. GyroLib scales only the gyro deltas, not flick
-stick or the saved sensitivity; Gyro4All applies no second FOV scale. The setting is Off by default and also works in the
-ADS, ALT_ADS and OTHER sensitivity profiles.
+stick or the saved sensitivity; Gyro4All applies no second FOV scale. The setting (*Adapt to Zoom*) is Off by default;
+the ADS, ALT_ADS and OTHER sensitivity profiles inherit it from the main tab.
 
 Unreal views read the displayed `PlayerCameraManager CameraCachePrivate.POV.FOV` (`CameraCache` in older UE4) and
 `POV.AspectRatio`, converting the horizontal FOV to vertical. Orthographic cameras and missing or invalid properties
@@ -446,7 +449,39 @@ The unzoomed reference is the engine's own default (`PlayerCameraManager.Default
 unless `ZoomReferenceFOV=` says otherwise (horizontal degrees, like the engine reports). The most specific place wins:
 a view section (`[View.*]`) for Unreal, `[Unreal3]` for Unreal Engine 3, then the generic `[Gyro4All] ZoomReferenceFOV=`
 in the profile or Gyro4All.ini — so one value can serve every game of the folder. `0` (or no value) uses the engine's
-own default.
+own default. Changes apply when the file is saved (the settings panel saves as you edit). Mass Effect 3 LE's shipped
+profile sets `[Unreal3] ZoomReferenceFOV=100`: its `PlayerController.DefaultFOV` (85) is not the rendered 100.
+
+`ZoomStrength=<percent>` (default 100, 0..200; Gyro4All.ini or the profile, applies on save) tunes how much the field of
+view changes the speed, for every source: GyroLib's scale is raised to strength/100. At 100 a zoom moves the image on
+screen as fast as unzoomed play; at 75 each zoom feels faster than that by its magnification^(1 - 0.75) (a 4x scope
+1.4x, a 13.6x one 1.9x); 0 turns the field of view's effect off. GyroLib's formula is fixed, so Gyro4All reports the FOV
+that makes GyroLib give the scaled value. (Idea and Mass Effect 3 numbers from PR #13 by MERLev.)
+
+#### Manual zoom (games whose FOV Gyro4All can't read)
+
+Where the engine reports no FOV, the player describes the game's zoom instead (settings panel, *Zoom compensation*, or
+`Gyro4All.ini` / the profile; all apply on save):
+
+- `ZoomAimButton=` and `ZoomAimMode=Hold|Toggle`: the aim. Held (or toggled on) it selects the first zoom level.
+- `ZoomLevelsFOV=`: each level's field of view, horizontal degrees, comma-separated, the aim first (`55,30,15`). Each is
+  compared with `ZoomReferenceFOV=` (90 when unset), so they are the game's own FOVs if known, else values tuned by feel.
+- `ZoomCycleButton=` (optional, e.g. `R3`): while aiming, each press goes to the next level, back to the first after the
+  last. A weapon that only aims never presses it and stays at the first level.
+- `ZoomRememberLevel=1`: the next aim starts at the level used last (games that keep each weapon's zoom) instead of the
+  first. `ZoomResetButtons=` (comma-separated, usually the weapon switch, e.g. `Y` or `Y,Left,Right`): a press brings the
+  zoom back to the first level, now if aiming and for the next aim otherwise.
+- `ZoomRampMs=` (default 150): the gyro eases to each level's speed over that time, like the game's zoom animation.
+- `ZoomSource=Auto|Manual`: Auto (default) uses the game's FOV in views where the engine reports one and the manual levels
+  elsewhere; Manual always uses the levels (a game whose reported FOV doesn't follow its scopes).
+
+Buttons are named as for the sensitivity profiles (LT, R3, Y... or L2, R3, Triangle...). Manual zoom applies in the
+default view (and its sensitivity profiles), during gameplay only: a pause, the cursor, the panel or lost focus end the
+aim like a released button, and a toggle has to be pressed again. Gyro4All can't see the game's weapon or its own zoom
+state: a weapon with fewer levels than the list, or a game that changes the level by itself, gets out of step until the
+aim button is released or a reset button is pressed. With manual zoom, the ADS sensitivity profiles are no longer needed
+to slow the gyro while aiming; they remain for other settings while aiming (curves, smoothing, acceleration). A profile
+on the same button as `ZoomAimButton` works together with it (the profile's settings, the zoom's FOV).
 
 ### The stick's look input (`Property=RotationInput`)
 

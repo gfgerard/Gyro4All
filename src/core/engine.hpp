@@ -77,6 +77,9 @@ public:
     virtual const char* default_settings() const { return ""; }
     // DllMain, after settings::configure and settings::ensure_file: read the profile.
     virtual void configure() = 0;
+    // Game thread: Gyro4All.ini or the game's profile was saved (by hand or from the settings panel). Re-read what
+    // applies without a restart (e.g. ZoomReferenceFOV=).
+    virtual void settings_changed() {}
     // The gameplay views (at least the default one, id 1), registered with GyroLib on the first frame.
     virtual std::vector<ViewInfo> views() const = 0;
     // DllMain: true when the engine calls frame() itself, once per frame and always on the same thread, instead of the

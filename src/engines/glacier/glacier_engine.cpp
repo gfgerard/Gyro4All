@@ -419,16 +419,25 @@ public:
         loop_mode_ = !exe_imports_peek();
         input_delta_ = settings::get(L"GlacierInputDelta", 0) != 0;
         pending_writes_ = settings::get(L"GlacierPendingWrites", 0) != 0;
-        // The unzoomed horizontal FOV for zoom compensation: the generic [Gyro4All] ZoomReferenceFOV= (profile or
-        // Gyro4All.ini); 0 or implausible uses the widest FOV seen in game instead.
-        zoom_reference_fov_ = std::atof(settings::get_string(L"ZoomReferenceFOV", L"0").c_str());
-        if (zoom_reference_fov_ > 0 && (zoom_reference_fov_ < 5 || zoom_reference_fov_ > 170)) {
-            log("glacier: ZoomReferenceFOV=%.1f implausible: ignored", zoom_reference_fov_);
-            zoom_reference_fov_ = 0;
-        }
-        if (zoom_reference_fov_ > 0) log("glacier: zoom reference FOV %.1f degrees ([Gyro4All] ZoomReferenceFOV)", zoom_reference_fov_);
+        load_zoom_reference();
         log("settings: GlacierInputDelta=%d GlacierPendingWrites=%d", int(input_delta_), int(pending_writes_));
         dinputpad::on_create(&hook_xinput_device_check);
+    }
+
+    void settings_changed() override { load_zoom_reference(); }
+
+    // The unzoomed horizontal FOV for zoom compensation: the generic [Gyro4All] ZoomReferenceFOV= (profile or
+    // Gyro4All.ini); 0 or implausible uses the widest FOV seen in game instead. At start and on save.
+    void load_zoom_reference() {
+        double fov = std::atof(settings::get_string(L"ZoomReferenceFOV", L"0").c_str());
+        if (fov > 0 && (fov < 5 || fov > 170)) {
+            log("glacier: ZoomReferenceFOV=%.1f implausible: ignored", fov);
+            fov = 0;
+        }
+        if (fov != zoom_reference_fov_)
+            log("glacier: zoom reference FOV %.1f degrees ([Gyro4All] ZoomReferenceFOV%s)", fov,
+                fov > 0 ? "" : ": 0, the widest FOV seen");
+        zoom_reference_fov_ = fov;
     }
 
     // The default view while a local Hitman exists (the game's pause and the mouse cursor gate it); nothing otherwise
@@ -626,36 +635,10 @@ private:
         const double reference =
             zoom_reference_fov_ > 0 ? zoom_reference_fov_ : (zoom_reference_ = std::max(zoom_reference_, double(current)));
         ZoomFov z;
-        z.current_vertical = fov::vertical_from_horizontal(current, window_aspect());
-        z.reference_vertical = fov::vertical_from_horizontal(reference, window_aspect());
+        z.current_vertical = fov::vertical_from_horizontal(current, fov::game_window_aspect());
+        z.reference_vertical = fov::vertical_from_horizontal(reference, fov::game_window_aspect());
         if (!fov::is_valid(z.current_vertical) || !fov::is_valid(z.reference_vertical)) return std::nullopt;
         return z;
-    }
-
-    // The game window's client aspect (width/height) for the horizontal-to-vertical FOV conversion. The largest visible
-    // top-level window of this process, as in core/notify.cpp.
-    static double window_aspect() {
-        struct Search {
-            HWND best = nullptr;
-            long long area = 0;
-        } search;
-        EnumWindows(
-            [](HWND hwnd, LPARAM p) -> BOOL {
-                auto& s = *reinterpret_cast<Search*>(p);
-                DWORD pid = 0;
-                GetWindowThreadProcessId(hwnd, &pid);
-                if (pid != GetCurrentProcessId() || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
-                RECT r{};
-                if (!GetClientRect(hwnd, &r)) return TRUE;
-                const long long area = 1ll * (r.right - r.left) * (r.bottom - r.top);
-                if (area > s.area) s.best = hwnd, s.area = area;
-                return TRUE;
-            },
-            reinterpret_cast<LPARAM>(&search));
-        RECT r{};
-        return search.best && GetClientRect(search.best, &r) && r.right > 0 && r.bottom > 0
-                   ? double(r.right) / r.bottom
-                   : 0;
     }
 
     // The game's frames: Gyro4All's own, one per pump of the game thread.

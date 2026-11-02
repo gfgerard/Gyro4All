@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(Gyro4All VERSION 1.9.0 LANGUAGES C CXX)  # the one place the Gyro4All version lives (DLL log line + release zip name)
+project(Gyro4All VERSION 1.10.0 LANGUAGES C CXX)  # the one place the Gyro4All version lives (DLL log line + release zip name)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")  # static CRT: one less DLL to ship
 

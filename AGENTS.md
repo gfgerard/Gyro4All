@@ -38,6 +38,7 @@ find the camera** (no reflection, no known global, value searches that only turn
 write-test it, and follow the writes back with one-hit hardware breakpoints until a write sticks and the view follows
 (steps in its README). It found Metro Exodus's view in three breakpoints after hours of value searches had failed. Ask
 the user before attaching the debugger and have them save first; never on games with anti-debugging (Themida, Denuvo).
+After finding the camera, remember to search for FOV data for zoom compensation feature.
 
 ## Ground rules
 

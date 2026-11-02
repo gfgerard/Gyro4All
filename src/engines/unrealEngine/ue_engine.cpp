@@ -2,6 +2,7 @@
 
 #include "camera_match.hpp"
 #include "engine.hpp"
+#include "fov.hpp"
 #include "host.hpp"
 #include "log.hpp"
 #include "notify.hpp"
@@ -15,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cwctype>
 #include <format>
 #include <string>
@@ -667,7 +669,12 @@ public:
 
     const char* default_settings() const override { return probe_default_settings(); }
 
-    void configure() override { load_profile(); }
+    void configure() override {
+        load_profile();
+        load_zoom_reference();
+    }
+
+    void settings_changed() override { load_zoom_reference(); }
 
     std::vector<ViewInfo> views() const override {
         std::vector<ViewInfo> out;
@@ -712,7 +719,8 @@ public:
         f.target = target;
         if (g_view) {
             ZoomFov zoom;
-            if (ue::camera_fov(s.camera, g_view->zoom_reference_fov, zoom.current_vertical, zoom.reference_vertical))
+            const double reference = g_view->zoom_reference_fov > 0 ? g_view->zoom_reference_fov : zoom_reference_fov_;
+            if (ue::camera_fov(s.camera, reference, zoom.current_vertical, zoom.reference_vertical))
                 f.zoom_fov = zoom;
         }
         return f;
@@ -782,6 +790,19 @@ public:
 
     std::string status_scene() const override { return unreal::status_scene(g_scene, g_view); }
     void status_details() override { unreal::status_details(g_scene, g_view); }
+
+private:
+    // The generic [Gyro4All] ZoomReferenceFOV= (the profile's, else Gyro4All.ini's, where the settings panel writes it)
+    // for views without their own; at start and when either file is saved. 0 reads PlayerCameraManager.DefaultFOV.
+    void load_zoom_reference() {
+        const double fov = std::atof(settings::get_string(L"ZoomReferenceFOV", L"0").c_str());
+        const double value = fov::is_valid(fov) ? fov : 0;
+        if (value != zoom_reference_fov_) log("ue: zoom reference FOV %.1f degrees ([Gyro4All] ZoomReferenceFOV%s)",
+                                              value, value > 0 ? "" : ": 0, the camera's DefaultFOV");
+        zoom_reference_fov_ = value;
+    }
+
+    double zoom_reference_fov_ = 0;
 };
 
 }  // namespace

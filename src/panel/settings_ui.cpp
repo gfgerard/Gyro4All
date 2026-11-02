@@ -9,8 +9,9 @@
 // bottom edge) — so the button lands on the reset row wherever GyroLib put it, also in DX12 games, where its window is
 // drawn inside gyrolib.dll and invisible to this DLL. Everything is applied locally (style vars pushed for this window
 // only), so the shared ImGui context and GyroLib's panel are untouched. Edits are written to Gyro4All.ini as they
-// happen; each setting's help says whether it applies on save or needs a restart (host.cpp: only the pacer and the
-// stick camera reload live via the settings-file watcher; everything else is read in host_configure at start).
+// happen; each setting's help says whether it applies on save or needs a restart (host.cpp: the pacer, the stick
+// camera and zoom compensation reload live via the settings-file watcher; everything else is read in host_configure at
+// start).
 #include "settings_ui.hpp"
 
 #include <gyrolib/gyrolib.h>
@@ -22,6 +23,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 
 namespace g4a::settings_ui {
@@ -148,11 +150,33 @@ void help(const char* text) {
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", text);
 }
 
-// A section title with generous margins around it, so the blocks read apart.
+// A section title with generous margins around it, so the blocks read apart: bold (the default font has no bold face:
+// the title is drawn again 0.75*s to the right) and underlined, and the section's content
+// indented under it until the next section (end_sections closes the last one).
+bool g_in_section = false;
+constexpr float kSectionIndent = 25.0f;
+
+void end_sections(float s) {
+    if (g_in_section) ImGui::Unindent(kSectionIndent * s);
+    g_in_section = false;
+}
+
 void section(const char* title, float s) {
+    end_sections(s);
     ImGui::Dummy(ImVec2(0, 10.0f * s));
     ImGui::SeparatorText(title);
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 at(min.x + style.SeparatorTextPadding.x, min.y + style.SeparatorTextPadding.y);
+    const ImVec2 size = ImGui::CalcTextSize(title, nullptr, true);
+    const ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddText(ImVec2(at.x + 0.75f * s, at.y), col, title);
+    const float underline = at.y + size.y + 1.0f * s;
+    draw->AddLine(ImVec2(at.x, underline), ImVec2(at.x + size.x + 0.75f * s, underline), col, 1.0f * s);
     ImGui::Dummy(ImVec2(0, 5.0f * s));
+    ImGui::Indent(kSectionIndent * s);
+    g_in_section = true;
 }
 
 // An undo-arrow button to the right of a setting whose value differs from its default; clicking resets the
@@ -281,9 +305,8 @@ bool playstation_pad() {
     return false;
 }
 
-void profile_row(const char* id, const char* label, const char* button_key, const char* mode_key, float s) {
-    static const char* kModes[] = {"", "Hold", "Toggle"};
-    static const char* kModeLabels[] = {"(needs a button)", "Hold", "Toggle"};
+// A button setting's combo (the activation-button entries), `width` wide plus its reset arrow.
+void button_combo(const char* key, float width) {
     // Persistent storage refilled every frame: a combo popup stays open across frames and reads these pointers
     // while it is. The label/value set follows the connected controller's type.
     static std::array<std::string, kButtonEntryCount> labels;
@@ -296,25 +319,61 @@ void profile_row(const char* id, const char* label, const char* button_key, cons
         label_ptrs[i] = labels[size_t(i)].c_str();
     }
     // Select by ordinal: an INI value written with the other naming set (LT on a PlayStation pad) still shows.
-    const int want = button_ordinal(get(button_key));
+    const int want = button_ordinal(get(key));
     int selected = 0;
     for (int i = 0; i < kButtonEntryCount; ++i)
         if (want >= 0 && kButtonEntries[i].ordinal == want) selected = i;
+    ImGui::PushID(key);
+    ImGui::SetNextItemWidth(width);
+    if (ImGui::Combo("##button", &selected, label_ptrs, kButtonEntryCount)) set(key, values[selected]);
+    ImGui::PopID();
+    reset_arrow(key, want >= 0, "");
+}
+
+// A label and its help, then a button combo and a Hold/Toggle combo on one row.
+void button_mode_row(const char* id, const char* label, const char* help_text, const char* button_key,
+                     const char* mode_key, float s) {
+    static const char* kModes[] = {"", "Hold", "Toggle"};
+    static const char* kModeLabels[] = {"(needs a button)", "Hold", "Toggle"};
     ImGui::PushID(id);  // the rows share their visible labels: scope the IDs per row
     ImGui::AlignTextToFramePadding();
     ImGui::Text("%s", label);
-    help("Extra sensitivity tab in the F10 panel (starts with the Exploration/ADS settings).\n"
-         "A profile needs both its button and its mode. Restart the game to apply.");
+    help(help_text);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.5f - 6.0f * s);
-    if (ImGui::Combo("##button", &selected, label_ptrs, kButtonEntryCount)) set(button_key, values[selected]);
-    reset_arrow(button_key, want >= 0, "");
+    button_combo(button_key, ImGui::GetContentRegionAvail().x * 0.5f - 6.0f * s);
     ImGui::SameLine();
     // The mode combo leaves room for its reset arrow when the value is not the default (empty).
     const float reset_room = get(mode_key).empty() ? 0.0f : ImGui::GetFrameHeight() + 12.0f * s;
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - reset_room);
     combo("##mode", mode_key, kModes, kModeLabels, IM_ARRAYSIZE(kModes));
     ImGui::PopID();
+}
+
+void profile_row(const char* id, const char* label, const char* button_key, const char* mode_key, float s) {
+    button_mode_row(id, label,
+                    "Extra sensitivity tab in the F10 panel (starts with the Exploration/ADS settings).\n"
+                    "A profile needs both its button and its mode. Restart the game to apply.",
+                    button_key, mode_key, s);
+}
+
+// A free-text setting (comma lists), committed when the box loses focus or Enter is pressed. The buffer is read from
+// the INI once; resetting also clears it.
+void text_setting(const char* key, const char* hint) {
+    struct Buffer {
+        char text[128] = "";
+        bool loaded = false;
+    };
+    static std::map<std::string, Buffer> buffers;
+    Buffer& b = buffers[key];
+    if (!b.loaded) {
+        b.loaded = true;
+        std::snprintf(b.text, sizeof b.text, "%s", get(key).c_str());
+    }
+    ImGui::PushID(key);
+    const bool enter = ImGui::InputTextWithHint("##text", hint, b.text, sizeof b.text, ImGuiInputTextFlags_EnterReturnsTrue);
+    if (enter || ImGui::IsItemDeactivatedAfterEdit()) set(key, b.text);
+    ImGui::PopID();
+    if (reset_arrow(key, !get(key).empty(), "")) b.loaded = false;
 }
 
 void widgets(float s) {
@@ -378,13 +437,57 @@ void widgets(float s) {
     }
 
     section("Zoom compensation", s);
-    ImGui::Text("Unzoomed FOV used for zoom compensation");
-    help("ZoomReferenceFOV, vertical degrees. 0 = read the game's own FOV.\nApplies on save (the profile reloads).");
+    ImGui::TextDisabled("Switch \"Adapt to Zoom\" on in the F10 panel's main tab (the ADS tabs inherit it).");
+    ImGui::Text("Unzoomed FOV (horizontal degrees)");
+    help("ZoomReferenceFOV: the game's field of view when not aiming, in horizontal degrees (as most games'\n"
+         "FOV setting). 0 = the game's own value where Gyro4All reads it; manual zoom then counts from 90.\n"
+         "Applies on save.");
     slider_float("##ZoomReferenceFOV", "ZoomReferenceFOV", 0.0f, 150.0f, 0.0f, "%.0f");
     ImGui::SameLine();
     ImGui::TextDisabled("0 = auto");
+    slider_int("Strength (%)", "ZoomStrength", 0, 200, 100);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("ZoomStrength: 100 = a zoom moves the view on screen as fast as unzoomed play; lower keeps\n"
+                          "zoomed views faster (75: a 4x scope turns 1.4x faster than at 100); 0 = no effect.\n"
+                          "Applies on save.");
+    static const char* kSources[] = {"", "Manual"};
+    static const char* kSourceLabels[] = {"Auto (the game's FOV where Gyro4All reads it)", "Manual (the levels below)"};
+    combo("FOV source##ZoomSource", "ZoomSource", kSources, kSourceLabels, IM_ARRAYSIZE(kSources));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("ZoomSource: Auto uses the game's own field of view where the engine reports it, and the\n"
+                          "manual levels elsewhere. Manual: always the levels (a game whose reported FOV doesn't\n"
+                          "follow its scopes). Applies on save.");
+    button_mode_row("zoom_aim", "Aim button",
+                    "ZoomAimButton / ZoomAimMode: manual zoom, for games whose field of view Gyro4All can't read.\n"
+                    "Held (or toggled) it selects the first zoom level below. Applies on save.",
+                    "ZoomAimButton", "ZoomAimMode", s);
+    if (!get("ZoomAimButton").empty()) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("Next zoom level");
+        help("ZoomCycleButton: while aiming, each press goes to the next zoom level, back to the first after the\n"
+             "last. Gyro4All can't see the weapon: one with fewer levels than the list gets out of step until\n"
+             "the aim button is released or a reset button is pressed. Applies on save.");
+        ImGui::SameLine();
+        button_combo("ZoomCycleButton", ImGui::GetContentRegionAvail().x * 0.5f);
+        ImGui::Text("Zoom levels (horizontal degrees, comma-separated)");
+        help("ZoomLevelsFOV: the field of view of each zoom level, the aim first (e.g. 55,30,15).\n"
+             "Compared with the unzoomed FOV above. Applies on save.");
+        text_setting("ZoomLevelsFOV", "e.g. 55,30,15");
+        checkbox("Remember the last zoom level", "ZoomRememberLevel");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("ZoomRememberLevel: the next aim starts at the level used last (games that keep each\n"
+                              "weapon's zoom) instead of the first. Applies on save.");
+        ImGui::Text("Reset buttons (usually the weapon switch)");
+        help("ZoomResetButtons: pressing one brings the zoom back to the first level (comma-separated, e.g. Y\n"
+             "or Y,Left,Right). Applies on save.");
+        text_setting("ZoomResetButtons", "e.g. Y");
+        slider_int("Ramp (ms)", "ZoomRampMs", 0, 1000, 150);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("ZoomRampMs: the gyro eases to each level's speed over this time, like the game's zoom\n"
+                              "animation. Applies on save.");
+    }
 
-    section("Sensitivity profiles (extra tabs in the F10 panel)", s);
+    section("Sensitivity profiles (optional: other gyro settings while aiming)", s);
     profile_row("ads", "ADS (aiming down sights)", "AdsProfileButton", "AdsProfileMode", s);
     profile_row("alt_ads", "ALT_ADS (second aim)", "AltAdsProfileButton", "AltAdsProfileMode", s);
     profile_row("other", "OTHER", "OtherProfileButton", "OtherProfileMode", s);
@@ -405,6 +508,7 @@ void widgets(float s) {
     checkbox("On-screen notices", "Notices", 1);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Notices=0 keeps Gyro4All's notices in the log only.\nRestart the game to apply.");
+    end_sections(s);
 }
 
 void expanded(const PanelBox& panel, const ImVec2& at) {
