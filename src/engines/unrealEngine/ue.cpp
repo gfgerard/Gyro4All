@@ -546,6 +546,46 @@ bool find_legacy_names(const std::vector<Range>& sections) {
     return false;
 }
 
+// The names: FNamePool (4.23+), else UE <= 4.22's older name table, the latter only once the objects are found, so a
+// pool that a later try would find isn't passed over.
+void find_names(const std::vector<Range>& sections, bool objects_found) {
+    if (!g_name_blocks && !g_name_chunks && !find_name_pool(sections) && objects_found) find_legacy_names(sections);
+}
+
+// The per-second search of the data sections runs on the game thread while it's cheap (about 1 ms in most games). A
+// try that takes longer moves it to its own thread for good: Zombie Army 4's (no Unreal: the module is the fallback)
+// took 47 ms, a hitch every second. init() then checks the array address the pass found, and leaves the name globals
+// to the pass while it runs.
+constexpr ULONGLONG kSyncScanBudgetMs = 8;
+bool g_data_scan_async = false;
+std::atomic<bool> g_data_scan_running{false};
+std::atomic<uintptr_t> g_data_array{0};
+
+struct DataScan {
+    std::vector<Range> sections;
+    bool want_array, objects_found;
+};
+
+DWORD WINAPI data_scan_thread(void* arg) {
+    const std::unique_ptr<DataScan> scan(static_cast<DataScan*>(arg));
+    uintptr_t found = 0;
+    if (scan->want_array && find_object_array(scan->sections, false, &found)) g_data_array = found;
+    find_names(scan->sections, scan->objects_found);
+    g_data_scan_running = false;
+    return 0;
+}
+
+void start_data_scan() {
+    g_data_scan_running = true;
+    auto* scan = new DataScan{writable_sections(), !g_obj_array, g_obj_array != 0};
+    if (HANDLE thread = CreateThread(nullptr, 0, &data_scan_thread, scan, 0, nullptr)) {
+        CloseHandle(thread);
+    } else {
+        delete scan;
+        g_data_scan_running = false;
+    }
+}
+
 // ---------------------------------------------------------------- reflection layout
 
 std::string field_name(uintptr_t field) { return fname(field + g_field_name); }
@@ -720,15 +760,15 @@ bool init() {
     if (now < g_next_try) return false;
     g_next_try = now + 1000;
 
+    // A background pass of the data-section search still running: its results aren't ready, and it owns the name
+    // globals until it ends.
+    if (g_data_scan_running) return false;
     const std::vector<Range> sections = writable_sections();
+    const ULONGLONG scan_start = GetTickCount64();
     if (!g_obj_array) {
-        const ULONGLONG scan_start = GetTickCount64();
-        bool found = find_object_array(sections);
-        if (static bool timed = false; !timed) {
-            timed = true;
-            log("ue: GUObjectArray search in the data sections took %llu ms on the game thread (repeated every second "
-                "until found)", static_cast<unsigned long long>(GetTickCount64() - scan_start));
-        }
+        bool found = false;
+        if (!g_data_scan_async) found = find_object_array(sections);
+        else if (const uintptr_t a = g_data_array.exchange(0)) found = find_object_array({{a, a + 0x20}});
         // Heap FUObjectArray behind an XOR-encoded global (cheap after the one-time code scan).
         if (!found && g_array_tries >= 2) found = find_encoded_object_array();
         // Otherwise look for it in the whole heap, in the background.
@@ -756,17 +796,27 @@ bool init() {
                 module_offset(g_obj_array).c_str(), g_obj_flat ? "flat, UE 4.19 or older" : "chunked", g_item_stride,
                 g_item_object, object_count());
     }
-    if (!g_name_blocks && find_name_pool(sections))
+    const bool had_names = g_name_blocks || g_name_chunks;
+    if (!g_data_scan_async) find_names(sections, g_obj_array != 0);
+    if (!had_names && g_name_blocks)
         log("ue: FNamePool.Blocks at %s (header len %s)", module_offset(g_name_blocks).c_str(),
             g_name_case_preserving ? "case-preserving entries, Outer +0x28"
             : g_header_len_high    ? "high bits"
                                    : "low bits");
-    // UE <= 4.22: no pool, the older name table. Only once the objects are found, so a pool that a later try
-    // would find (4.23+) isn't passed over.
-    if (!g_name_blocks && !g_name_chunks && g_obj_array && find_legacy_names(sections))
+    if (!had_names && g_name_chunks)
         log("ue: no FNamePool; GNames (TNameEntryArray, UE 4.22 or older) chunks at %s, characters at entry +0x%X",
             module_offset(g_name_chunks).c_str(), g_name_text);
-    if (!g_obj_array || (!g_name_blocks && !g_name_chunks)) return false;
+    const bool missing = !g_obj_array || (!g_name_blocks && !g_name_chunks);
+    if (!g_data_scan_async && missing) {
+        const ULONGLONG ms = GetTickCount64() - scan_start;
+        if (ms > kSyncScanBudgetMs) {
+            g_data_scan_async = true;
+            log("ue: the data-section search took %llu ms on the game thread: from now on it runs on its own thread",
+                static_cast<unsigned long long>(ms));
+        }
+    }
+    if (g_data_scan_async && missing) start_data_scan();
+    if (missing) return false;
     if (!detect_layout()) {
         g_next_try = now + 5000;
         g_class_class = 0;
