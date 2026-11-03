@@ -100,3 +100,7 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 | Subnautica | Unity | 2018 | |
 | Red Dead Redemption 2 | RAGE | 2019 | Never online (Rockstar anti-cheat) |
 | Cyberpunk 2077 | REDengine 4 | 2020 | |
+| Death Stranding | Decima | 2019 | |
+| Death Stranding 2 | Decima | 2025 | |
+| Horizon Zero Dawn | Decima | 2017 | |
+| Horizon Forbidden West | Decima | 2022 | |
