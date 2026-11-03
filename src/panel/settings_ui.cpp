@@ -379,6 +379,16 @@ void text_setting(const char* key, const char* hint) {
 void widgets(float s) {
     // Defaults (the fallbacks) are StickCamera::Settings' own and the shipped Gyro4All.ini defaults, so a slider
     // shows exactly what the game runs with when the INI has no value.
+    section("Gyro off while held", s);
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("Buttons");
+    help("GyroOffButtons: held over 200 ms, the gyro stops turning the camera until they are released\n"
+         "(a weapon wheel the game opens on a held button). A short press (switching weapons) doesn't stop it.\n"
+         "Names: LT RT LB RB LS RS A B X Y (or L2 R2 L1 R1 L3 R3 Cross Circle Square Triangle), Back Start\n"
+         "Up Down Left Right Touchpad. Applies on save.");
+    ImGui::SameLine();
+    text_setting("GyroOffButtons", "Comma-separated (e.g. Triangle)");
+
     section("Controller emulation", s);
     ImGui::AlignTextToFramePadding();
     ImGui::Text("XInput controller emulation");

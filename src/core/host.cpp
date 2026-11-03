@@ -106,6 +106,11 @@ FILETIME g_mod_ini_time{}, g_profile_ini_time{};
 // StickCameraPassButtons: held longer than kPassMs, the right stick goes to the game (a weapon wheel on R1).
 std::vector<int> g_pass_buttons;
 constexpr uint64_t kPassMs = 200;
+// GyroOffButtons: held longer than kPassMs, the gyro doesn't turn the camera until they are released (a weapon wheel the
+// game opens on a held button while it keeps the camera's writes: Zombie Army 4's triangle). Decided from last frame's
+// buttons, like the sensitivity profiles.
+std::vector<int> g_off_buttons;
+bool g_off_held = false;
 bool g_long_press = false;         // GL_HOST_LONG_PRESS_BLOCKING declared (longpress.cpp, applied by xinput/nativepad)
 std::vector<uint32_t> g_registered;  // engine view ids registered with GyroLib (tabs in the panel)
 // Mouse look (Raw Input reaching the game's main thread): counts like the right stick for the engine's camera checks.
@@ -496,6 +501,26 @@ int button_setting(const wchar_t* key) {
 
 // Zoom compensation's settings (zoom.hpp): at start and when Gyro4All.ini or the game's profile is saved (logged when
 // they change). The zoom levels start over only when their own settings change.
+// GyroOffButtons= (comma-separated button names): at start and when Gyro4All.ini or the game's profile is saved.
+void load_off_buttons(const char* why) {
+    std::vector<int> buttons;
+    std::string names;
+    for (const std::string& name : split(settings::get_string(L"GyroOffButtons"), ','))
+        if (const int b = parse_button(name); b >= 0) {
+            buttons.push_back(b);
+            names += (names.empty() ? "" : ",") + name;
+        } else {
+            log("settings: GyroOffButtons: unknown button '%s'", name.c_str());
+        }
+    static bool loaded = false;
+    if (loaded && buttons == g_off_buttons) return;  // logged at start and on a change only
+    loaded = true;
+    g_off_buttons = buttons;
+    g_off_held = false;
+    if (!names.empty()) log("settings: GyroOffButtons=%s (held over %llu ms: no gyro until released) (%s)", names.c_str(),
+                            (unsigned long long)kPassMs, why);
+}
+
 void load_zoom(const char* why) {
     const auto lower = [](std::string s) {
         std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
@@ -600,6 +625,7 @@ void check_settings_file() {
         if (mod || profile) {
             const bool manual = manual_zoom();
             load_zoom(why);
+            load_off_buttons(why);
             g_engine->settings_changed();
             if (manual != manual_zoom()) sync_zoom_support(g_engine->views());  // Adapt to Zoom shown or hidden
         }
@@ -878,12 +904,15 @@ void frame() {
     // Menus: some games (Cronos) show no cursor in gamepad menus, so pause and "no gameplay view" count too
     // (automatic "menus only" calibration needs it).
     host.menu_open = !f.in_game || f.cursor || f.paused || !view;
-    host.camera_allowed = view && !f.cursor;
+    host.camera_allowed = view && !f.cursor && !g_off_held;
     // Log every change of whether the gyro may turn the camera, with the reason, so a gyro that "suddenly stops"
     // can be matched to a cursor, a pause or a lost view at that exact moment.
     {
-        const char* gate = !view ? "off: no gameplay view" : f.cursor ? "off: mouse cursor shown" : f.paused ? "off: game paused"
-                                                                                                 : "on";
+        const char* gate = !view       ? "off: no gameplay view"
+                           : f.cursor  ? "off: mouse cursor shown"
+                           : f.paused  ? "off: game paused"
+                           : g_off_held ? "off: a GyroOffButtons button held"
+                                       : "on";
         static std::string last_gate;
         if (last_gate != gate) {
             last_gate = gate;
@@ -927,6 +956,14 @@ void frame() {
         expand_chord = both_sticks;
     }
     const bool neutral = panel_has_pad(g_gyro->get(), pad);
+    {
+        static uint64_t off_since = 0;
+        bool held = false;
+        for (int b : g_off_buttons) held = held || (pad && profile_button_down(pad, b));
+        if (!held) off_since = 0;
+        else if (!off_since) off_since = now_ns;
+        g_off_held = held && now_ns - off_since >= kPassMs * 1'000'000;
+    }
     const bool aim_gameplay = default_view && host.camera_allowed && host.focused && !f.paused && !neutral;
     update_sensitivity_profiles(pad, aim_gameplay);
     // Manual zoom levels, like the profiles: read after gl_update, reported on the next frame.
@@ -1171,6 +1208,7 @@ void host_configure(Engine& engine) {
     }
     load_pacer("Gyro4All.ini, the game's profile overrides", true);
     load_zoom("Gyro4All.ini, the game's profile overrides");
+    load_off_buttons("Gyro4All.ini, the game's profile overrides");
     g_stick_camera_on = settings::get(L"StickCamera", 0) != 0;
     if (g_stick_camera_on) load_stick_camera("Gyro4All.ini, the game's profile overrides");
     file_changed(settings::settings_path(), g_mod_ini_time);

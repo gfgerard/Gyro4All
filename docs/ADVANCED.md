@@ -94,6 +94,7 @@ Set in `Gyro4All.ini` or in a game's profile (`[Gyro4All]` section, overrides `G
 | `StickEdgeRamp` | 400 | Time to reach `StickEdgeSpeed` while held past `StickEdge`, ms |
 | `StickInvertY` | 0 | 1 = stick up turns the camera down |
 | `StickCameraPassButtons` | (none) | Comma-separated buttons (same names as the sensitivity profiles: `RB`, `LT`, `R1`...). Held over 200 ms, they give the right stick back to the game until released, e.g. `RB` for a weapon wheel picked with the right stick |
+| `GyroOffButtons` | (none) | Comma-separated buttons (same names as the sensitivity profiles: `Y`, `Triangle`, `RB`...). Held over 200 ms, the gyro stops turning the camera until they are released (log: `gyro off: a GyroOffButtons button held`): for a weapon wheel the game opens on a held button but doesn't freeze the camera for, e.g. `Triangle` in Zombie Army 4. A short press (switching weapons) doesn't stop it |
 
 Changes to the `Stick*` values apply when the file is saved, without a restart. Diagonals turn no faster than the axes.
 

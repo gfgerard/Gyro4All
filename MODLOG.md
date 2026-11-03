@@ -6635,4 +6635,110 @@ heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 1
   section), plus the name search. Fix (`ue.cpp`, `start_data_scan`): a try over 8 ms moves the search to its own thread
   for good ("the data-section search took N ms on the game thread: from now on it runs on its own thread"); init()
   validates the array address the pass found and leaves the name globals alone while a pass runs. Games where it's
-  cheap keep the synchronous search. Not yet verified in game.
+  cheap keep the synchronous search. Verified in game (Vulkan exe): the first try took 187 ms and moved the search to its
+  thread; after that `perf: idle max` stays under 1 ms per window (200-225 ms before).
+- Offline look at `ZA4_dx12.exe` for Denuvo-safe routes. The game's code is readable in the file (the first section,
+  named `.data`, is the executable one; Denuvo's VM is the 350 MB `.didata`): `camtrace refs` resolves code references
+  normally. No usable MSVC RTTI (15 type names in all), so no vtable route. The camera kinds are named strings ("3rd
+  Person Camera", "ADS Camera", "Photo Mode Camera" and about 25 more): static initializers (`exe+0x44a10`) copy each
+  into a heap string object at a global (`exe+0x20b89e0` for "3rd Person Camera", via `exe+0x99220`), so the camera
+  instances may be found by pointers to those heap strings. There are also console commands about cameras ("Prints 1 if
+  we're currently viewing the death camera", `Camera.Shake.Start`, `Camera.Angle.Initial/Final`), whose handlers
+  should load the camera manager. Neither followed yet.
+- The in-process write watcher (core `WriteWatch`, `src/core/writewatch.cpp`, used on Dead Space with Denuvo) is the
+  Denuvo-safe replacement for camtrace `bp`; the earlier ZA4 notes missed it. Extended for this: `exe+<hex offset>`
+  addresses (as camtrace prints them), and two input buffers to follow the input forward instead of the copies back:
+  `xi` = the game's last `XInputGetState(Ex)` buffer (`r:xi+c` = sThumbRX), `ri` = its last `GetRawInputBuffer` /
+  `GetRawInputData` buffer (`r:ri+24` = the first mouse report's lLastX; ZA4 reads its mouse with `GetRawInputBuffer`),
+  each logged as on the caller's stack or not (`xinput.cpp`, `last_state_buffer` / `last_raw_input_buffer`). Builds,
+  851 checks pass.
+- **WriteWatch in ZA4 (Vulkan exe, mouse, 10 s traces while turning): works with Denuvo, no reaction**, and it followed
+  the copies back to a source in five traces (exe offsets are `ZA4_vulkan.exe`'s):
+  - `exe+0x18AB450` (the radian angles): written by a block copy (`exe+0x356F90`, from the camera manager's view) and by
+    `exe+0xFD110`, a matrix-to-angles routine (pitch = asin with limits, yaw = atan2): derived from a matrix.
+  - The camera manager (heap, `0x24B56E510` that run; update `exe+0x6522B0`): blends its current and previous camera
+    (`+0x190`, `+0x198`; a camera's type at `+8`, eye at `+0x28`, look direction at `+0x34`, blend time `+0x18`/`+0x1C`),
+    builds a matrix from the blended direction (`exe+0x143DC0`) and the angles from that (`exe+0xFD110`) into its own
+    view at `+0x40`. The active camera (vtable `exe+0xC189C8`) is embedded at manager+0x1A0.
+  - The camera's look direction (`+0x34`) is set by `exe+0x62B770` (a plain setter) from `player+0x5A0` (the caller
+    `exe+0x652CB0` picks `[player+0x588]+0x20` or `player+0x5A0`).
+  - `player+0x5A0` (float x, y, z, unit, the player's look direction; player `0x232F6E860` that run) is written by
+    `exe+0x7A44E0` (normalises it, lets the object at `player+0x588` adjust it), called from the player's look update
+    `exe+0xA00EA0`: there the input deltas are `yaw = in[0]*k0 + in[2]*k2`, `pitch = in[1]*k1 + in[3]*k3` (two input
+    sources times sensitivities from the input object, then the invert flags), aim assist added by `exe+0x5C02F0`, then
+    pitch and yaw rebuilt (asin/atan2 relative to the body), the deltas added, pitch clamped, yaw wrapped, and back to a
+    direction.
+  - **Write-test of `player+0x5A0` (`--yaw 20`): kept**, and the camera's direction followed it (-121.9 to -101.9
+    degrees). This is the place to turn the view: a direction, like Metro's angles. Still needed: a stable path to the
+    player (static pointer or code signature), the user's check that the view and aim moved, the DX12 exe's offsets.
+- User saw the view jump with that write-test: **`player+0x5A0` turns the view**. Path to the player: new camtrace
+  `ptrs` (static pointers to an object, directly or through one heap object). Best candidate `[[exe+0x18A7C50]+0x60]`
+  (also `+0x68`): a local player object (`+0x70` = the input object the look update reads its sensitivities from), used
+  by code in `exe+0x661EA0`.. (Vulkan exe). Not yet checked across a level change or restart.
+- After a checkpoint reload that path was dead (`[exe+0x18A7C50]` an empty object; the player now at
+  `[[exe+0x18A9480]+0x60]`, another slot of a table at `exe+0x18A9460`). The player again from code: WriteWatch
+  `x:exe+0x7A44E0` (the look setter, rcx = player) with `WriteWatchFields=5a0,5a4,5a8` named it in one 5 s trace. The
+  game's own route to it, from its callers (`exe+0x69F940` iterates the player controllers, `exe+0x9BC490` updates
+  one): **controllers** = the list at `exe+0x17495D8` (`items` at +0, count at +0x10); a controller (vtable
+  `exe+0xC8F608`) holds its entity handle at +0x30 and its input object at +0x9450; **entities** = the handle table at
+  `exe+0x17451A0` (`objs` at +0, `keys` (u32) at +8, capacity (power of two) at +0x10; slot = handle & (capacity - 1),
+  probed onward until the key matches; lookup `exe+0x16DBC0`). Read live after the reload: controller 0 -> handle
+  0x9896BE -> the player, its `+0x5A0` = the view. All reads, no code call or hook needed. Next: an Asura engine module
+  writing `player+0x5A0` (gyro yaw about the vertical, pitch about the right axis, pitch limit as the game's), the DX12
+  exe's offsets by code signature, the FOV (camera object) for zoom compensation, and a check that aiming follows.
+- **Asura module** (`src/engines/asura/`, new): detected by `misc\common.asr` above the exe's folder; finds the
+  controllers' list and the entity table by code (`40 53 48 83 EC 40 48 8D 15 rel32 48 8D 4C 24 20 E8` and
+  `41 B0 01 8B 51 30 48 8D 0D rel32`, one target each in both exes: DX12 `exe+0x18AC8A8` / `exe+0x18A8470`), and turns
+  `player+0x5A0` (same offset in DX12: the look setter's stores match). User tests (DualSense, native, Vulkan then DX12):
+  the gyro turns the view; first build had pitch inverted (**y grows looking down**), fixed. The stick fallback started
+  at times: (1) **the pitch limit is smaller while aiming with a weapon** (80 degrees down measured; 85 both ways
+  otherwise, measured with the mouse): now learnt from the game's clamp and dropped 10 degrees inside it; (2) **the
+  pause menu and the weapon wheel** (held triangle) freeze the look and the game puts the gyro's writes back.
+  - Pause flag: new `tools/camtrace/states.py` (sound-cued gameplay/state switches, exe static data, bytes with one value
+    per state; `--out`/`--also` to intersect two states). Pause: 540 bytes; the one the player input code reads,
+    `exe+0x18A88F4` (Vulkan; 38 code refs, `cmp byte ptr [rip+..]` in the controller/look updates), 0 in gameplay and 1
+    in the pause menu, checked live. Found by `38 1D rel32 F3 44 0F 10 05 rel32 4C 89 AC 24 90 00 00 00 0F 29 74 24 70`
+    (one target in both exes; DX12 `exe+0x1A0BA98`). The same code checks four more static flags and a list of ids at
+    `exe+0x1F5B660` (count `exe+0x1F5B65C`), all unchanged in the pause and the wheel.
+  - Weapon wheel: 8 bytes in its own search, none shared with the pause, none read by code directly; the best two
+    (`exe+0x18C77B4` 0x15 -> 0, `exe+0x18C779A` 0xFFFF -> 0) flicker while it is held: not used. Instead the module
+    took 3 undone gyro writes in a row as a frozen look (paused for the core) and probed with a 0.3-degree write every
+    15 frames. **Dead end** (user test): the pause flag works (`asura: paused`/`unpaused` with the menu), but in the
+    wheel the game keeps most gyro writes (it only blocks the stick), so the frozen look came and went within 0.1-0.5 s,
+    and it fired in gameplay too (short gyro stops while aiming). Removed. GyroLib's hold-to-disable activation would
+    cover the wheel, but GyroLib has one activation mode and the user's is Hold (R1/trigger). New core setting
+    instead: **`GyroOffButtons=`** (comma-separated, profile button names; held over 200 ms the gyro's camera gate
+    closes until released, `gyro off: a GyroOffButtons button held`; a short press, switching weapons, doesn't).
+    For ZA4: `GyroOffButtons=Triangle`. Builds, 851 checks pass; not yet tested in game.
+- Bug (user, ZA4 in gameplay, not in the pause menu): with the F10 panel open the mouse couldn't be used, the cursor kept
+  going back to the middle. The game centres it (`SetCursorPos`) and clips it (`ClipCursor`) for its mouse look. Fix
+  (`overlay.cpp`): while the panel has the mouse, the game's `SetCursorPos` moves nothing and its `ClipCursor` is only
+  remembered (the cursor is unclipped when the panel takes the mouse, the game's last clip put back when it lets go).
+  Import hooks on the game modules, like `GetCursorPos`. **Reverted: the game then closed right after Gyro4All loaded**
+  (from the game's launcher, Vulkan exe; the log ends at `hook: PeekMessageW hook registered`, before the first frame;
+  no Windows error event or dump). With the two hooks not installed (`if (false)`) it still closed; with the whole
+  change reverted it starts. Ruled out: `DualSenseAsDualShock4` (the game also closed without the profile), the Asura
+  module's pause/wheel code (first frame only, never reached). Likely cause, not proven: `winmm.dll` itself importing
+  `user32!SetCursorPos`/`ClipCursor` (the only part of the change that exists before the first frame) and Denuvo
+  rejecting a loaded module that does. Next try: resolve them with GetProcAddress (no static import). The panel's
+  cursor problem in gameplay is still open.
+  - **Correction: not a Gyro4All bug, a Denuvo activation error.** The closes kept following new builds, not code: the
+    `GyroOffButtons` core change alone, then the known-good build plus a 30 ms `Sleep` in DllMain, then a build that
+    enabled DllMain's inline hooks together (load 37-45 ms against ~65 ms for a build that started) all closed, while
+    the vanilla exe and a build that had run before started. A temporary `DLL_PROCESS_DETACH` logger saw no
+    `ExitProcess`. The user then saw the window behind it: Denuvo's support link with error `88500006`, which players
+    report as "can't revalidate your purchase now, try again in 24 hours" (too many activations). Likely, not proven:
+    the Denuvo token covers something that changes with every new `winmm.dll` build, each new build reactivates, and
+    after a day's quota only configurations activated before still start (each exe, Vulkan and DX12, has its own).
+    So: deploy few builds to a Denuvo game, test changes in bulk, and on a close at start ask for the error window
+    before bisecting. The cursor fix above is back in (its two import hooks installed); batching the inline enables
+    and the exit logger were reverted. Deployed for a DX12 test of the wheel, the panel section and the cursor fix.
+  - Cursor fix, DX12 test (user): still recentred. Log: the Epic overlay (`EOSOVH-Win64-Shipping.dll`) writes its own
+    hooks over the exe's `GetCursorPos`/`SetCursorPos`/`ClipCursor` imports after ours (`written back by something
+    else ... left to it`). Now inline hooks on user32's `SetCursorPos`/`ClipCursor`, installed the first time the panel
+    takes the mouse (nothing at load; the clip already in place counts as the game's), and on release the log counts
+    what was held back (`panel: while it had the mouse, the game's N cursor moves and M clips were held back`).
+    Builds, 851 checks pass; not yet tested in game: deploying it got the DX12 exe blocked by Denuvo too (the second
+    new build that day for DX12 after several earlier ones), which supports the activation-per-build reading above.
+    To test the next day, in both exes: the cursor fix, `GyroOffButtons=Triangle` (wheel), the pause flag.
+

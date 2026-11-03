@@ -905,6 +905,80 @@ BOOL WINAPI hk_get_cursor_pos(LPPOINT point) {
     return TRUE;
 }
 
+// Games that turn the camera with the mouse keep the cursor in the middle of the window (SetCursorPos every frame) and
+// clipped to it (Zombie Army 4): while the panel has the mouse, the game's SetCursorPos moves nothing and its ClipCursor
+// is only remembered (the cursor is unclipped), and the last clip it asked for is put back when the panel lets go.
+// Inline hooks on user32's exports, installed the first time the panel takes the mouse: import hooks miss callers that
+// hook the imports themselves (ZA4's Epic overlay, EOSOVH, writes its own over ours), and nothing is added at load.
+using SetCursorPos_t = BOOL(WINAPI*)(int, int);
+using ClipCursor_t = BOOL(WINAPI*)(const RECT*);
+SetCursorPos_t g_set_cursor_pos = nullptr;
+ClipCursor_t g_clip_cursor = nullptr;
+std::mutex g_clip_mutex;
+bool g_game_clips = false;  // the game's last ClipCursor had a rectangle (g_game_clip)
+RECT g_game_clip{};
+std::atomic<int> g_blocked_moves{0}, g_blocked_clips{0};
+
+BOOL WINAPI hk_set_cursor_pos(int x, int y) {
+    if (g_mouse_captured.load(std::memory_order_relaxed)) {
+        g_blocked_moves.fetch_add(1, std::memory_order_relaxed);
+        return TRUE;
+    }
+    return g_set_cursor_pos(x, y);
+}
+
+BOOL WINAPI hk_clip_cursor(const RECT* rect) {
+    {
+        std::lock_guard lock(g_clip_mutex);
+        g_game_clips = rect != nullptr;
+        if (rect) g_game_clip = *rect;
+    }
+    if (g_mouse_captured.load(std::memory_order_relaxed)) {
+        g_blocked_clips.fetch_add(1, std::memory_order_relaxed);
+        return TRUE;
+    }
+    return g_clip_cursor(rect);
+}
+
+// First capture: hook both exports; the clip already in place counts as the game's.
+bool hook_cursor_moves() {
+    static const bool ok = [] {
+        RECT clip{};
+        const RECT screen{GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+                          GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                          GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN)};
+        if (GetClipCursor(&clip) && !EqualRect(&clip, &screen)) {
+            std::lock_guard lock(g_clip_mutex);
+            g_game_clips = true;
+            g_game_clip = clip;
+        }
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        void* set = user32 ? reinterpret_cast<void*>(GetProcAddress(user32, "SetCursorPos")) : nullptr;
+        void* clip_fn = user32 ? reinterpret_cast<void*>(GetProcAddress(user32, "ClipCursor")) : nullptr;
+        const bool hooked = hooks::hook_function(set, reinterpret_cast<void*>(&hk_set_cursor_pos),
+                                                 reinterpret_cast<void**>(&g_set_cursor_pos)) &&
+                            hooks::hook_function(clip_fn, reinterpret_cast<void*>(&hk_clip_cursor),
+                                                 reinterpret_cast<void**>(&g_clip_cursor));
+        log(hooked ? "panel: SetCursorPos/ClipCursor hooked: the game can't recentre or clip the cursor while the panel has the mouse"
+                   : "panel: SetCursorPos/ClipCursor hook failed: the game may keep recentring the cursor in the panel");
+        return hooked;
+    }();
+    return ok;
+}
+
+// The panel took the mouse (unclip it) or let it go (the game's clip again).
+void mouse_capture_changed(bool captured) {
+    if (!hook_cursor_moves()) return;
+    std::lock_guard lock(g_clip_mutex);
+    if (captured) {
+        g_clip_cursor(nullptr);
+        return;
+    }
+    if (g_game_clips) g_clip_cursor(&g_game_clip);
+    const int moves = g_blocked_moves.exchange(0), clips = g_blocked_clips.exchange(0);
+    if (moves || clips) log("panel: while it had the mouse, the game's %d cursor moves and %d clips were held back", moves, clips);
+}
+
 bool is_mouse(UINT m) { return (m >= WM_MOUSEFIRST && m <= WM_MOUSELAST) || m == WM_INPUT; }
 bool is_keyboard(UINT m) { return (m >= WM_KEYFIRST && m <= WM_KEYLAST); }
 
@@ -1394,7 +1468,8 @@ unsigned capture() {
     unsigned cap = 0;
     if (gl_overlay* overlay = g_overlay.load()) cap |= gl_overlay_capture(overlay);
     if (const g4a_api* panel = panel_host::api()) cap |= panel->capture();
-    g_mouse_captured = (cap & GL_OVERLAY_CAPTURE_MOUSE) != 0;
+    const bool captured = (cap & GL_OVERLAY_CAPTURE_MOUSE) != 0;
+    if (g_mouse_captured.exchange(captured) != captured) mouse_capture_changed(captured);
     return cap;
 }
 
