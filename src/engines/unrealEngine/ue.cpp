@@ -56,6 +56,7 @@ int g_obj_outer = 0x20;
 // NumChunks. FNameEntry: Index (name index << 1 | wide), HashNext, then the NUL-terminated characters.
 uintptr_t g_name_chunks = 0;    // TNameEntryArray::Chunks
 int g_name_text = 0x10;         // offset of the characters in an FNameEntry
+int g_name_max_chunks = 128;    // Chunks[] size: 128 stock, 256 in builds with a larger MaxTotalElements (Remnant)
 
 int g_super = -1;        // UStruct::SuperStruct
 int g_child_props = -1;  // UStruct::ChildProperties
@@ -99,7 +100,7 @@ bool read_cstring(uintptr_t address, std::basic_string<Char>& out) {
 }
 
 std::string legacy_entry_string(uint32_t index) {
-    if (index >= 128 * 16384) return {};
+    if (index >= g_name_max_chunks * 16384) return {};
     const uintptr_t chunk = rdp(g_name_chunks + (index / 16384) * 8ull);
     const uintptr_t entry = chunk ? rdp(chunk + (index % 16384) * 8ull) : 0;
     int32_t entry_index = 0;
@@ -515,15 +516,19 @@ bool find_name_pool(const std::vector<Range>& sections) {
 }
 
 // TNameEntryArray (UE <= 4.22) at `chunks`: names 0 and 1 are None and ByteProperty, NumElements/NumChunks follow
-// the 128 chunk pointers. Sets the characters' offset in an entry (+0x12 in Days Gone: 2 more bytes after HashNext).
-bool legacy_names_at(uintptr_t chunks) {
+// the chunk pointers (128 stock, 256 in Remnant: From the Ashes). Sets the characters' offset in an entry (+0x12 in
+// Days Gone: 2 more bytes after HashNext) and the chunk count.
+bool legacy_names_at(uintptr_t chunks, int max_chunks) {
     const uintptr_t chunk0 = rdp(chunks);
     if (!chunk0) return false;
     const uintptr_t e0 = rdp(chunk0), e1 = rdp(chunk0 + 8);
     if (!e0 || !e1) return false;
     int32_t num = 0, num_chunks = 0;
-    if (!rd(chunks + 128 * 8, num) || !rd(chunks + 128 * 8 + 4, num_chunks)) return false;
-    if (num <= 1000 || num > 128 * 16384 || num_chunks < (num + 16383) / 16384 || num_chunks > 128) return false;
+    if (!rd(chunks + max_chunks * 8ull, num) || !rd(chunks + max_chunks * 8ull + 4, num_chunks)) return false;
+    if (num <= 1000 || num > max_chunks * 16384 || num_chunks < (num + 16383) / 16384 || num_chunks > max_chunks)
+        return false;
+    // The slots after the used chunks are empty, so a 128-slot read of a larger table doesn't take its zeros for counts.
+    if (rdp(chunks + (num_chunks - 1) * 8ull) == 0) return false;
     for (int off : {0x10, 0x0C, 0x08, 0x14, 0x18, 0x12}) {
         char a[5] = {}, b[13] = {};
         if (!guarded_copy(a, e0 + off, sizeof(a)) || !guarded_copy(b, e1 + off, sizeof(b))) continue;
@@ -534,10 +539,16 @@ bool legacy_names_at(uintptr_t chunks) {
     return false;
 }
 
+bool legacy_names_at(uintptr_t chunks) {
+    for (int max_chunks : {128, 256})
+        if (legacy_names_at(chunks, max_chunks)) return g_name_max_chunks = max_chunks, true;
+    return false;
+}
+
 // GNames: a global TNameEntryArray, or (stock 4.21/4.22) a global pointer to a heap one.
 bool find_legacy_names(const std::vector<Range>& sections) {
     for (const Range& r : sections) {
-        for (uintptr_t a = r.begin; a + 128 * 8 + 8 <= r.end; a += 8) {
+        for (uintptr_t a = r.begin; a + 8 <= r.end; a += 8) {
             if (legacy_names_at(a)) return g_name_chunks = a, true;
             const uintptr_t p = rdp(a);
             if (p && legacy_names_at(p)) return g_name_chunks = p, true;
