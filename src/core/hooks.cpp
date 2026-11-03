@@ -420,6 +420,13 @@ bool add_with_pad_library(const char* dll, const char* function, void* replaceme
     return register_hook(dll, 0, function, replacement, original, true);
 }
 
+bool add_in_module(HMODULE module, const char* dll, const char* function, void* replacement, void** original) {
+    if (!module) return false;
+    std::lock_guard lock(g_mutex);
+    Hook hook{dll, function, replacement, original};
+    return patch_module(module, hook);
+}
+
 bool inline_mode() { return g_inline; }
 
 // Only the XInput imports are taken back: without them the translated controller never reaches the game (Mortal

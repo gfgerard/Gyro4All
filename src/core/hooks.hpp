@@ -32,6 +32,10 @@ bool add_with_pad_library(const char* dll, const char* function, void* replaceme
 // patched again; the first time for each slot is logged. Returns how many were fixed. Any thread.
 int verify();
 
+// Same in one module that isn't a game module (Gyro4All's own dependencies: gyrolib.dll, its SDL3.dll), regular and
+// delay-load tables. Returns true if a slot now points to replacement.
+bool add_in_module(HMODULE module, const char* dll, const char* function, void* replacement, void** original);
+
 // Inline hook (MinHook) on any function, e.g. a system DLL's export, for diagnostics that must see every caller.
 // *original receives the trampoline. Returns false if the hook couldn't be created or enabled.
 bool hook_function(void* target, void* replacement, void** original);

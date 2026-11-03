@@ -314,6 +314,11 @@ public:
         return f;
     }
 
+    void limit_turn(double& pitch, double& yaw) override {
+        Camera* camera = g_camera.load(std::memory_order_acquire);
+        if (camera && g_frame_state.free_look) camera->limit_turn(pitch, yaw);
+    }
+
     bool apply(double pitch, double yaw) override {
         Camera* camera = g_camera.load(std::memory_order_acquire);
         return camera && g_frame_state.free_look && camera->turn(pitch, yaw);

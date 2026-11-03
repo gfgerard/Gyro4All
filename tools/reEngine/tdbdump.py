@@ -1,7 +1,7 @@
 """Offline dump of an RE Engine type database (TDB) from a game exe on disk: types, parents, fields (offset, type,
 static) and methods (code RVA). Supports TDB 69 and 70 (RE7/RE2/RE3 RT builds, RE8, MHRise TDB70), 71 (RE4 remake),
-81 (Monster Hunter Wilds) and 83 (RE Requiem, Pragmata), whose layouts follow REFramework's SDK (shared/sdk/RETypeDB.hpp
-namespaces tdb69/tdb70/tdb71/tdb81/tdb83, RETypeDefinition.hpp RETypeDefVersion69/71/74/83).
+81 (Monster Hunter Wilds), 82 (Onimusha: Way of the Sword) and 83 (RE Requiem, Pragmata), whose layouts follow
+REFramework's SDK (shared/sdk/RETypeDB.hpp namespaces tdb69/tdb70/tdb71/tdb81/tdb83, RETypeDefinition.hpp RETypeDefVersion69/71/74/83).
 
 The TDB is static data in the exe's image, found by its "TDB\\0" magic + version. On disk its table "pointers" are
 offsets from the TDB header, which the game turns into pointers at startup;
@@ -16,7 +16,7 @@ Usage:
 """
 import argparse, mmap, re, struct, sys
 
-SUPPORTED = (69, 70, 71, 81, 83)
+SUPPORTED = (69, 70, 71, 81, 82, 83)
 TYPEIMPL_SIZE = 0x30
 FIELD_SIZE = 8
 FIELDIMPL_SIZE = 12
@@ -81,6 +81,9 @@ HEADERS = {
     # TDB 81 (MH Wilds): typesStartOfGenerics and the TDB 74 counter move the counts; a padding u32 keeps the pointers
     # where TDB 83 has them.
     81: dict(n_types=0x08, n_fields=0x18, n_methods=0x14, n_strings=0x54, types=0x68, types_impl=0x70, methods=0x78,
+             methods_impl=0x80, fields=0x88, fields_impl=0x90, strings=0xD8),
+    # TDB 82 (Onimusha: Way of the Sword): TDB 83's header (the TDB 82 counter is there); type names as in TDB 81.
+    82: dict(n_types=0x08, n_fields=0x18, n_methods=0x14, n_strings=0x58, types=0x68, types_impl=0x70, methods=0x78,
              methods_impl=0x80, fields=0x88, fields_impl=0x90, strings=0xD8),
     # TDB 83 (RE Requiem): new counters (typesStartOfGenerics, one from TDB 74, one from TDB 82) move everything.
     83: dict(n_types=0x08, n_fields=0x18, n_methods=0x14, n_strings=0x58, types=0x68, types_impl=0x70, methods=0x78,

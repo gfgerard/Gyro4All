@@ -1,6 +1,6 @@
 #pragma once
 // RE Engine cameras: each game family keeps its player camera in its own classes, so the module has one camera model
-// per family (RE7's app.PlayerCamera, RE2/RE3's camera.CameraSystem and RE4's chainsaw.CameraSystem twirler angles, RE Requiem's and Pragmata's app.CameraSystem, MH Wilds' app.CameraManager). Most
+// per family (RE7's app.PlayerCamera, RE2/RE3's camera.CameraSystem and RE4's chainsaw.CameraSystem twirler angles, RE Requiem's and Pragmata's app.CameraSystem, MH Wilds' and Onimusha's app.CameraManager). Most
 // end in a quaternion the game builds the camera from every frame; the gyro rotates it (turn_rotation). MH Wilds keeps
 // yaw and pitch in degrees instead. Shared helpers here, models in re7_camera.cpp, re2_camera.cpp, re4_camera.cpp, requiem_camera.cpp,
 // pragmata_camera.cpp and mhwilds_camera.cpp.
@@ -35,6 +35,8 @@ public:
     virtual bool find_singletons(const std::vector<uintptr_t>& slots) = 0;
     // Game thread, once per frame.
     virtual CameraFrame read() = 0;
+    // Game thread, before turn: trims the turn to what the camera can still take (its pitch limit), Engine::limit_turn.
+    virtual void limit_turn(double& /*pitch*/, double& /*yaw*/) {}
     // Game thread, after read: turn the free-look camera (degrees; yaw right, pitch up positive). True when written.
     virtual bool turn(double pitch, double yaw) = 0;
     // The free-look camera's pitch (degrees, up positive), for recenter.

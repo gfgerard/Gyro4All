@@ -2,7 +2,8 @@
 // RE Engine runtime reflection: the type database (TDB) in the game's memory and the via.Application module entries.
 // Layouts follow REFramework's SDK (MIT; shared/sdk/RETypeDB.hpp tdb69/tdb70/tdb83, RETypeDefinition.hpp
 // RETypeDefVersion69/71/83, Application.cpp) and tools/reEngine/tdbdump.py. TDB 69 and 70 (RE7/RE2/RE3 RT builds, RE8), 71
-// (RE4 remake), 81 (MH Wilds) and 83 (RE Requiem, Pragmata). Every read goes through core/mem.hpp.
+// (RE4 remake), 81 (MH Wilds), 82 (Onimusha: Way of the Sword) and 83 (RE Requiem, Pragmata). Every read goes through
+// core/mem.hpp.
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -12,7 +13,7 @@ namespace gyro4all::re {
 struct Tdb {
     uintptr_t header = 0;
     uint32_t version = 0;
-    bool wide = false;          // TDB 71+: 19-bit type ids, a field's offset in its impl record (checked with 71, 81, 83)
+    bool wide = false;          // TDB 71+: 19-bit type ids, a field's offset in its impl record (checked with 71, 81, 82, 83)
     uint32_t type_size = 0x50;  // a RETypeDefinition: 0x48 bytes in TDB 71, 0x50 in the others
     uint32_t num_types = 0;
     uintptr_t types = 0;       // RETypeDefinition[num_types], type_size bytes each

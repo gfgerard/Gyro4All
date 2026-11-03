@@ -161,7 +161,7 @@ Key rules:
   `PROXY=version.dll` to install under that name when `winmm.dll` doesn't load or another mod owns it; Gears of War:
   E-Day needs `version.dll`).
   Sensor test tool: `tools/gyroprobe` (`gyroprobe.exe [seconds]`, `--settings`).
-  RE Engine type database (TDB 69/70/81/83) from a game exe, offline: `python -I tools/reEngine/tdbdump.py "<game>\<exe>" --type
+  RE Engine type database (TDB 69/70/71/81/82/83) from a game exe, offline: `python -I tools/reEngine/tdbdump.py "<game>\<exe>" --type
   app.PlayerCamera [--methods]`, `--find <regex>` (types), `--field <regex>` (fields), `--all <out.txt>`.
   A method's code in the running game (TDB 71+, read-only): `uv run --with numpy --with capstone python -I
   tools/reEngine/methoddump.py "<game>\<exe>" --type <class> [--method <name>]`.

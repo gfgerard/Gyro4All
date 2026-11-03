@@ -1,5 +1,6 @@
 #include "deps.hpp"
 
+#include "hooks.hpp"
 #include "log.hpp"
 #include "notify.hpp"
 
@@ -7,6 +8,7 @@
 
 #include <SDL3/SDL_version.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <format>
@@ -196,6 +198,82 @@ bool check_gyrolib(const std::wstring& gyrolib_path) {
                      30);
     }
     return false;
+}
+
+namespace {
+
+constexpr DWORD kThreadNameException = 0x406D1388;  // MSVC's "set thread name" exception, for debuggers
+
+using RaiseException_t = void(WINAPI*)(DWORD, DWORD, DWORD, const ULONG_PTR*);
+using LoadLibraryW_t = HMODULE(WINAPI*)(LPCWSTR);
+using LoadLibraryA_t = HMODULE(WINAPI*)(LPCSTR);
+using LoadLibraryExW_t = HMODULE(WINAPI*)(LPCWSTR, HANDLE, DWORD);
+using LoadLibraryExA_t = HMODULE(WINAPI*)(LPCSTR, HANDLE, DWORD);
+RaiseException_t g_raise = nullptr;
+LoadLibraryW_t g_load_w = nullptr;
+LoadLibraryA_t g_load_a = nullptr;
+LoadLibraryExW_t g_load_ex_w = nullptr;
+LoadLibraryExA_t g_load_ex_a = nullptr;
+std::atomic<bool> g_sdl_guarded{false};
+std::atomic<bool> g_name_skipped{false};
+
+// SDL's threads: the name is already set (SetThreadDescription), so the exception adds nothing.
+void WINAPI hk_raise(DWORD code, DWORD flags, DWORD count, const ULONG_PTR* args) {
+    if (code == kThreadNameException) {
+        if (!g_name_skipped.exchange(true)) log("deps: SDL3 thread-name exception (0x406D1388) skipped");
+        return;
+    }
+    g_raise(code, flags, count, args);
+}
+
+// After each of gyrolib.dll's loads: SDL3.dll's import, once it is there (a loaded SDL3 is the one GyroLib uses).
+void guard_loaded_sdl() {
+    if (g_sdl_guarded) return;
+    HMODULE sdl = GetModuleHandleW(L"SDL3.dll");
+    if (!sdl) return;
+    g_sdl_guarded = true;
+    const bool ok = hooks::add_in_module(sdl, nullptr, "RaiseException", reinterpret_cast<void*>(&hk_raise),
+                                         reinterpret_cast<void**>(&g_raise));
+    log("deps: SDL3.dll's RaiseException %s", ok ? "patched (thread-name exception skipped)" : "import not found, left alone");
+}
+
+HMODULE WINAPI hk_load_w(LPCWSTR name) {
+    HMODULE m = g_load_w(name);
+    guard_loaded_sdl();
+    return m;
+}
+HMODULE WINAPI hk_load_a(LPCSTR name) {
+    HMODULE m = g_load_a(name);
+    guard_loaded_sdl();
+    return m;
+}
+HMODULE WINAPI hk_load_ex_w(LPCWSTR name, HANDLE file, DWORD flags) {
+    HMODULE m = g_load_ex_w(name, file, flags);
+    guard_loaded_sdl();
+    return m;
+}
+HMODULE WINAPI hk_load_ex_a(LPCSTR name, HANDLE file, DWORD flags) {
+    HMODULE m = g_load_ex_a(name, file, flags);
+    guard_loaded_sdl();
+    return m;
+}
+
+}  // namespace
+
+void guard_sdl_thread_names(HMODULE gyrolib) {
+    guard_loaded_sdl();  // the game's own SDL3, already loaded
+    if (g_sdl_guarded) return;
+    // GyroLib delay-loads SDL3 from its cache on the first SDL call (gl_create).
+    int patched = 0;
+    patched += hooks::add_in_module(gyrolib, nullptr, "LoadLibraryW", reinterpret_cast<void*>(&hk_load_w),
+                                    reinterpret_cast<void**>(&g_load_w));
+    patched += hooks::add_in_module(gyrolib, nullptr, "LoadLibraryA", reinterpret_cast<void*>(&hk_load_a),
+                                    reinterpret_cast<void**>(&g_load_a));
+    patched += hooks::add_in_module(gyrolib, nullptr, "LoadLibraryExW", reinterpret_cast<void*>(&hk_load_ex_w),
+                                    reinterpret_cast<void**>(&g_load_ex_w));
+    patched += hooks::add_in_module(gyrolib, nullptr, "LoadLibraryExA", reinterpret_cast<void*>(&hk_load_ex_a),
+                                    reinterpret_cast<void**>(&g_load_ex_a));
+    if (!patched) log("deps: gyrolib.dll imports no LoadLibrary: SDL3's thread-name exception is not skipped");
 }
 
 }  // namespace gyro4all::deps

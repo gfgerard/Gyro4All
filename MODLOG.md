@@ -6761,3 +6761,144 @@ heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 1
     new build that day for DX12 after several earlier ones), which supports the activation-per-build reading above.
     To test the next day, in both exes: the cursor fix, `GyroOffButtons=Triangle` (wheel), the pause flag.
 
+- **In game (same day, DualSense, REFramework installed):** the TDB 82 build reads the TDB (`re: TDB 82 ready: 156902
+  types`), finds via.Application (365 entries), hooks `LateUpdateBehavior` and runs the first gyro frame;
+  `re: no known player camera in this game` -> gyro as right-stick input, which works, and the F10 panel works (DX12
+  through Streamline). Connection and Steam Input state not recorded.
+- **Error report window at start** (the game keeps running behind it): Capcom's `CrashReport.exe`. Its
+  `CrashReport\<date>\CrashReport.txt` gives exception **0x406D1388** at `KERNELBASE!RaiseException`, from SDL3.dll
+  (GyroLib's). The dump (`cdbX64 -z MiniDump.dmp`) shows thread "DeviceHotplugThread": SDL's `SDL_SYS_SetupThread` names
+  the thread with `SetThreadDescription`, then `AddVectoredExceptionHandler(1, ...)` + `RaiseException(0x406D1388)` (the
+  old debugger thread-name exception) + `RemoveVectoredExceptionHandler`. SDL's vectored handler should swallow it, but
+  here the dispatch went past every vectored handler to the frame handlers and `UnhandledExceptionFilter`, which is the
+  game's (it starts CrashReport.exe and waits on it, so SDL's hotplug thread stays blocked while the window is open). Why
+  SDL's vectored handler doesn't run in this game is not known (the minidump has no ntdll data to check; likely the game's
+  protection turns vectored handlers off). It never showed before because with TDB 82 unsupported GyroLib never started.
+  SDL3 has no hint to turn the naming exception off (SDL2's `SDL_WINDOWS_DISABLE_THREAD_NAMING` is gone).
+- Fix (unreleased, version not bumped): `deps::guard_sdl_thread_names`, called in `start_gyro` right after
+  `LoadLibraryW(gyrolib.dll)`. gyrolib.dll delay-loads SDL3.dll (74 imports) through its own `KERNEL32`
+  `LoadLibraryExA/ExW/A` imports, which are patched (new `hooks::add_in_module`: an import hook in one non-game module);
+  after each load, once `SDL3.dll` is there its `RaiseException` import goes to a filter that drops 0x406D1388 (the
+  thread is already named) and passes everything else on. If the game already has its own SDL3 loaded, that one is
+  patched. Logs: `deps: SDL3.dll's RaiseException patched ...`, then once `deps: SDL3 thread-name exception (0x406D1388)
+  skipped`. Builds, 851 checks pass. **Checked in game** (next run): both lines logged, no CrashReport window, no new
+  `CrashReport\` folder, the gyro as right stick as before.
+- **Camera model (unreleased, not tested in game):** the MH Wilds model (`mhwilds_camera.cpp`) also takes Onimusha's
+  route when `app.CameraManager` has no `_MasterPlCamera`: `CameraManager._InGameCameraOperator` (+0x70) ->
+  `cInGameCameraOperator._GameCamera` (+0x8, `app.GameCameraController`) -> `BaseCamParam` -> `<EyeAttachSetting>` /
+  `<LookAtAttachSetting>` -> `<AttachParam>` -> `_AttachDeg`, written like MH Wilds (signs assumed the same: +y left,
+  +x up; default pitch range +-80). Singletons from the exe's slots (last run's TdbDump: `app.CameraManager` at
+  `+0xBD70600`, `app.PauseManager` at `+0xBD70658`); pause from `_ActivePause` as in MH Wilds. No event-camera flag and
+  no argument required; `_CameraMode` and `<IsActiveLayer>` are only logged (view line `(mode N[, layer inactive])`,
+  status `mode= layer=`), to learn what they do in cutscenes, lock-on and Issen.
+- **In game (DualSense; connection and Steam Input not recorded):** the model is picked (`re: camera model: Onimusha:
+  Way of the Sword (app.GameCameraController)`), the singletons are found, the view reads
+  `cCameraParamArgument_AppDefault (mode 0)` with layer 1 in gameplay, and the pause bits work (0x1, 0x100, 0x400, 0x402
+  seen: gyro off). But **BaseCamParam's `_AttachDeg` is rewritten every frame**: `stick fallback: the game undid the
+  gyro's camera writes 8 frames in a row` -> gyro as right-stick input (which works; learnt stick saved as
+  `StickFallbackLearned` in the demo's profile). Unlike MH Wilds, the value is rebuilt from somewhere else.
+- The game has its own gyro aim code: `app.cCameraOperateCalculator._CameraGyroOperateCalculator`
+  (`app.cCameraGyroOperateCalculator`), options `GyroIsReverseX/Y`, `GyroSpeedYawLevel/PitchLevel` in
+  `app.cCameraOperateOptionUpdateStatus`. Not checked whether the PC demo offers it.
+- **Write test in the model (unreleased, not run):** once per session in free look (not paused), +20 degrees of yaw goes
+  into each candidate in turn; after 10 frames it is kept if BaseCamParam's yaw moved 20 +- 6 and the field still holds
+  the write (or, for an input amount, the camera moved). Logged per candidate (`re: write test i/7: ...`), undone, and
+  the first kept one is turned from then on (`re: the gyro turns <field> (yaw sign +-1)`; status `turn=`). Candidates,
+  in order: `_BaseParamWorker` (+0x90) `._CurrentParam`, `PrevCameraParam` +0x50, `CurrentParam` +0x28, `AddCamParam`
+  +0x18, `DirectCamParam` +0x20, `_DefaultAddCamParam` +0xd0 (each param's eye and look-at `_AttachDeg`), and
+  `_MiniComponent` (+0xe0, inline `MINI_COMPONENT_HOLDER`) `.InputRot` (+0x48, `app.mcCam_GameCameraInputRotate`)
+  `._AddDeg` (+0x40, per-frame input: the turn is added to it each frame). Turning the stick during the test spoils
+  it (the log shows how far the camera moved). Builds, 851 checks pass.
+- **First write-test run:** it ran 0.1 s after the pause bits cleared (03:45:10, likely a transition, the user says
+  before gameplay): `write test 1/7: +20 yaw to _BaseParamWorker._CurrentParam: the camera's yaw moved +20.0 in 10
+  frames, the field kept the write: TURNS THE CAMERA`. Then the camera stayed at `rot=(0.0, 3.3)` with `gyro enabled=0`:
+  the user's gyrolib.ini has `context.1.gyro.activation=6` (activation button/trigger), so GyroLib kept the gyro
+  suspended, and the user stood still. So the result may be real, but not proven in gameplay.
+- Change: the test starts only once the camera has turned by itself (> 0.5 degrees in a frame: stick, auto-follow)
+  since free look began (pause or loading resets it), then held still (< 0.05 degrees per frame) for 30 frames. Logged:
+  `re: write test: the camera turns, gameplay: waiting for it to hold still`. Builds, 851 checks pass.
+- **Write test in gameplay (03:51, DualSense):** `re: write test: the camera turns, gameplay: waiting for it to hold
+  still`, then `write test 1/7: +20 yaw to _BaseParamWorker._CurrentParam: the camera's yaw moved +20.0 in 10 frames,
+  the field kept the write: TURNS THE CAMERA` (yaw sign +1). So **`GameCameraController._BaseParamWorker` (+0x90)
+  `._CurrentParam` (+0x0, ace.cCameraParam) -> eye/look-at `_AttachDeg` keeps the turn** and BaseCamParam is rebuilt
+  from it. Gyro turning not seen yet: the user's gyrolib.ini had `context.1.gyro.activation=6` = `GL_GYRO_OFF`
+  (saved 03:49:53, likely from the F10 panel), so GyroLib kept the gyro suspended (`gyro enabled=0`) both runs.
+- **Gyro turns the camera (03:53, DualSense, user set view 1 activation to 5 = hold-to-disable):** GyroLib enabled the
+  gyro 03:53:32-03:53:52, applied yaw -188.7 / pitch +13.4, the camera's rotation went (1.9, -24.9) -> (15.1, 164.4)
+  with no "undid the writes" and no stick fallback: the game keeps writes to `_BaseParamWorker._CurrentParam`.
+  Directions not yet confirmed by the user.
+- **Pitch limit -> stick fallback (user report, 03:54):** with the gyro on, applied pitch reached +85.9 then +133.6 while the
+  camera's pitch stayed within about -38..+15: the game clamps pitch to its own limit (tighter than the model's default
+  +-80), the clamp reads as "undid the writes", and the core went to the stick and back several times (`stick
+  fallback: ... 8 frames in a row` / `stick fallback off`).
+  - Limit classes: `GameCameraController._MiniComponent.DegLimit` (+0x18, `app.mcCam_DynamicDegLimit`):
+    `_CurrentDegLimit` +0x78 / `_StartDegLimit` +0x68 / `_TargetDegLimit` +0x70 (`cDegLimit`: YawCenter 0x0,
+    YawRange 0x4, PitchCenter 0x8, PitchRange 0xc, YawFollowRot 0x10), `_StaticPitchLimit` +0x20 (vec2),
+    `_StaticPitchCenter` +0x1c, `_StaticPitchRange` +0x8c, `_Progress` (ease); `_Request` (`cRequest`, with
+    `_UseStaticPitchLimit`). Camera zones (`app.col_user_data.CameraZoneCollider.cCameraZoneData.cDegLimit`) request
+    their own limits. Meaning of center/range not known yet.
+  - Fix (unreleased, not tested): the model learns the limit from the game's clamping. After a gyro write, if the game
+    pulled the pitch back by over 0.5 degrees and the pitch is over 10 degrees from level, that pitch is the side's
+    limit (`re: pitch limit: the game holds the camera at ... ; deglimit center .. range .., static ..`); later writes
+    stop there. The camera going past it (stick, a looser zone) widens it; `_CurrentDegLimit`'s PitchCenter/Range
+    moving by over 1 degree resets it to +-80. The status line shows `deglimit=(pitch center, range, static)` to learn
+    the fields. Builds, 851 checks pass; deployed.
+- **Learning run (03:59):** status `deglimit=(pitch center 0.0 range 0.0, static -70.0..45.0)` throughout: the first
+  learnt limit was -70.0 (gyro wrote -71.6), = `_StaticPitchLimit`'s lower value. Then the rule went wrong: while the
+  camera came back toward level (03:59:28, 03:59:32) each frame ended 0.6-1.7 degrees nearer level than written and
+  was taken as a new limit (-57 -> -21.7 in 0.3 s), so the stick fallback kept switching on and off. Also: the core
+  judges a write from the full turn asked (`stick_fallback.cpp`: undone when the angles are within half the step of
+  "without the write"), so a turn the model clamps at the limit reads as undone; `Engine::limit_turn` exists for that
+  and the RE module didn't implement it.
+- Fix (unreleased, not tested): `Camera::limit_turn` (re_camera.hpp), forwarded by `ReEngine::limit_turn`; the ace model
+  trims the pitch to its range like `turn` does (MH Wilds too, with its `_PitchDegreeRange`). Onimusha's range is
+  `_StaticPitchLimit` when usable (finite, over 10 degrees wide, within +-90; logged once: `re: pitch limit -70.0..45.0
+  (mcCam_DynamicDegLimit._StaticPitchLimit)`), else learnt only while the gyro pushes outward and the game holds the
+  pitch where it was (< 0.3 degrees from the frame before). Builds, 851 checks pass.
+- **Static-limit run (04:05, DualSense):** `re: pitch limit -70.0..45.0 (mcCam_DynamicDegLimit._StaticPitchLimit)`
+  logged once, status `range=-70..45`; write test again picked `_BaseParamWorker._CurrentParam`. **User: pitch
+  direction correct (not inverted).** No more fallbacks at the limit, but the stick fallback still switched on and off
+  about every 2-10 s from 04:07:07 to 04:08:03 with pitch mid-range (about -4), while the left stick was used fully and
+  buttons 0x6140/0x0390/0x0340 were held (combat, likely lock-on or guard), around a `cCameraParamArgument_TPLookAtSet`
+  argument (04:07:36), `layer inactive` spells (04:06:49-04:07:07) and `mode 2` (04:07:58, DEAD per MODE_ID order).
+  So something in combat (lock-on `mcCam_CameraLockOn`, `mcCam_AimSupport`, auto-follow, or the worker blending its
+  work points) rewrites `_BaseParamWorker._CurrentParam`. Not identified yet.
+- **User: the fallbacks were during lock-on.** The lock-on camera aims at the target and rewrites the turn.
+  `app.mcCam_CameraLockOn` (`_MiniComponent.LockOn` +0x58): `_IsActive` +0xf8, `_TargetObject` +0xb8,
+  `_CurrentLcokOnDeg` +0x60 (sic), `_AddDeg` +0x70, `_RotationDegree` +0xe8 (`app.cDampingDegreeVec2`),
+  `_DegXLimitBoss` +0x30 / `_DegXLimitNormal` +0x40, `_EnableChangeTarget` +0xf4, `_BlendProgress` +0x90.
+  Player side: `app.cPlayerLockOnSupporter` (`_LockOnCameraTarget` +0x18, `_LockOnTargetNum` +0x58).
+- Change (unreleased, not tested): Onimusha's free look (and the write test) now needs `_CameraMode` 0 (NORMAL),
+  `<IsActiveLayer>` set and lock-on `_IsActive` clear; otherwise the view isn't gameplay, so the gyro is off and
+  the stick fallback stops (the gyro as right stick could switch lock-on targets). View line shows `, locked on`.
+  Builds, 851 checks pass.
+- **Lock-on run (04:13, DualSense): user: works, the gyro stops during lock-on** (`(mode 0, locked on)` -> `gyro off: no
+  gameplay view`, back on after release). User also saw the gyro stop while holding R2 (bow aim): not the model, the
+  user's gyrolib.ini: `context.1.gyro.activation=5` (HOLD_DISABLE) with `activation.trigger=2` (right trigger),
+  `activation.button=11`, `activation.touchpad=3`, so R2 held suspends the gyro (GyroLib suspends/enables lines match).
+  Also: Gyro4All's manual zoom aims with L2 (Gyro4All.ini), while this game's bow aims with R2.
+  Remaining stick fallbacks outside lock-on: 04:13:43, 04:15:26/28, 04:15:49 (around `camera none` /
+  `cCameraParamArgument_TPLookAtSet`), 04:16:05 (right after zoom level 1); cause not identified.
+- **R2 bow aim (04:20, user: "slows down for a few seconds, then normal sensitivity"):** each aim in/out (`zoom: level 1`
+  / `not aiming`) is followed by `stick fallback: ... 8 frames in a row` and `stick fallback off` 1-5 s later; the
+  learnt stick in this game is slow (yaw 67-109 deg/s at full stick), so the gyro feels slow until the writes stick
+  again. Likely the camera blend: `ace.cCameraParamWorker` rebuilds `_CurrentParam` from its work points while
+  blending. `ace.cCameraParamWorkPointBase`: `<StartCameraParam>` +0x10, `<EndCameraParam>` +0x18,
+  `<CurrentCameraParam>` +0x20, `<PreviousPointInfo>` +0x28, `_RequireTime` +0x3c, `_TotalElapsedTime` +0x40
+  (subclasses `cCameraParamWorkPoint_SimpleEase`, `_Bezier`, app `_CurveBzier`, `_ExtendBzier`); worker
+  `_WorkPointList` +0x8 (List`1: `_items` +0x0, `_size` +0x8), `_PreviousWorkPoint` +0x10. `app.mcCam_BaseWorker`
+  (holder `BaseParam` +0x10) is an `mcCam_CameraParamSelector`: `_GoalParam` +0x38, `_Worker` +0x40;
+  `mcCam_BaseWorker.cRequest` has `IsAimEnable`, `OverwriteDeg`, `IsDegFixed`, `TimeSec`.
+- Change (unreleased, not tested): `turn_blend` adds each gyro write's pitch/yaw step to the eye and look-at
+  `_AttachDeg` of every work point's Start/End/Current param (list up to 8, plus the previous point) and of
+  `_GoalParam`, each address once. Builds, 851 checks pass.
+- **Blend fix confirmed by the user (04:25, DualSense): "perfect"**; no `stick fallback` line in that run.
+- **Cleanup (unreleased, version not bumped; 1.10.0):** the write test, its candidates, the per-frame-input mode, the yaw
+  sign and the learnt pitch limit are gone: the Onimusha route now always turns `_BaseParamWorker._CurrentParam` (plus
+  `turn_blend`), with the pitch range from `_StaticPitchLimit` (else +-80; logged when it changes: `re: pitch limit
+  -70.0..45.0 (...)`). Offset dumps (`write test fields`, `blend`, `lock-on`) folded into one `re: scene types
+  (Onimusha)` line; status shows `mode= layer= locked_on=`. `_CurrentDegLimit` (center/range 0 in the demo) is no
+  longer read. MH Wilds is unchanged except `limit_turn`. Builds, 851 checks pass; deployed to the demo.
+  Docs: GAMES.md row (minimal), ADVANCED.md table row, tools/reEngine/README.md TDB list (71, 82 added).
+  Still open: yaw direction not explicitly confirmed by the user; a few fallbacks around `camera none` /
+  `cCameraParamArgument_TPLookAtSet` in combat; Issen (mode 1) and the action/motion/rail/dialogue cameras not looked at.

@@ -18,7 +18,8 @@ struct HeaderLayout {
     uint32_t num_types, num_strings, types, types_impl, fields, fields_impl, strings;
 };
 // TDB 69/70/71 (tdb69/tdb70::TDB; 70 adds a pointer after initData; 71, RE4, keeps 70's header), 81 (tdb81::TDB: the counter added in TDB 74 moves
-// the counts, a padding u32 keeps the pointers where 83 has them) and 83 (tdb83::TDB: one more counter from TDB 82).
+// the counts, a padding u32 keeps the pointers where 83 has them), 82 (83's header: the TDB 82 counter is in it; checked
+// offline on Onimusha: Way of the Sword) and 83 (tdb83::TDB: one more counter from TDB 82).
 constexpr HeaderLayout kHeader69{0x0C, 0x50, 0x60, 0x68, 0x80, 0x88, 0xC8};
 constexpr HeaderLayout kHeader70{0x0C, 0x50, 0x60, 0x68, 0x80, 0x88, 0xD0};
 constexpr HeaderLayout kHeader81{0x08, 0x54, 0x68, 0x70, 0x88, 0x90, 0xD8};
@@ -30,6 +31,7 @@ const HeaderLayout* header_layout(uint32_t version) {
     case 70:
     case 71: return &kHeader70;
     case 81: return &kHeader81;
+    case 82:
     case 83: return &kHeader83;
     default: return nullptr;
     }
@@ -76,7 +78,7 @@ uintptr_t type_impl(const Tdb& tdb, uint32_t index) {
     return tdb.types_impl + bits(second, tdb.wide ? 38 : 36, 18) * kTypeImplSize;
 }
 
-// Name and namespace offsets in the string pool: two int32 (TDB 69/70/81), or 28-bit fields of one qword (83).
+// Name and namespace offsets in the string pool: two int32 (TDB 69/70/81/82), or 28-bit fields of one qword (83).
 bool type_names(const Tdb& tdb, uint32_t index, uint32_t names[2]) {
     const uintptr_t impl = type_impl(tdb, index);
     if (!impl) return false;

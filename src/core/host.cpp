@@ -402,10 +402,12 @@ void register_views() {
 bool start_gyro() {
     const std::wstring dll = settings::install_dir() + L"\\gyrolib.dll";
     if (!deps::check_gyrolib(dll)) return false;  // the game's own runtime DLLs would crash GyroLib
-    if (!LoadLibraryW(dll.c_str())) {
+    HMODULE gyrolib = LoadLibraryW(dll.c_str());
+    if (!gyrolib) {
         log("gyro: cannot load %s (error %lu)", narrow(dll).c_str(), GetLastError());
         return false;
     }
+    deps::guard_sdl_thread_names(gyrolib);
     log("gyro: GyroLib ABI %u (built against SDK %s)", gl_abi_version(), GL_VERSION_STRING);
     g_gyro.emplace();
     gl_context* ctx = g_gyro->get();

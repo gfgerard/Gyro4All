@@ -24,8 +24,9 @@ How a camera gets supported: `camera_finder.lua` finds in game which rotation tu
 
 ## 1. List the game's camera classes: `tdbdump.py`
 
-Reads the type database (TDB) in the game's exe on disk. Supports TDB 69/70 (RE7, RE2/RE3 RT, RE8), 81 (Monster
-Hunter Wilds) and 83 (RE Requiem, Pragmata); it prints the version on the first line.
+Reads the type database (TDB) in the game's exe on disk. Supports TDB 69/70 (RE7, RE2/RE3 RT, RE8), 71 (RE4 remake), 81
+(Monster Hunter Wilds), 82 (Onimusha: Way of the Sword) and 83 (RE Requiem, Pragmata); it prints the version on the first
+line.
 
 ```bash
 python -I tools/reEngine/tdbdump.py "<game folder>/<game>.exe" --find "Camera"
