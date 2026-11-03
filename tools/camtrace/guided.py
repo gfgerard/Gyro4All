@@ -229,7 +229,24 @@ def main():
     count = lambda: {name(x): sum(len(c[0]) for c in v.values()) for x, v in cand.items() if v}
     log(f"after pose 2 ({time.time() - t:.0f} s): {count()}")
     prev = v2
+
+    def refresh():
+        # Right before a move: the view and every candidate as they are now. A view that drifts while the user waits
+        # (RDR2's camera recenters behind the character; pose 2's comparison takes minutes) otherwise drops them all.
+        bufs = {}
+        for x in cand:
+            for s, (idx, last, r) in list(cand[x].items()):
+                if s not in bufs: bufs[s] = p.read(s, sizes[s])
+                if not bufs[s]: continue
+                a_ = arr(bufs[s], x[1]); keep = idx + max(x[2]) < len(a_)
+                cand[x][s] = (idx[keep], take(a_, idx[keep], x[2]), r[keep] if r is not None else None)
+        return view_now()
+
     for k in range(3, a.poses + 1):
+        now_v = refresh()
+        if abs(wrap(now_v[0] - prev[0], 360.0)) > TOL or abs(now_v[1] - prev[1]) > TOL:
+            log(f"the view drifted while waiting: {prev[0]:.1f}/{prev[1]:.1f} -> {now_v[0]:.1f}/{now_v[1]:.1f}")
+        prev = now_v
         move(); cur = view_now(); mv = Move(prev, cur); bufs = {}
         for x in cand:
             nxt = {}

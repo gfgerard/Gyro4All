@@ -55,6 +55,7 @@
 | Pacific Drive | ✅ Works | Unreal Engine 4.27 | Gyro on foot **and** in the car. |
 | PAYDAY 3 | ✅ Works | Unreal Engine 5.5.4 | ✅⚠️ **Always-online co-op game: use at your own risk**, in private or solo lobbies only. Its profile lets the gyro follow the camera during actions that take it over. |
 | Pragmata | ✅ Works, **with [REFramework](https://github.com/praydog/REFramework)** | RE Engine | Install next to `PRAGMATA.exe` in the game's main folder, **together with a recent REFramework**: the game has Capcom's anti-tamper, which crashes the game about 30 s after start without it (an older REFramework build crashed it too). **Turn off the game's own gyro option** (it works while aiming with L2): Gyro4All's gyro also works while aiming, and the two would add up. |
+| Red Dead Redemption 2 | ✅ Works (tested on the Rockstar launcher version) | RAGE | Install next to `RDR2.exe` in the game's main folder. Story mode only: never play Red Dead Online with it. The binoculars turn through the right stick (less precise). |
 | Remnant 2 | ✅ Works | Unreal Engine 5 | Needs the profile provided |
 | Resident Evil 2 (remake) | ✅ Works (tested on the Game Pass & Steam versions) | RE Engine | Install next to `re2.exe` in the game's main folder **as `version.dll`** (rename `winmm.dll`): this version never loads a `winmm.dll` from its folder. Gyro in free look and while aiming; off in the inventory, the pause menu, cutscenes and fixed or puzzle cameras. REFramework is not needed. The game reads the DualSense through DirectInput; Gyro4All can't show a controller as an Xbox one in this version. |
 | Resident Evil 3 (remake) | ✅ Works (tested on the Game Pass version) | RE Engine | Install next to `re3.exe` in the game's main folder **as `version.dll`** (rename `winmm.dll`), as for RE2. Gyro in free look and while aiming; off in the inventory, the pause menu, cutscenes and fixed cameras. REFramework is not needed. The game reads the DualSense through DirectInput; Gyro4All can't show a controller as an Xbox one in this version. |
@@ -99,7 +100,6 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 | BioShock 2 | Unreal Engine 2.5 (modified) | 2010 | 32bit |
 | BioShock Infinite | Unreal Engine 3 | 2013 | 32bit |
 | Subnautica | Unity | 2018 | |
-| Red Dead Redemption 2 | RAGE | 2019 | Never online (Rockstar anti-cheat) |
 | Cyberpunk 2077 | REDengine 4 | 2020 | |
 | Death Stranding | Decima | 2019 | |
 | Death Stranding 2 | Decima | 2025 | |

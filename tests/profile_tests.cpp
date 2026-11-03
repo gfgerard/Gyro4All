@@ -828,6 +828,20 @@ void test_stick_fallback_not_when_writes_last() {
     CHECK(s.x == 0 && s.y == 0);
 }
 
+void test_stick_fallback_not_at_pitch_limit() {
+    StickSim s;
+    for (int i = 0; i < 200; ++i) {
+        s.frame(1.0, 0.2);
+        s.pitch = std::min(s.pitch, 30.0);  // the game's pitch limit stops the pitch part of each write
+    }
+    CHECK(!s.fb.active());
+    for (int i = 0; i < 100; ++i) {
+        s.frame(1.0, 0);  // pitch only, against the limit: no verdict
+        s.pitch = std::min(s.pitch, 30.0);
+    }
+    CHECK(!s.fb.active());
+}
+
 void test_stick_fallback_starts_the_right_way() {
     StickSim s;
     s.undoes = true;
@@ -1472,6 +1486,7 @@ int main() {
     test_split();
     test_stick_model();
     test_stick_fallback_not_when_writes_last();
+    test_stick_fallback_not_at_pitch_limit();
     test_stick_fallback_starts_the_right_way();
     test_stick_fallback_ends_when_writes_last_again();
     test_stick_fallback_ends_on_another_camera();

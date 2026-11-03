@@ -822,6 +822,7 @@ void install(const Settings& settings) {
         log("xinput: protected exe: XInputGetState hooked inline (%s%s%s)", any ? "xinput9_1_0/xinput1_3" : "",
             any && any14 ? ", " : "", any14 ? "xinput1_4 with GyroLib's calls passed through" : "");
         nativepad::refuse_pads(g_settings.mode == Always);
+        dinputpad::refuse_pads(g_settings.mode == Always);
         if (g_settings.mode == Always)
             log("xinput: XInput=2: the game's own access to PlayStation/Nintendo controllers is refused; it only gets the Xbox controller");
         if (g_settings.mode == Auto) dinputpad::on_read(&di_read);
@@ -848,6 +849,7 @@ void install(const Settings& settings) {
     hooks::add(nullptr, "GetRawInputData", reinterpret_cast<void*>(&hk_get_raw_data), reinterpret_cast<void**>(&g_get_raw_data));
     hooks::add(nullptr, "GetRawInputBuffer", reinterpret_cast<void*>(&hk_get_raw_buffer), reinterpret_cast<void**>(&g_get_raw_buffer));
     nativepad::refuse_pads(g_settings.mode == Always);
+    dinputpad::refuse_pads(g_settings.mode == Always);
     if (g_settings.mode == Always)
         log("xinput: XInput=2: the game's own access to PlayStation/Nintendo controllers is refused; it only gets the Xbox controller");
     if (g_settings.mode == Auto) {

@@ -42,6 +42,10 @@ void set_capture(bool mouse, bool keyboard);
 // own low-level mouse hook on Acquire, ahead of any installed before it (steammouse.cpp re-installs its hook after).
 uint32_t mouse_acquires();
 
+// XInput=2: the game's DirectInput opens of PlayStation and Nintendo controllers fail (DIERR_DEVICENOTREG), so it only
+// gets the Xbox controller (RDR2 opens the DualSense through DirectInput and leaves the Xbox one unused).
+void refuse_pads(bool refuse);
+
 // Stick fallback (stick_fallback.hpp; game thread): right-stick deflection added to what the game's GetDeviceState
 // returns (x right, y up, -1..1; 0, 0 = none). Standard joystick formats only, right stick on Z/Rz (PlayStation
 // controllers).

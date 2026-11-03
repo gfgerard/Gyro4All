@@ -317,6 +317,9 @@ HRESULT STDMETHODCALLTYPE hk_cooperative(void* device, HWND window, DWORD flags)
     return hr;
 }
 
+std::atomic<bool> g_refuse{false};  // XInput=2
+std::atomic<int> g_refused{0};
+
 HRESULT STDMETHODCALLTYPE hk_create_device(void* input, REFGUID guid, void** out, LPUNKNOWN outer) {
     const void* caller = _ReturnAddress();
     auto real = reinterpret_cast<CreateDevice_t>(g_create_device.original_for(input));
@@ -353,6 +356,14 @@ HRESULT STDMETHODCALLTYPE hk_create_device(void* input, REFGUID guid, void** out
         SUCCEEDED(reinterpret_cast<GetProperty_t>(method(device, kGetProperty))(device, DIPROP_VIDPID, &vidpid.diph))
             ? (vidpid.dwData & 0xFFFF) << 16 | vidpid.dwData >> 16
             : 0;
+    if (const uint16_t vendor = uint16_t(id >> 16); g_refuse && (vendor == 0x054C || vendor == 0x057E)) {
+        static_cast<IUnknown*>(device)->Release();
+        *out = nullptr;
+        if (g_refused++ < 4)
+            log("dinputpad: XInput=2: the game's DirectInput open of controller %04X:%04X refused (it gets the Xbox "
+                "controller)", id >> 16, id & 0xFFFF);
+        return DIERR_DEVICENOTREG;
+    }
     g_get_state.patch(device, kGetDeviceState, reinterpret_cast<void*>(&hk_get_state));
     g_get_data.patch(device, kGetDeviceData, reinterpret_cast<void*>(&hk_get_data));
     for (Pad& p : g_pads) {
@@ -434,6 +445,8 @@ void set_capture(bool mouse, bool keyboard) {
             levels.c_str());
     }
 }
+
+void refuse_pads(bool refuse) { g_refuse = refuse; }
 
 void set_stick(float x, float y) {
     g_stick_x.store(x, std::memory_order_relaxed);

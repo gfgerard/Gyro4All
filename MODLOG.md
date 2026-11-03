@@ -6902,3 +6902,206 @@ heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 1
   Docs: GAMES.md row (minimal), ADVANCED.md table row, tools/reEngine/README.md TDB list (71, 82 added).
   Still open: yaw direction not explicitly confirmed by the user; a few fallbacks around `camera none` /
   `cCameraParamArgument_TPLookAtSet` in combat; Issen (mode 1) and the action/motion/rail/dialogue cameras not looked at.
+
+## 2026-11-03 Red Dead Redemption 2 (Rockstar launcher, RAGE, 1.0.1491.50): recon and the RAGE module's first slice
+- Recon in `games/RedDeadRedemption2/MODDING_PLAN.md`. RAGE, native x64; `.text` encrypted at rest (entropy 8.00, plus a
+  second `.text` section at the end; Arxan-style anti-tamper is my guess, unconfirmed); not Denuvo; no anti-cheat in the
+  folder; story mode only, never Online. Imports `XINPUT9_1_0`, `DINPUT8`, `WINMM`, `VERSION`. `dinput8.dll` is taken by
+  the ASI loader (ScriptHookRDR2), so the proxy goes in as `winmm.dll` (or `version.dll`). The user's install also has
+  `DualSense.asi` (adaptive triggers, its own HID access through an out-of-process controller service): possible
+  fight with SDL over the pad.
+- New engine module `src/engines/rage/` (`RAGE`, last in the registry): detected by `common_0.rpf` and
+  `shaders_x64.rpf` next to the exe. No camera hook yet: `no_camera`, default view, held while a mouse cursor is shown,
+  `sees_menus` false, so the gyro goes to the game as right stick through `XInput=1`. Builds, 851 checks pass.
+  **Not deployed, not tested in game.**
+- Next: install `winmm.dll` (user's OK), check the proxy loads under the Rockstar launcher next to the ASI loader and
+  that the game takes the translated pad; first with `DualSense.asi` renamed, then with it. Then the camera: camtrace's
+  guided search (read-only), then `WriteWatch` (no debugger here); then the FOV.
+- GTA IV (Steam, `Grand Theft Auto IV\GTAIV`): `GTAIV.exe` is **32-bit** (i386), only `PlayGTAIV.exe` (launcher) is
+  x64. Gyro4All is built x64 only, so it cannot load into GTA IV; do not deploy it there (a 64-bit `winmm.dll` would
+  also break the 32-bit game's load). No `.rpf` at the root: loose `common\data` and `pc\data` folders (plus `TLAD`,
+  `TBoGT`). RAGE detection now also matches those folders, and `PlayGTAIV.exe` is a launcher (`is_launcher`), ready
+  for an x86 build. That install also has RTX Remix (`d3d9.dll`), an ASI loader (`dinput8.dll`) and `steam_api.dll`.
+- **First run (13:26, DualSense 054C:0CE6):** proxy loads under the Rockstar launcher, `engine: RAGE (detected)`, no
+  crash. But no gyro frame ever ran: the game window (class `sgaWindow`, title "Red Dead Redemption 2") is pumped by
+  another thread (PeekMessageW only on that thread), not the DllMain thread chosen as game thread. Fix:
+  `window_class`/`pump_window_class` = `sgaWindow`. Input seen: the game polls `XInputGetState` *and* reads the DualSense
+  itself through DirectInput (`GetDeviceState`, DIJOYSTATE2, from `RDR2.exe+0x263B07C`; also `socialclub.dll`), and
+  checks XInput devices through WMI. A hidden `DIEmWin` window lives on another thread.
+- **Second run (13:32, sgaWindow fix):** `thread ... pumps the game window (class sgaWindow) and becomes the game
+  thread`; GyroLib starts, SDL reader on, DualSense shown as XInput controller 0; the game polls `XInputGetState` slot 0
+  ~80/s and gets the gyro stick (up to 0.55). Gyro off while a cursor is shown (alt-tab / launcher focus). Whether the
+  camera actually turns with the gyro stick still to be confirmed by the user (the game also opens the DualSense over
+  DirectInput).
+- **Pad doesn't work in menus (XInput=1 and XInput=2, `DualSense.asi` off):** glyphs show, no response. The game polls
+  slot 0 of the translated pad and gets real buttons/sticks (13:32 run), yet ignores them; it also opens and reads the
+  DualSense over DirectInput (`CreateDevice`, `GetDeviceState` DIJOYSTATE2 from `RDR2.exe+0x263B07C`), which RDR2 has
+  no mapping for (no native DualSense support; the user's previous setup got XInput from Steam Input through
+  `OriginSteamOverlayLauncher` as a non-Steam game). XInput=2 only refused HID/Raw Input opens, not DirectInput ones.
+  Change: `dinputpad::refuse_pads` (XInput=2): the game's DirectInput `CreateDevice` of a 054C/057E controller is
+  released and fails with `DIERR_DEVICENOTREG`. Builds, 851 checks pass. Not deployed yet (game running).
+- **DirectInput refusal works** (`dinputpad: XInput=2: the game's DirectInput open of controller 054C:0CE6 refused`),
+  but still no input. Real cause: the `sgaWindow` thread pumps messages only now and then in the front end/menus
+  (`PeekMessageW calls ... 3996:22/51` in 10 s, then none for 20+ s), so the gyro frame (and with it the translated XInput
+  state) barely ran and the game read a frozen all-zero pad (sticks exactly 0..0, unlike the idle 128/-128 when frames
+  run). Fix: `RageEngine::frame_source`, the module's own thread runs the frame on a 4 ms high-resolution timer
+  (no Present hook: `present: -` in perf, the panel never hooks this game's swapchain). `pump_window_class` dropped.
+- **Works (user, DualSense, Rockstar launcher, no Steam Input, `DualSense.asi` off, XInput=2):** the pad responds in the
+  menus and in game, the settings panel works and the blind stick fallback turns the camera with the gyro.
+- **Camera search, guided.py (read-only):** run 1: view reference `exe+0x3ec0a50` (unit forward vector, 133 identical
+  copies, also heap groups at 0x...dcac080 etc.); nothing survived pose 3: pose 2's comparison took 177 s and every
+  candidate (even the reference's own copies) dropped at the next move, most likely the view drifting while waiting.
+  `guided.py` now re-reads the view and the candidates right before each later move and logs a drift. Run 2: reference
+  a heap copy (138 copies); the game went away during pose 2 (reads failed, guided.py died on a None read; RDR2 no
+  longer running, Gyro4All.log just stops at 14:09:55, no crash dump in `crashpad`). RAM: game 6.2 GB working set, two
+  full snapshots ~10.7 GB with 12 GB free.
+  Run 3 (with the re-read): reference a heap forward-vector group (229 copies), moves yaw -166/-155, pitch -9/-79;
+  thousands of stored-angle candidates after pose 2, a few dozen after pose 4, none after pose 6: no stored yaw/pitch
+  angle (any unit, f4/f8/i2/i4) follows the view, only copies of it. Like Zombie Army 4, the view seems rebuilt each
+  frame (or kept as an orbit not in plain angles).
+- `exe+0x3ec0a50` is a static camera block: rows right `+0x00`, forward `+0x10`, up `+0x20`, position `+0x30` (w=1),
+  then a projection: `+0x40` = 1.2389 (x scale), `+0x54` = 2.2024 (y scale = 1/tan(vfov/2): 48.9 deg vertical, aspect
+  1.778), `+0x60` -0.0003/0.0001/-1/-1, `+0x78` -0.05 (near plane). A FOV candidate for zoom compensation (a copy).
+- Next: WriteWatch (`WriteWatch=on` in the game's Gyro4All.ini, game restarted) on `exe+0x3ec0a50`, following the
+  writer back; or forward from the stick (`r:xi+c`).
+- **FOV found (read-only, live):** `[exe+0x3ec0aa4]` float = the projection's y scale, 1/tan(vfov/2), updated every
+  frame with the view (the forward row at `exe+0x3ec0a60` moves with it). On foot, unaimed: 2.2024 (48.9 deg vertical);
+  aiming a rifle without a scope (L2): eases in over ~0.25 s to 3.1716 (35.0 deg) and back out over ~1.4 s on release;
+  small changes while moving (2.20-2.26, ~48-49 deg). Vertical FOV = 2*atan(1/value). Exe-relative in 1.0.1491.50; a code
+  signature is still needed for other versions.
+- **WriteWatch (no debugger; the anti-tamper did not react, game kept running):**
+  - `exe+0x3ec0a50` (the static camera block): written only by a generic 0x630+-byte struct copy at `exe+0x2F1640`
+    (`movups` rows from `[rdx]` to `[rcx]`; caller `exe+0x2F152D`), so the block is a global render viewport copied
+    from a heap viewport that changes every frame (WriteWatch on one source caught nothing).
+  - Pad objects: `exe+0x5718890`, 0x180 bytes per pad (index = (obj - base) / 0x180, from the connection check that
+    calls XInputGetState at `exe+0x263ACD1`). Pad 0's right stick as floats -1..1: X `+0xAC` (`exe+0x571893C`), Y `+0xB0`;
+    the last frame's copy at `+0x104`/`+0x108`. Readers of `+0xAC` in 10 s: `exe+0x262F4B5` (clear), `exe+0x2639A99`
+    (pad update, source ids 0x3011/0x3012), `exe+0xABD983` (front end, converts to ints), `exe+0x263C636`/`+0x263C66E`
+    (input mapper thread, source ids 0x1005-0x1011 threshold checks: last-input/direction detection). No camera reader
+    seen directly: the camera reads mapped control values, not the pad.
+  - `r:xi+c` (XInputGetState's buffer) is on the caller's stack and reused: only noise.
+  - Write-test of all 348 heap copies of the forward vector (rotated 20 deg about Z): every live copy rewritten; 5
+    kept were dead (view unchanged). A lone camera-frame-like copy (position row then axes, 0x27fdce1bbd0 in that run) is
+    written by `exe+0x2D22F1F` (copies 0x40 bytes from `[[rcx+0x48]+0x40]`), another copy.
+- **ScriptHookRDR2 route (the user's install has ScriptHookRDR2 v1.0.1491.17 + an ASI loader `dinput8.dll`):** research
+  probe `games/RedDeadRedemption2/camprobe/camprobe.asi` (git-ignored, never shipped) calls natives by hash through
+  ScriptHook's exports (`nativeInit`/`nativePush64`/`nativeCall`/`scriptRegister`/`scriptWait`, C++-mangled names) and
+  logs them to `Gyro4All\camprobe.log`; F8/F9 set the relative heading/pitch. Hashes (RDR2): GET/SET_GAMEPLAY_CAM_
+  RELATIVE_HEADING 0xC4ABF536048998AA / 0x5D1EB123EAC5D071, GET/SET_..._PITCH 0x99AADEBBA803F827 / 0xFB760AF4F537B8BF,
+  GET_GAMEPLAY_CAM_FOV 0xF6A96E5ACEEC6E50 (51.28 on foot), GET_GAMEPLAY_CAM_ROT 0x0252D2B5582957A6. **Both setters turn
+  the camera in game (user, F8/F9)**; the setters take (degrees, rate), rate 1.0 = at once.
+  - No game memory holds the relative heading as a value (only ScriptHook's own result slots matched): the getter
+    computes it. Handlers (from ScriptHook's native cache, the hash followed by the handler pointer): GET heading
+    `exe+0xF617F4`, GET pitch `exe+0xF61820`, SET heading `exe+0xF648C4` -> `exe+0xF75C50`, SET pitch `exe+0xF648D8` ->
+    `exe+0xF75CB8`.
+  - Gameplay camera director: `[exe+0x3ea05e8]` (`exe+0x173f44` returns it). Active camera `director+0x7a0` (also
+    `exe+0x441b50(director)`). Relative heading = `exe+0x441498(director)`: heading of the camera's matrix (at
+    `cam+0x20`, or `cam+0xF0` when `cam+0x4b4` bit 0) minus the attach parent's heading (`[cam vtable+0x20]()` matrix);
+    radians, times `exe+0x3311394` (180/pi) in the handler.
+  - SET heading writes a request into the director: `+0xD90` heading (radians, wrapped by `exe+0x176d58`), `+0xD94`
+    rate, `+0xDA8 = 1`; SET pitch `+0xD98` (clamped to `exe+0x33113b4`..`exe+0x3311374`), `+0xD9C`, `+0xDA9 = 1`.
+    `exe+0x42055a` (director update) hands them to the camera (`exe+0x451754` heading / `exe+0x45186c` pitch): camera
+    `+0x864` heading, `+0x868` pitch, `+0x86c`/`+0x870` rates, flags `+0x8a8` (2 heading, 4 pitch pending). The camera's
+    update `exe+0x42156c` -> `exe+0x421584(cam, float* heading, float* pitch)` blends the parent heading + request into
+    the two outputs (world radians), then clears the flags. Those output pointers are the camera's orientation state
+    (not yet located; the update has no direct caller or vtable slot found).
+  - WriteWatch on the director's request field caught nothing (0 hits in 20 and 30 s although the request was set and
+    consumed): the game's main thread, where scripts and the camera update run, likely gets its debug registers cleared.
+  - **Natives turn (RageCamMode 0/1, in game): not usable.** Each frame GET + gyro + SET: rate 1.0 (>= 0.9999989 at
+    `exe+0x331136c`) makes the camera delete its helper (`cam+0x458`, `exe+0x4537a0`) on every set: a jump every ~200 ms.
+    Rate 0.99 blends instead, but the read-back drifts: the pitch sank to the -70 deg limit and the requests, re-set ~260
+    times a second, blocked both the gyro and the right stick (user).
+  - **The camera's orientation state: its stored front `cam+0x7b0`** (unit world vector x, y, z; heading = atan2(-x, y),
+    growing to the left; pitch = asin(z)). The orientation update is the camera vtable's `+0x248` slot (`exe+0x421584`
+    for the on-foot camera, vtable `exe+0x339a6c0`), called from `exe+0x45bae5` with two stack outputs: it reads
+    `cam+0x7b0` (`exe+0x4216c4`, through the parent matrix `cam+0x6c0` when `exe+0x452bc8` says so), turns it into
+    heading/pitch (`exe+0x1707e4`) and blends in the director's request. The caller then adds vtable `+0x230` (the sum of
+    the camera's modifiers in `cam+0x4c8`, `+0x100` each), `exe+0x467c50`, `cam+0x860` (heading) and `cam+0x8a4`
+    (pitch), clamps the pitch to `cam+0x828..0x82c`, rebuilds the front (`exe+0x173618`) and stores it back at
+    `cam+0x7b0` (`exe+0x45bcae`).
+  - **Turning `cam+0x7b0` works (user, DualSense, XInput=2, RageCamMode=2):** the ScriptHook script (game thread,
+    between camera updates) turns the front by the gyro, about 100 turns a second, no stick fallback in 1.5 minutes on foot
+    (drift and the right stick alongside the gyro not yet confirmed).
+    The first try fell back to the stick after 6 s: the core's write check read the camera before the script had
+    written the queued turn ("undid the gyro's writes 8 frames in a row"); `view_angles` now adds the queued turn.
+    RageCamMode=3 (the same write from Gyro4All's frame thread, no ScriptHook) is not tested yet. Aiming, horseback and
+    FOV zoom compensation not checked yet.
+  - **RageCamMode=3 (memory only, no ScriptHook) runs in game:** the frame thread turns `cam+0x7b0` directly
+    (`camera mode 3 running`, no stick fallback). Watching the director's active camera while the user aimed and rode:
+    two camera classes, vtables `exe+0x339a6c0` (slot `+0x248` = `exe+0x421584`) and `exe+0x3399308` (slot `+0x248` =
+    `exe+0x42156c`, which skips the update when `cam+0x9d8` bit 0 and then jumps to `exe+0x421584`). Both keep a unit
+    front at `+0x7b0`. The game creates a new camera object on each switch (a new pointer each time), so the module reads
+    `[[exe+0x3ea05e8]+0x7a0]` every frame.
+  - **User test, mode 3 (DualSense, XInput=2): everything works.** That covers on foot, aiming (L2) and horseback, the
+    right stick alongside the gyro, and no drift. The module is now memory-only: the ScriptHook script, the natives and
+    the RageCamMode/RageCamRate settings were removed. The frame thread turns `[[exe+0x3ea05e8]+0x7a0]+0x7b0` and
+    reports that address as the camera to the stick fallback (a new object on each camera switch). Without a readable
+    unit front (loading), the gyro goes to the stick. Next: FOV zoom compensation (`[exe+0x3ec0aa4]` =
+    1/tan(vfov/2), or the camera's own FOV field).
+  - **FOV for zoom compensation (in game, user):** `[exe+0x3ec0aa4]` (vertical FOV = 2*atan(1/value)) reported as the
+    current FOV, against `ZoomReferenceFOV=` or the widest seen (51.3 deg vertical on foot; 35.0 aiming, 22.6
+    binoculars). Note: the render block `exe+0x3ec0a50` is a view matrix: its columns are right, up and -forward.
+  - **Aim release damping (fixed, user):** after a camera switch the director keeps the previous camera at
+    `director+0x7a8` for ~1.5 s and blends the view from it. That camera no longer updates (its front and frame stay
+    frozen), so the gyro's turn barely showed and the follow check sometimes fell back to the stick. The module now
+    also turns that camera's front and its frame rows (right `+0x20`, forward `+0x30`, up `+0x40`).
+  - Camera classes by vtable: `exe+0x339a6c0` on foot, `exe+0x3399308` aiming, `exe+0x3399c08` binoculars (first
+    person, FOV 22.6). Their update is vtable slot `+0xc8` (`exe+0x45abe0` / `exe+0x45c3a0` / `exe+0x45a278`).
+  - **Binoculars: no turnable state found yet.** Their camera's `+0x7b0` is not a unit vector. Its frame (`+0x20`,
+    with a copy at `+0xf0`) follows the view, but writes to either or both don't stick (rebuilt every frame: write test
+    0.0 of 20 deg). No field of its first 0x1000 bytes tracks the view as an angle (only the frame rows; `+0x544`/`+0x54c`
+    follow the pitch at a 0.6 scale). Its orientation probably comes from the ped (head/body). For now the module reads
+    its view from the frame and writes the turn there; the game undoes it, so the stick fallback learns the binoculars'
+    stick speeds from the view instead of running blind.
+  - **Binoculars, guided search (`tools/camtrace/guided.py`, 6 moves with the binoculars up):** no stored yaw in
+    degrees, radians or turn units, and no quaternion, followed every move. Pitch was not tested because the first two
+    moves changed it by less than 5 deg. The yaw survivors were HUD compass integers (whole degrees, e.g. `exe+0x5b84de0`,
+    `exe+0x3ed1c30`), view-direction copies, and a few heap floats at about -0.0175 per degree (radians, relative to
+    the body). Write tests on those (+0.35 rad) stuck but didn't move the view, and one had been freed by then: these
+    are stale or unused copies, not the source. The game crashed right after the last write (its object was freed during
+    the test): write-test heap candidates right after the search, before the view mode changes. Next, if needed: `WriteWatch` forward from the right stick
+    (`r:xi+c`) with the binoculars up, or read the binocular update `exe+0x45a278` offline.
+- 2026-11-03 **RDR2: slight flicker on slow gyro pans at 60 FPS (user), measured.** A read-only sampler of the active
+  camera's frame forward row (`[[exe+0x3ea05e8]+0x7a0]+0x30`, written by the game once per camera update; the render
+  view matrix at `exe+0x3ec0a50` only changes 30 times a second, double-buffered presumably) during slow pans: stick
+  steps per update even (-0.922 -0.891 -0.903 -0.908 -0.939 -0.905 deg, about 2%), gyro steps uneven (-0.640 -0.836
+  -0.812 -0.587 -0.750 -0.740 -0.000 -0.709 deg, about 20%, an update now and then with no step). Cause: the module's
+  frame thread wrote the front every 4 ms, out of step with the game's updates (4 or 5 turns per 16.7 ms update, and a
+  write landing between the update's read and store of the front is lost). The row changes twice within the same
+  update sometimes (intervals near 0 ms in the sample).
+  - Change: the frame thread polls that row every 1 ms and runs the gyro frame right after it changes (a change within
+    6 ms of the last is the same update), so each update takes one turn written well before its next read; without a
+    change for 20 ms (still view, menus, loading) the frame runs anyway (50 Hz there instead of 250). Built; not tested.
+  - **Deployed; sampler again (slow pans, same-update row changes merged):** 60 updates/s. Gyro step variation median
+    0.036 (p75 0.083, p90 0.146), 0 updates without a step while turning; stick 0.018 (p75 0.066). Gyro steps ramp
+    evenly (+0.027 +0.043 +0.052 +0.082 +0.113 +0.153 +0.183 +0.217 deg). Before: visibly about 20% (-0.640 -0.836
+    -0.812 -0.587 -0.750 ...) with updates without a step. User: "smooth now" (slow-pan flicker gone).
+- 2026-11-03 **RDR2: Adapt to Zoom halved the gyro on the normal camera (user: gyro X sensitivity 1.0 gives 1:1 turns,
+  Adapt to Zoom on gives half).** Log: `rage: widest FOV seen 90.0 degrees vertical (zoom reference)` at the moment the
+  gameplay camera appeared after a load (a default 90-degree projection for a frame), then `field of view 48.8, unzoomed
+  90.0 ... gyro x0.454`. The widest-seen reference also can't fit the game's several unzoomed cameras (first person and
+  three third-person distances, on foot and on horse, each with its own FOV: user).
+  - Change: the reference is the FOV of the active camera whenever it isn't a zoom camera (vtable `exe+0x3399308`
+    aiming, `exe+0x3399c08` binoculars), held while a zoom camera is active (`rage: zoom camera (aim or binoculars):
+    unzoomed FOV ...`). So every free camera turns 1:1 and only aim/binoculars are compensated, against the camera
+    they started from. `ZoomReferenceFOV=` still overrides. Built; not tested. Unknown: whether first-person aiming,
+    scopes or aiming on horseback use the same aim class (if not, they get no compensation).
+- 2026-11-03 **RDR2 works with the default `XInput=1` (user)**, now that the module's own frame thread keeps the
+  translated pad updated in menus: the `XInput=2` note was removed from `docs/GAMES.md`.
+- 2026-11-03 **RDR2: stick fallback when looking up or down against the pitch limit (user confirmed).** Log: four
+  `the game undid the gyro's camera writes 8 frames in a row` / `off` switches in 7 s, no camera change, and a stick
+  model learnt from that mix saved to the game folder's `profiles\RDR2.ini`
+  (`StickFallbackLearned=axial,0.075,1.50,508.8,151.1,0`, implausible). Cause: the core's check (`stick_fallback.cpp`)
+  summed both axes, so the game's pitch limit stopping the pitch part of each write read as the write being undone.
+  - Change (core, all engines): writes are judged on yaw alone (no yaw limit); a pitch-only write gets no verdict.
+    New unit test `test_stick_fallback_not_at_pitch_limit`; 853 checks pass. Not deployed yet.
+  - Zoom check (user: aiming felt like the same sensitivity): the 30 s status lines never fell during an aim, and the
+    aim's FOV (35.0 against 48.8-52.0 vertical) only gives x0.69. New log line at the end of each zoom camera:
+    `rage: zoom camera ended: narrowest FOV ... of ... degrees vertical (gyro x... with Adapt to Zoom)`. Built with the
+    yaw-only fallback fix; 853 checks pass. Deployed; the learnt `StickFallbackLearned=` line removed from the game
+    folder's `profiles\RDR2.ini` (user OK).
+  - **Tested (user: "todo correcto"):** no stick fallback against the pitch limit. Zoom log over 17 aims: narrowest FOV
+    45.0 vertical against 45.0-50.0 unzoomed (gyro x0.89-0.91; one 37.4 of 48.8), so aiming a rifle without a scope
+    zooms only that far in this run; re-aiming during the FOV's ease back takes the eased FOV as unzoomed (45.3-48.5).
+    Two short stick fallback runs remained (18:53:23 for 1 s, 18:54:51 for 4 s, no model saved), cause not identified.
+    The `zoom camera ended` log line was removed again (user).

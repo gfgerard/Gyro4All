@@ -82,13 +82,13 @@ void StickFallback::frame(bool known, double pitch, double yaw, uintptr_t camera
     // be with it (both after the turn our own stick should have made); neither, or the player's stick moving: no verdict.
     // While the fallback runs, the stick's own turn in that frame is taken as last frame's (the stick still carries
     // the gyro's turn on a probe frame, so it stays steady; no model or lag needed).
+    // Judged on yaw alone: the game's pitch limit stops the pitch part of a write as if it were undone (RDR2: looking
+    // up or down against the limit started the fallback, MODLOG 2026-11-03), and yaw has no limit.
     if (write_.valid && write_.camera == camera && !player_stick) {
-        const double stick_yaw = on_ ? last_turn_yaw_ : 0, stick_pitch = on_ ? last_turn_pitch_ : 0;
-        const double step = std::abs(write_.pitch) + std::abs(write_.yaw);
-        const double base_pitch = write_.pre_pitch + stick_pitch, base_yaw = write_.pre_yaw + stick_yaw;
-        const double undone = std::abs(wrap180(pitch - base_pitch)) + std::abs(wrap180(yaw - base_yaw));
-        const double kept =
-            std::abs(wrap180(pitch - base_pitch - write_.pitch)) + std::abs(wrap180(yaw - base_yaw - write_.yaw));
+        const double stick_yaw = on_ ? last_turn_yaw_ : 0;
+        const double step = std::abs(write_.yaw);
+        const double base_yaw = write_.pre_yaw + stick_yaw;
+        const double undone = std::abs(wrap180(yaw - base_yaw)), kept = std::abs(wrap180(yaw - base_yaw - write_.yaw));
         if (step > kMinStep && (undone < 0.5 * step || kept < 0.5 * step)) note_write(undone < kept);
     }
     write_.valid = false;
