@@ -72,6 +72,7 @@
 | Warhammer 40,000: Space Marine 2 | ✅⚠️ Solo / private lobbies only, **with EasyAntiCheat disabled** (tested on the Steam version) | Swarm Engine | Install in `client_pc\root\bin\pc`, next to `Warhammer 40000 Space Marine 2 - Retail.exe`. Rename `msvcp140.dll` in that folder (e.g. to `.bak` incompatible VC++ old runtime shipped). |
 | Wolfenstein: The New Order | ✅ Works (tested on the Game Pass / Microsoft Store and GOG versions) | id Tech 5 | Install next to `WolfNewOrder_x64.exe` in the game's main folder |
 | Wolfenstein II: The New Colossus | ✅ Works (tested on the Game Pass / Microsoft Store version) | id Tech 6.5 | Install next to `NewColossus_x64vk.exe`  | 
+| Zombie Army 4: Dead War | ✅ Works (tested on the Epic version) | Asura | Install in `bin`, next to `ZA4_vulkan.exe` and `ZA4_dx12.exe`. Denuvo: if the game shows error `88500006` after installing or updating Gyro4All, wait 24 hours. Single-player only: never play online co-op with it. |
 
 ## Games and engines to be tested next
 
@@ -97,6 +98,5 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 | BioShock 2 | Unreal Engine 2.5 (modified) | 2010 | 32bit |
 | BioShock Infinite | Unreal Engine 3 | 2013 | 32bit |
 | Subnautica | Unity | 2018 | |
-| Zombie Army 4: Dead War | Asura (Rebellion) | 2020 | Denuvo: no debugging. Solo / offline testing only (online co-op game) |
 | Red Dead Redemption 2 | RAGE | 2019 | Never online (Rockstar anti-cheat) |
 | Cyberpunk 2077 | REDengine 4 | 2020 | |
