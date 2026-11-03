@@ -75,7 +75,8 @@ play.
   writes as the gyro (all offsets, `WorldRotation`, `OnGyro=`). Custom cameras are best effort: their level may
   not be 0. The log says `recenter: available in view N` / `unavailable in view N (...)`.
 - **Coexists with ReShade, RenoDX (HDR) and the Steam overlay.** Panel rendering runs on Gyro4All's own
-  thread, so it keeps working when the engine moves `Present`/`ResizeBuffers` between threads.
+  thread, so it keeps working when the engine moves `Present`/`ResizeBuffers` between threads. In DX12, an RGB10A2
+  swapchain on an HDR display is drawn as HDR10, as GyroLib does.
 - **Diagnostics for new games:** a status line every 30 s in `Gyro4All.log`, plus an optional probe (`F7`
   snapshot / `F8` diff) to find which rotation a game's camera actually uses.
 

@@ -7105,3 +7105,16 @@ heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 1
     zooms only that far in this run; re-aiming during the FOV's ease back takes the eased FOV as unzoomed (45.3-48.5).
     Two short stick fallback runs remained (18:53:23 for 1 s, 18:54:51 for 4 s, no model saved), cause not identified.
     The `zoom camera ended` log line was removed again (user).
+
+## 2026-11-03 Resident Evil Village: DX12 panel too bright in HDR (ReShade + RenoDX)
+
+- Backbuffer RGB10A2 (format 24), HDR10 through RenoDX, but `SetColorSpace1` was never seen on the captured swapchain
+  (log: `colour space not set by the game: the window drawn as SDR`). Likely ReShade's proxy is the captured swapchain
+  and RenoDX sets the colour space on the real one underneath, which our vtable hook doesn't cover. Drawn as SDR into a
+  PQ buffer, the panel and button showed excessive brightness and contrast.
+- Added `PanelHdr=` (Gyro4All.ini/profile; Auto, SDR, HDR10, scRGB): forces the DX12 colour space for both GyroLib's
+  panel (`gl_overlay_dx12_desc`) and the Gyro4All window. `PanelHdr=HDR10` set in this game's Gyro4All.ini.
+- Verified in game by the user (HDR10, ReShade + RenoDX): the Gyro4All window and button now match GyroLib's panel.
+- Follow-up: GyroLib's panel looked right (its AUTO rule: RGB10A2 on an HDR output = HDR10); only the Gyro4All window
+  was wrong. The DX12 window now uses the same rule when no SetColorSpace1 was seen (`guess_color_space`, IDXGIOutput6
+  ColorSpace), and `PanelHdr=` was removed again (not needed). D3D11 keeps its no-auto rule (Mortal Shell). scRGB value fixed to 1.

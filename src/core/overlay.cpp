@@ -14,7 +14,7 @@
 #include <d3d10_1.h>
 #include <d3d11.h>
 #include <d3d12.h>
-#include <dxgi1_4.h>
+#include <dxgi1_6.h>
 #include <gyro4all_panel.h>
 #include <gyrolib/gyrolib.h>
 #include <gyrolib/overlay.h>
@@ -84,6 +84,28 @@ HWND g_hwnd = nullptr;
 std::atomic<gl_overlay*> g_overlay{nullptr};
 // The DX12 swapchain's colour space (what the game last passed to SetColorSpace1), for the panel's HDR handling.
 std::atomic<uint32_t> g_dx12_color_space{G4A_COLOR_SPACE_UNKNOWN};
+// Without a seen SetColorSpace1 (ReShade with RenoDX sets it on the real swapchain under ReShade's proxy: Resident Evil
+// Village), GyroLib's own GL_OVERLAY_COLOR_SPACE_AUTO rule (RGB10A2 on an HDR output is HDR10), so the Gyro4All window
+// matches GyroLib's panel. Set at each renderer init.
+uint32_t g_auto_color_space = G4A_COLOR_SPACE_UNKNOWN;
+uint32_t dx12_color_space() {
+    const uint32_t set = g_dx12_color_space.load();
+    return set != G4A_COLOR_SPACE_UNKNOWN ? set : g_auto_color_space;
+}
+
+// HDR10 (12) when an RGB10A2 swapchain is on an output the desktop shows in HDR, else unknown.
+uint32_t guess_color_space(IDXGISwapChain3* sc, DXGI_FORMAT format) {
+    if (format != DXGI_FORMAT_R10G10B10A2_UNORM) return G4A_COLOR_SPACE_UNKNOWN;
+    IDXGIOutput* output = nullptr;
+    if (FAILED(sc->GetContainingOutput(&output)) || !output) return G4A_COLOR_SPACE_UNKNOWN;
+    IDXGIOutput6* output6 = nullptr;
+    DXGI_OUTPUT_DESC1 od{};
+    const bool hdr = SUCCEEDED(output->QueryInterface(IID_PPV_ARGS(&output6))) && SUCCEEDED(output6->GetDesc1(&od)) &&
+                     od.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    if (output6) output6->Release();
+    output->Release();
+    return hdr ? 12u : G4A_COLOR_SPACE_UNKNOWN;
+}
 // Next to gyro4all.dll's static panel: a gl_overlay that never renders and is never fed window messages. GyroLib shows
 // its per-view "Steam Input mouse" row (input.steam_mouse) only while one of its mouse bridges exists; this one gives
 // that row to the static panel. GyroLib's bridge confirms Steam's mouse from Raw Input messages it never gets here, so
@@ -190,6 +212,10 @@ void render_job() {
         swapchain->GetDesc1(&d);
         g_buffer_count = d.BufferCount;
         g_buffer_format = d.Format;
+        g_auto_color_space = guess_color_space(swapchain, d.Format);
+        if (g_auto_color_space != G4A_COLOR_SPACE_UNKNOWN && g_dx12_color_space.load() == G4A_COLOR_SPACE_UNKNOWN)
+            log("overlay: RGB10A2 on an HDR output and no colour space seen: the Gyro4All window drawn as HDR10, as "
+                "GyroLib's panel");
         log("overlay: DX12 panel ready (render worker %lu, %u buffers, format %d; GyroLib holds %ld swapchain references)",
             g_render_thread, d.BufferCount, int(d.Format), long(after) - long(before));
     }
@@ -218,7 +244,7 @@ void render_job() {
     if (cap == 0 && gl_overlay_dx12_before_resize(overlay) == GL_OK) g_buffers_held = false;
     // The Gyro4All window, after GyroLib's panel, on the same queue (gyro4all.dll's DX12 renderer; no-op when the
     // panel DLL isn't there or the window has no frame).
-    panel_host::dx12_present(swapchain, queue, g_dx12_color_space.load());
+    panel_host::dx12_present(swapchain, queue, dx12_color_space());
 }
 
 void before_resize_job() {
