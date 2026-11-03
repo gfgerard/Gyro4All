@@ -153,7 +153,7 @@ ULONGLONG g_last_update = 0;
 // The orbit update's argument: +8/+0x10 the begin and end of the 16-bit entities of every orbit camera, which it
 // integrates every frame, active or not.
 uintptr_t g_cameras = 0;
-constexpr size_t kMaxCameras = 64;
+constexpr size_t kMaxCameras = 65536;  // every 16-bit entity: no list the game can make is longer
 
 uintptr_t component(uintptr_t world_global, uintptr_t kind, uint32_t entity) {  // see the declaration above
     const uintptr_t world = world_global ? mem::rdp(world_global) : 0;
@@ -276,30 +276,46 @@ double turn_camera(uint32_t handle, uintptr_t orbit, const Limits& limits, doubl
     return (angles[1] - o.pitch) / (kPitchSense * kRad);
 }
 
-// The log line on each of the first transitions: how long, and the gyro's turns during it (MODLOG 2026-10-29).
+// The log line on each of the first transitions, and on any whose gyro frames didn't all turn the cameras (up to
+// kFailedTransitionLines): how long, the gyro's turns during it, and the size of the orbit update's camera list.
 uint32_t g_transition = 0;
 ULONGLONG g_transition_at = 0;
-int g_transitions = 0;
+int g_transitions = 0, g_failed_transitions = 0;
 double g_transition_yaw = 0, g_transition_pitch = 0;
 int g_transition_frames = 0, g_transition_turned = 0;
+size_t g_transition_list = 0;  // the camera list's length at the last frame (SIZE_MAX: unreadable)
+constexpr int kFailedTransitionLines = 50;
 
 void transition_end() {
-    if (g_transition && g_transitions <= 12)
-        log("glacier: transition camera %08X for %llu ms: %d gyro frames (%d turned cameras), asked yaw %.2f pitch %.2f",
+    const bool failed = g_transition_turned < g_transition_frames;
+    if (g_transition && (g_transitions <= 12 || (failed && g_failed_transitions < kFailedTransitionLines))) {
+        g_failed_transitions += failed;
+        log("glacier: transition camera %08X for %llu ms: %d gyro frames (%d turned cameras), asked yaw %.2f pitch %.2f, "
+            "%s",
             g_transition, GetTickCount64() - g_transition_at, g_transition_frames, g_transition_turned, g_transition_yaw,
-            g_transition_pitch);
+            g_transition_pitch,
+            g_transition_list == SIZE_MAX ? "camera list unreadable"
+                                          : std::format("{} cameras in the list", g_transition_list).c_str());
+    }
     g_transition = 0;
 }
 
-// A transition camera without an orbit (L2's zoom, about 0.5 s) blends the cameras on both sides of it, which the
-// stick keeps turning: the gyro turns every orbit camera, as the game re-aligns the one it returns to.
+// A transition camera without an orbit (L2's zoom, about 0.5 s, up to 2 s seen) blends the cameras on both sides of it,
+// which the stick keeps turning: the gyro turns every orbit camera, as the game re-aligns the one it returns to. The list
+// grows as the level streams cameras in (64 entries were too few after a while of play: the gyro then stopped for the
+// whole zoom, MODLOG 2026-11-03).
 bool turn_all(double pitch, double yaw) {
+    ++g_transition_frames;
+    g_transition_yaw += yaw;
+    g_transition_pitch += pitch;
     uintptr_t range[2] = {};
+    g_transition_list = SIZE_MAX;
     if (!g_cameras || !mem::guarded_copy(range, g_cameras + 8, sizeof range) || range[1] < range[0] ||
         range[1] - range[0] > kMaxCameras * 2)
         return false;
-    uint16_t entities[kMaxCameras] = {};
+    static uint16_t entities[kMaxCameras];  // game thread only
     const size_t n = (range[1] - range[0]) / 2;
+    g_transition_list = n;
     if (!n || !mem::guarded_copy(entities, range[0], n * 2)) return false;
     bool turned = false;
     for (size_t i = 0; i < n; ++i) {
@@ -307,10 +323,7 @@ bool turn_all(double pitch, double yaw) {
         const uintptr_t orbit = orbit_of(entities[i], limits);
         turned |= orbit && !std::isnan(turn_camera(entities[i], orbit, limits, pitch, yaw));
     }
-    ++g_transition_frames;
     g_transition_turned += turned;
-    g_transition_yaw += yaw;
-    g_transition_pitch += pitch;
     return turned;
 }
 
