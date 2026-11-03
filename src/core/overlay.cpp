@@ -1431,6 +1431,19 @@ void poll_menu_key(gl_context* ctx, bool focused) {
     }
     if ((!overlay && !panel) || !g_menu_vk) return;
     const bool down = focused && (GetAsyncKeyState(int(g_menu_vk.load())) & 0x8000) != 0;
+    // The Gyro4All window expanded alone (GyroLib's panel closed for it): the key closes it, and its release is not
+    // passed on either, so GyroLib's panel doesn't open.
+    static bool closing = false;
+    if (down && !g_menu_key_down && panel_host::settings_expanded() && !gl_panel_open(ctx)) {
+        panel_host::close_settings();
+        log("overlay: F%u pressed: Gyro4All settings closed", key);
+        closing = true;
+    }
+    if (closing) {
+        if (!down) closing = false;
+        g_menu_key_down = down;
+        return;
+    }
     if (panel) {  // GyroLib's static panel toggles itself on the configured key's first press
         if (down != g_menu_key_down) {
             panel->function_key(key, down ? 1 : 0, 0);
@@ -1448,6 +1461,44 @@ void poll_menu_key(gl_context* ctx, bool focused) {
     }
     g_menu_key_down = down;
 }
+
+void sync_settings_window(gl_context* ctx) {
+    if (!ctx || !panel_host::api()) return;
+    gl_overlay* overlay = g_overlay.load();
+    // Both panels drove ImGui from the controller at once (DX12 games: GyroLib's own context reads it through SDL, and
+    // its API has no way to stop that), so the d-pad moved through the settings of both.
+    const auto set_gyrolib_open = [&](bool open) {
+        if (overlay) {
+            if (!g_renderer_failed) gl_overlay_set_open(overlay, open ? 1 : 0);
+        } else {
+            gl_set_panel_open(ctx, open ? 1 : 0);
+        }
+    };
+    static bool was_open = false;
+    const bool open = gl_panel_open(ctx) != 0;
+    if (open && !was_open && panel_host::settings_expanded()) {
+        log("overlay: GyroLib's panel opened: Gyro4All settings folded");
+        panel_host::expand_toggle();
+    }
+    was_open = open;
+    switch (panel_host::settings_event()) {
+        case G4A_SETTINGS_EXPANDED:
+            log("overlay: Gyro4All settings expanded: GyroLib's panel closed");
+            set_gyrolib_open(false);
+            break;
+        case G4A_SETTINGS_FOLDED:
+            log("overlay: Gyro4All settings folded: GyroLib's panel reopened");
+            set_gyrolib_open(true);
+            break;
+        case G4A_SETTINGS_CLOSED:
+            log("overlay: Gyro4All settings closed");
+            set_gyrolib_open(false);
+            break;
+        default: break;
+    }
+}
+
+bool settings_open() { return panel_host::settings_expanded(); }
 
 bool gyrolib_panel() { return g_overlay.load() != nullptr; }
 

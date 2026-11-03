@@ -7,9 +7,10 @@
 
 namespace g4a::settings_ui {
 
-// Under g_lock, inside the ImGui frame, while the panel is open. dpi_scale: the window's UI scales with it and the
-// viewport resolution, as GyroLib's panel does. No-op without settings callbacks.
-void draw(float dpi_scale);
+// Under g_lock, inside the ImGui frame, while GyroLib's panel or the expanded window is open. dpi_scale: the window's
+// UI scales with it and the viewport resolution, as GyroLib's panel does. gyrolib_open: GyroLib's panel is open (the
+// folded button shows only then). No-op without settings callbacks.
+void draw(float dpi_scale, bool gyrolib_open);
 
 // create: the settings access (not copied; owned by winmm.dll, which outlives this DLL in practice: it loaded us)
 // and GyroLib's context (per-controller button naming and the selected device).
@@ -19,5 +20,10 @@ void set_settings(const g4a_settings* settings, struct gl_context* ctx);
 // ImGui's gamepad-nav focus into the window; folding returns it to GyroLib's panel window when that window is in
 // this DLL's ImGui context (non-DX12 games; in DX12 games it lives in gyrolib.dll's own context, unaffected).
 void toggle();
+// Fold without going back to GyroLib's panel (Escape, the menu key, no frame presented): everything closes.
+void close();
+bool expanded();
+// The last G4A_SETTINGS_* change since the previous call (winmm.dll opens or closes GyroLib's panel to match).
+uint32_t take_event();
 
 }  // namespace g4a::settings_ui

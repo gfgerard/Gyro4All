@@ -32,6 +32,11 @@ bool gyrolib_panel();
 // Game thread: poll the configured F-key (gl_get_menu_key) and toggle the panel on its press.
 // Window messages for that key are no longer forwarded to GyroLib, so it never toggles twice.
 void poll_menu_key(gl_context* ctx, bool focused);
+// Game thread, before process(): one panel reads the controller at a time. GyroLib's panel is closed while the Gyro4All
+// window is expanded and reopened when it folds; GyroLib's panel opened meanwhile (its Back+Start shortcut) folds the
+// window instead. settings_open(): the window is expanded (the gyro and the controller stay with the panel).
+void sync_settings_window(gl_context* ctx);
+bool settings_open();
 
 // Any thread: fn is called at every Present of the game's swapchain (not test or nested ones), before the panel is drawn,
 // for engines that time Gyro4All's frame on the game's frames (Frostbite: Engine::frame_source). Needs the panel's

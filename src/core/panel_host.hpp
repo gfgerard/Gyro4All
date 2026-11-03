@@ -59,5 +59,10 @@ void dx12_before_resize(void* swapchain);
 void dx12_lost();
 // host.cpp's L3+R3 chord while the panel is open: fold/unfold the Gyro4All settings window.
 void expand_toggle();
+// The Gyro4All window's last expand/fold/close (G4A_SETTINGS_*), whether it is expanded, and folding it without
+// reopening GyroLib's panel (overlay.cpp keeps GyroLib's panel closed while the window is expanded).
+uint32_t settings_event();
+bool settings_expanded();
+void close_settings();
 
 }  // namespace gyro4all::panel_host

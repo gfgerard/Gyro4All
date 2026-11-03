@@ -32,6 +32,7 @@ namespace {
 const g4a_settings* g_settings = nullptr;
 gl_context* g_ctx = nullptr;  // GyroLib's context: per-controller button naming and the selected device
 bool g_expanded = false;
+uint32_t g_event = G4A_SETTINGS_NONE;  // the last expand/fold/close, until winmm.dll takes it (take_event)
 bool g_focus_pending = false;    // a chord just unfolded the window: move gamepad-nav focus into it
 bool g_restore_pending = false;  // the window just folded: return nav focus to GyroLib's panel
 float g_dpi = 1.0f;
@@ -525,8 +526,9 @@ void expanded(const PanelBox& panel, const ImVec2& at) {
     (void)at;  // the window covers the whole panel; the button sits under it (the × in the header folds it back)
     const float s = panel.scale;
     ScopedScale scale_ui(s);
-    // Exactly over GyroLib's panel: same centred position and size. It covers the panel (which stays open behind)
-    // and is drawn after it, so the two look like one surface. Font 17*s: one point under GyroLib's 18*s.
+    // Exactly where GyroLib's panel is: same centred position and size. winmm.dll closes GyroLib's panel while this
+    // window is expanded (one panel reads the controller at a time) and reopens it on fold. Font 17*s: one point under
+    // GyroLib's 18*s.
     ImGui::SetNextWindowPos(panel.center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(panel.width, panel.height), ImGuiCond_Always);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg).x,
@@ -548,6 +550,7 @@ void expanded(const PanelBox& panel, const ImVec2& at) {
     if (!header("Gyro4All settings", s)) {
         g_expanded = false;
         g_restore_pending = true;  // nav focus back to GyroLib's panel (shared context; see toggle())
+        g_event = G4A_SETTINGS_FOLDED;
     } else {
         // BeginChild/EndChild stay paired in both branches: an unbalanced EndChild on the fold frame was ImGui's
         // "Calling End() too many times!" user error, drawn as the thin red border around the window on close.
@@ -574,6 +577,21 @@ void toggle() {
         g_focus_pending = true;  // the next draw() focuses the window for gamepad nav
     else
         g_restore_pending = true;  // nav focus back to GyroLib's panel window, when it is in this context
+    g_event = g_expanded ? G4A_SETTINGS_EXPANDED : G4A_SETTINGS_FOLDED;
+}
+
+void close() {
+    if (!g_expanded) return;
+    g_expanded = false;
+    g_event = G4A_SETTINGS_CLOSED;
+}
+
+bool expanded() { return g_expanded; }
+
+uint32_t take_event() {
+    const uint32_t event = g_event;
+    g_event = G4A_SETTINGS_NONE;
+    return event;
 }
 
 // Gamepad-nav focus moves: ours into the unfolded window, and back to GyroLib's panel on fold. Both run inside
@@ -590,11 +608,13 @@ void focus_pending() {
         g_restore_pending = false;
         if (ImGuiWindow* panel = ImGui::FindWindowByName("GyroLib###GyroLibPanel"))
             ImGui::FocusWindow(panel, ImGuiFocusRequestFlags_RestoreFocusedChild);
+        else
+            ImGui::FocusWindow(nullptr);  // DX12: nothing of ours keeps the nav focus (see the folded button)
     }
 }
 
-void draw(float dpi_scale) {
-    if (!g_settings) return;
+void draw(float dpi_scale, bool gyrolib_open) {
+    if (!g_settings || (!g_expanded && !gyrolib_open)) return;  // the folded button belongs to GyroLib's panel
     g_dpi = dpi_scale;
     const PanelBox panel = panel_box(ImGui::GetMainViewport());
     g_s = panel.scale;  // helpers that draw next to widgets (the reset arrow) use this
@@ -604,13 +624,17 @@ void draw(float dpi_scale) {
     if (!g_expanded) {
         ScopedScale scale_ui(s);
         // Tighter padding than the expanded window: this is just a button. Its height is the 18*s frame plus the
-        // padding, ~40*s, centred on the footer's action row. Navigable (gamepad activates it when focused).
+        // padding, ~40*s, centred on the footer's action row. Not navigable: the controller reaches it with L3+R3 (the
+        // mouse with a click). Navigable, it kept the nav focus after a fold in DX12 games (GyroLib's panel is in
+        // another ImGui context, so focus can't go back to it here): highlighted while the d-pad moved through
+        // GyroLib's panel, and Cross/A on any GyroLib row expanded it again.
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f * s, 6.0f * s));
         ImGui::SetNextWindowPos(at, ImGuiCond_Always, ImVec2(0.0f, 0.0f));
         ImGui::SetNextWindowBgAlpha(0.55f);
         if (ImGui::Begin("##g4a_folded", nullptr,
                          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing)) {
+                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                             ImGuiWindowFlags_NoNav)) {
             // Stay in front of GyroLib's opaque panel after clicks focus it (see expanded()).
             ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
             ImGui::PushFont(nullptr, 18.0f * s);
@@ -619,7 +643,11 @@ void draw(float dpi_scale) {
             cog(ImGui::GetWindowDrawList(), ImVec2(pos.x + h * 0.5f, pos.y + h * 0.5f), h * 0.40f, 2.0f * s,
                 ImGui::GetColorU32(ImGuiCol_Text));
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + h + 8.0f * s);
-            if (ImGui::Button("Gyro4All settings")) g_expanded = true;
+            if (ImGui::Button("Gyro4All settings")) {
+                g_expanded = true;
+                g_focus_pending = true;
+                g_event = G4A_SETTINGS_EXPANDED;
+            }
             ImGui::SameLine(0, 6.0f * s);
             // The chord hint: L3+R3 named like the connected pad's sticks, smaller than the button and vertically
             // centred on it, a nudge (1% of the button's height) above the exact middle, relative to the button's

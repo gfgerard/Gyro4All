@@ -12,7 +12,7 @@
 extern "C" {
 #endif
 
-#define G4A_ABI_VERSION 8u
+#define G4A_ABI_VERSION 9u
 
 struct gl_context;
 
@@ -123,7 +123,16 @@ typedef struct g4a_api {
     // The panel moves ImGui's nav focus to the window (or back to GyroLib's panel window when folding, in the
     // games where that window is in this DLL's ImGui context).
     int32_t (*toggle_expanded)();
+    // ABI 9, owner thread. Only one panel reads the controller at a time: GyroLib's panel is closed while the Gyro4All
+    // window is expanded, and the window then runs on its own (its frames, capture, Escape and 250 ms heartbeat).
+    // settings_event: the last G4A_SETTINGS_* change since the previous call; winmm.dll closes GyroLib's panel on
+    // EXPANDED and reopens it on FOLDED (CLOSED: everything closed). settings_expanded: the window is expanded.
+    // close_settings: fold it without reopening GyroLib's panel (the menu key while it is expanded).
+    uint32_t (*settings_event)(void);
+    uint32_t (*settings_expanded)(void);
+    int32_t (*close_settings)(void);
 } g4a_api;
+enum { G4A_SETTINGS_NONE = 0, G4A_SETTINGS_EXPANDED = 1, G4A_SETTINGS_FOLDED = 2, G4A_SETTINGS_CLOSED = 3 };
 
 // One present of the panel's Vulkan swapchain. Handles as Vulkan's (dispatchable ones as pointers, the others as
 // uint64_t), and the game's vkGetInstanceProcAddr, from which gyro4all.dll loads every function it uses.

@@ -60,7 +60,8 @@ play.
 - **In-game settings panel** (GyroLib's DX12 overlay, `F10` by default): sensitivity, activation button or
   trigger, invert axes, smoothing and more, saved to `gyrolib.ini`. Edits to `gyrolib.ini` are also reloaded
   live while the game runs. Next to it, **Gyro4All's own settings window** opens (a small "Gyro4All settings"
-  button at the top of the screen; click it to expand): the XInput emulation mode, native flick stick, stick
+  button in GyroLib's panel; click it or press L3+R3 to expand it in GyroLib's panel's place, which closes while it is
+  expanded and comes back when it folds, so only one of them follows the controller): the XInput emulation mode, native flick stick, stick
   camera and the zoom-compensation FOV, edited live and saved to `Gyro4All.ini` (what needs a restart or a
   save says so). The same window appears in the panel of non-DX12 games (drawn by `gyro4all.dll`). Gyro4All declares `GL_HOST_MENU_STATE` to GyroLib, plus native right-stick
   suppression while it translates the controller to XInput or while the game reads a PlayStation controller itself

@@ -475,4 +475,18 @@ void expand_toggle() {
     if (a) a->toggle_expanded();
 }
 
+uint32_t settings_event() {
+    const g4a_api* a = g_api.load();
+    return a ? a->settings_event() : G4A_SETTINGS_NONE;
+}
+
+bool settings_expanded() {
+    const g4a_api* a = g_api.load();
+    return a && a->settings_expanded();
+}
+
+void close_settings() {
+    if (const g4a_api* a = g_api.load()) a->close_settings();
+}
+
 }  // namespace gyro4all::panel_host

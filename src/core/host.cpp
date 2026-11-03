@@ -733,12 +733,12 @@ void status() {
     m.since_ns = now_ns;
 }
 
-// GyroLib's panel is driven with the controller while it is open, so the game reads an idle controller then (XInput
-// and its own PlayStation support), and after the panel closes until every button is released and the triggers are
-// up: the press that closed it doesn't reach the game either.
+// GyroLib's panel (or the Gyro4All window open alone) is driven with the controller while it is open, so the game reads
+// an idle controller then (XInput and its own PlayStation support), and after the panel closes until every button is
+// released and the triggers are up: the press that closed it doesn't reach the game either.
 bool panel_has_pad(gl_context* ctx, SDL_Gamepad* pad) {
     static bool held = false;
-    if (gl_panel_open(ctx)) return held = true;
+    if (gl_panel_open(ctx) || overlay::settings_open()) return held = true;
     if (!held || !pad) return held = false;
     bool busy = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000 ||
                 SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000;
@@ -887,7 +887,10 @@ void frame() {
     // leave the (invisible) panel open, or it would hold the gyro suspended.
     overlay::attach(g_gyro->get());
     overlay::poll_menu_key(g_gyro->get(), host::game_has_focus());
+    overlay::sync_settings_window(g_gyro->get());
     overlay::process();
+    // The Gyro4All window expanded alone: GyroLib's panel is closed, so its own gate is off; the gyro stays off here.
+    const bool settings_open = overlay::settings_open();
     if (!overlay::available() && gl_panel_open(g_gyro->get())) gl_set_panel_open(g_gyro->get(), 0);
 
     const EngineFrame f = g_engine->read_frame();
@@ -904,11 +907,12 @@ void frame() {
     // Menus: some games (Cronos) show no cursor in gamepad menus, so pause and "no gameplay view" count too
     // (automatic "menus only" calibration needs it).
     host.menu_open = !f.in_game || f.cursor || f.paused || !view;
-    host.camera_allowed = view && !f.cursor && !g_off_held;
+    host.camera_allowed = view && !f.cursor && !g_off_held && !settings_open;
     // Log every change of whether the gyro may turn the camera, with the reason, so a gyro that "suddenly stops"
     // can be matched to a cursor, a pause or a lost view at that exact moment.
     {
-        const char* gate = !view       ? "off: no gameplay view"
+        const char* gate = settings_open ? "off: Gyro4All settings open"
+                           : !view     ? "off: no gameplay view"
                            : f.cursor  ? "off: mouse cursor shown"
                            : f.paused  ? "off: game paused"
                            : g_off_held ? "off: a GyroOffButtons button held"
@@ -952,7 +956,8 @@ void frame() {
         const bool both_sticks =
             pad && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_STICK) &&
             SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_STICK);
-        if (both_sticks && !expand_chord && gl_panel_open(g_gyro->get())) panel_host::expand_toggle();
+        if (both_sticks && !expand_chord && (gl_panel_open(g_gyro->get()) || settings_open))
+            panel_host::expand_toggle();
         expand_chord = both_sticks;
     }
     const bool neutral = panel_has_pad(g_gyro->get(), pad);

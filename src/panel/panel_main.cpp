@@ -55,6 +55,7 @@ HWND g_hwnd = nullptr;
 
 std::atomic<bool> g_open{false};    // the panel's ImGui frames are running (set and cleared on the owner thread)
 std::atomic<bool> g_escape{false};  // Escape pressed while open: closes the panel unless a popup is open
+std::atomic<bool> g_alone{false};   // the Gyro4All window is expanded with GyroLib's panel closed (owner thread sets it)
 std::atomic<uint32_t> g_capture{0};
 std::atomic<bool> g_claims_mouse{false};     // the last frame's state: the mouse is over one of our windows (or an
 std::atomic<bool> g_claims_keyboard{false};  // item is held) / one of our windows is focused (input routing claims)
@@ -85,8 +86,10 @@ void feed_gamepad(ImGuiIO& io, const g4a_gamepad* pad) {
         ImGuiKey key;
         uint32_t bit;
     } kButtons[] = {
+        // No GamepadFaceLeft (Square/X): ImGui's hold-to-switch-windows list (an empty window titled after each of ours,
+        // "Untitled" for GyroLib's) and a tap for window menus, neither of any use with one window per panel.
         {ImGuiKey_GamepadStart, G4A_PAD_START},          {ImGuiKey_GamepadBack, G4A_PAD_BACK},
-        {ImGuiKey_GamepadFaceLeft, G4A_PAD_WEST},        {ImGuiKey_GamepadFaceRight, G4A_PAD_EAST},
+        {ImGuiKey_GamepadFaceRight, G4A_PAD_EAST},
         {ImGuiKey_GamepadFaceUp, G4A_PAD_NORTH},         {ImGuiKey_GamepadFaceDown, G4A_PAD_SOUTH},
         {ImGuiKey_GamepadDpadLeft, G4A_PAD_DPAD_LEFT},   {ImGuiKey_GamepadDpadRight, G4A_PAD_DPAD_RIGHT},
         {ImGuiKey_GamepadDpadUp, G4A_PAD_DPAD_UP},       {ImGuiKey_GamepadDpadDown, G4A_PAD_DPAD_DOWN},
@@ -281,7 +284,11 @@ int32_t api_function_key(uint32_t number, uint32_t pressed, uint32_t repeat) {
 
 int32_t api_frame(const g4a_gamepad* pad) {
     if (!g_panel && !g_dx12) return G4A_UNAVAILABLE;
-    if (!gl_panel_open(g_ctx)) {
+    // The frames run while GyroLib's panel is open, or on their own while the Gyro4All window is expanded (winmm.dll
+    // closed GyroLib's panel for it, see settings_event).
+    const bool gyrolib_open = gl_panel_open(g_ctx) != 0;
+    g_alone = !gyrolib_open && settings_ui::expanded();
+    if (!gyrolib_open && !g_alone) {
         g_opened_at = 0;
         stop_frames("by the panel");
         return G4A_OK;
@@ -295,7 +302,11 @@ int32_t api_frame(const g4a_gamepad* pad) {
     const ULONGLONG last = std::max(g_last_present.load(), g_opened_at);
     if (!g_renderer || now - last > kHeartbeatMs) {
         if (now - last > kHeartbeatMs) {
-            if (!g_dx12) {
+            if (g_alone) {
+                settings_ui::close();
+                g_alone = false;
+                g_opened_at = 0;
+            } else if (!g_dx12) {
                 gl_set_panel_open(g_ctx, 0);
                 g_opened_at = 0;
             }
@@ -324,7 +335,12 @@ int32_t api_frame(const g4a_gamepad* pad) {
         log("panel open");
     }
     if (g_escape.exchange(false) && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
-        gl_set_panel_open(g_ctx, 0);
+        if (g_alone) {
+            settings_ui::close();
+            g_alone = false;
+        } else {
+            gl_set_panel_open(g_ctx, 0);
+        }
         g_opened_at = 0;
         g_has_frame = false;
         g_open = false;
@@ -352,8 +368,9 @@ int32_t api_frame(const g4a_gamepad* pad) {
     io.MouseDrawCursor = hidden;
     ImGui::NewFrame();
     const UINT dpi = GetDpiForWindow(g_hwnd);
-    if (g_panel) gl_panel_draw(g_panel, io.DisplaySize.x, io.DisplaySize.y, dpi ? float(dpi) / 96.0f : 1.0f);
-    settings_ui::draw(dpi ? float(dpi) / 96.0f : 1.0f);  // next to GyroLib's panel (DX12 games: the only window here)
+    if (g_panel && gyrolib_open) gl_panel_draw(g_panel, io.DisplaySize.x, io.DisplaySize.y, dpi ? float(dpi) / 96.0f : 1.0f);
+    // Next to GyroLib's panel, or alone while expanded (DX12 games: the only window here).
+    settings_ui::draw(dpi ? float(dpi) / 96.0f : 1.0f, gyrolib_open);
     ImGui::Render();
     log_input_state(io, pad, now - g_opened_at);
     g_has_frame = true;
@@ -404,8 +421,9 @@ uint32_t api_window_message(void* hwnd, uint32_t message, uint64_t wparam, int64
         if (g_open && !mouse_button(ImGui::GetIO(), message, wparam))
             ImGui_ImplWin32_WndProcHandler(static_cast<HWND>(hwnd), message, WPARAM(wparam), LPARAM(lparam));
     }
-    // Escape closes the static panel; in a DX12 game GyroLib's overlay owns the open state and its own Escape.
-    if (!g_dx12 && message == WM_KEYDOWN && wparam == VK_ESCAPE && !(lparam & (1ll << 30))) g_escape = true;
+    // Escape closes the static panel, or the Gyro4All window running alone; otherwise, in a DX12 game, GyroLib's
+    // overlay owns the open state and its own Escape.
+    if ((!g_dx12 || g_alone) && message == WM_KEYDOWN && wparam == VK_ESCAPE && !(lparam & (1ll << 30))) g_escape = true;
     const bool mouse = (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) || message == WM_INPUT;
     const bool keyboard = (message >= WM_KEYFIRST && message <= WM_KEYLAST) || message == WM_INPUT;
     const uint32_t cap = g_capture;
@@ -503,12 +521,23 @@ int32_t api_toggle_expanded(void) {
     return G4A_OK;
 }
 
+uint32_t api_settings_event(void) { return (g_panel || g_dx12) ? settings_ui::take_event() : G4A_SETTINGS_NONE; }
+
+uint32_t api_settings_expanded(void) { return (g_panel || g_dx12) && settings_ui::expanded() ? 1u : 0u; }
+
+int32_t api_close_settings(void) {
+    if (!g_panel && !g_dx12) return G4A_UNAVAILABLE;
+    settings_ui::close();
+    return G4A_OK;
+}
+
 const g4a_api kApi = {
     sizeof(g4a_api),      G4A_ABI_VERSION,        &api_create,      &api_function_key,     &api_frame,
     &api_window_message,  &api_capture,           &api_ready,       &api_dxgi_present,     &api_dxgi_before_resize,
     &api_dx9_present,     &api_dx9_before_reset,  &api_vk_present,  &api_vk_swapchain_destroyed,
     &api_vk_device_destroyed, &api_gl_present,   &api_set_window,  &api_dx12_present,     &api_dx12_before_resize,
-    &api_dx12_lost,       &api_toggle_expanded,
+    &api_dx12_lost,       &api_toggle_expanded,   &api_settings_event, &api_settings_expanded,
+    &api_close_settings,
 };
 
 }  // namespace

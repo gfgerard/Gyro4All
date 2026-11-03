@@ -5,6 +5,25 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-03 **1.10.0 — One panel on the controller at a time** (built with MSVC 14.51, 851 checks pass; tested by the
+  user in a DX11 and a DX12 game, 007 First Light the DX12 one). With the Gyro4All settings window expanded, the d-pad also moved through GyroLib's panel behind it. In
+  DX12 games GyroLib's panel is its DX12 frontend inside gyrolib.dll, with its own ImGui context that reads the
+  controller through SDL; GyroLib 1.3.1 has no call to stop that (`gl_overlay_capture` only reports,
+  `gl_overlay_win32_message` only sees window messages). Now expanding the window closes GyroLib's panel
+  (`gl_overlay_set_open(0)` in DX12, `gl_set_panel_open(0)` otherwise) and folding it reopens it
+  (`overlay::sync_settings_window`, from the panel ABI 9 calls `settings_event` / `settings_expanded` /
+  `close_settings`). The window then runs alone: gyro4all.dll keeps its frames, capture, Escape and 250 ms heartbeat
+  going without GyroLib's panel, and host.cpp keeps the gyro off (`gyro off: Gyro4All settings open`) and the
+  controller idle for the game. The menu key closes everything; GyroLib's Back+Start opening its panel folds the
+  window. The folded button now also moves gamepad focus into the window when clicked (only L3+R3 did).
+  The folded button is no longer navigable (`ImGuiWindowFlags_NoNav`) and a fold with no GyroLib window in this ImGui
+  context clears the nav focus: in DX12 games it kept the focus after a fold (highlighted while the d-pad moved through
+  GyroLib's panel, and Cross/A on any GyroLib row expanded the window again; present before this change too).
+  Square/X (west) is no longer fed to the Gyro4All window's ImGui: held, it opened ImGui's window switcher (an empty
+  little window titled "Gyro4All"). GyroLib's own DX12 context still does it (titled "Untitled"): GyroLib's to change.
+  - To verify: a DX12 game and a non-DX12 one; expand with the button and with L3+R3, d-pad only in the window, fold
+    with the header button / L3+R3 (GyroLib's panel back), Escape and F10 while expanded (all closed, gyro back),
+    Back+Start while expanded.
 - 2026-11-02 **1.10.0 — Zoom compensation: ZoomStrength, manual zoom levels, live ZoomReferenceFOV** (built with MSVC
   14.51, 851 checks pass; release zip `Gyro4All-v1.10.0.zip`; **not tested in game yet**).
   Reviewed draft PR #13 (MERLev, Mass Effect 3 LE): written on a pre-1.9.0 base, it duplicated what main has since landed (`EngineFrame::fov` vs `zoom_fov`, a UE3 `FovPath` reading the same
