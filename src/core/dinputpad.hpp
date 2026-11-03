@@ -42,6 +42,11 @@ void set_capture(bool mouse, bool keyboard);
 // own low-level mouse hook on Acquire, ahead of any installed before it (steammouse.cpp re-installs its hook after).
 uint32_t mouse_acquires();
 
+// How many of the game's DirectInput mouse / keyboard reads reached it with motion or a button or key held (buffered
+// reads: their events), since the start; reads idled for the settings panel don't count (any thread). A game that
+// switches its controls to keyboard and mouse on such input shows up here (engine diagnostics).
+void desktop_input(uint32_t& mouse, uint32_t& keyboard);
+
 // XInput=2: the game's DirectInput opens of PlayStation and Nintendo controllers fail (DIERR_DEVICENOTREG), so it only
 // gets the Xbox controller (RDR2 opens the DualSense through DirectInput and leaves the Xbox one unused).
 void refuse_pads(bool refuse);

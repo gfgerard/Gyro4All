@@ -93,6 +93,12 @@ bool ours(const void* address) {
 }
 
 std::atomic<uint32_t> g_mouse_acquires{0};  // see mouse_acquires()
+std::atomic<uint32_t> g_mouse_input{0}, g_keyboard_input{0};  // see desktop_input()
+
+// A read of the game's mouse or keyboard that reached it with motion or something held (see desktop_input()).
+void note_input(const Desktop& d, uint32_t n = 1) {
+    (d.mouse ? g_mouse_input : g_keyboard_input).fetch_add(n, std::memory_order_relaxed);
+}
 
 Desktop* find_desktop(void* device) {
     for (Desktop& d : g_desktop)
@@ -234,6 +240,11 @@ HRESULT STDMETHODCALLTYPE hk_get_state(void* device, DWORD size, LPVOID data) {
         if (SUCCEEDED(hr) && data && captured(*d)) {
             std::memset(data, 0, size);
             g_desktop_idled.fetch_add(1, std::memory_order_relaxed);
+        } else if (SUCCEEDED(hr) && data) {
+            const auto* bytes = static_cast<const uint8_t*>(data);
+            const bool any = d->mouse ? std::any_of(bytes, bytes + size, [](uint8_t b) { return b != 0; })
+                                      : std::any_of(bytes, bytes + size, [](uint8_t b) { return (b & 0x80) != 0; });
+            if (any) note_input(*d);
         }
         return hr;
     }
@@ -287,6 +298,8 @@ HRESULT STDMETHODCALLTYPE hk_get_data(void* device, DWORD object_size, LPDIDEVIC
     if (const Desktop* d = desktop) {
         if (SUCCEEDED(hr) && data && count && object_size >= 2 * sizeof(DWORD) && captured(*d))
             keep_releases(*d, object_size, data, count);
+        else if (SUCCEEDED(hr) && data && count && *count && !(flags & DIGDD_PEEK))
+            note_input(*d, *count);
         return hr;
     }
     Pad* pad = find_pad(device);
@@ -426,6 +439,11 @@ void frame(bool neutral, SDL_Gamepad* pad) {
 }
 
 uint32_t mouse_acquires() { return g_mouse_acquires.load(); }
+
+void desktop_input(uint32_t& mouse, uint32_t& keyboard) {
+    mouse = g_mouse_input.load(std::memory_order_relaxed);
+    keyboard = g_keyboard_input.load(std::memory_order_relaxed);
+}
 
 void set_capture(bool mouse, bool keyboard) {
     const bool any = std::any_of(std::begin(g_desktop), std::end(g_desktop),

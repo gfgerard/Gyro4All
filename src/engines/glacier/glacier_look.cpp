@@ -19,6 +19,7 @@
 // player's locomotion update, used before, stops indoors). The view's angles for the status line: the derived view component of the Gameplay World (+0x88: +0x10C yaw, +0x110 pitch, radians; up negative).
 #include "glacier_look.hpp"
 
+#include "dinputpad.hpp"
 #include "hooks.hpp"
 #include "log.hpp"
 #include "mem.hpp"
@@ -121,25 +122,33 @@ bool look_at_point(uint32_t handle, uintptr_t& point, uintptr_t& position) {
     return point && position;
 }
 
+// What became of a look-at camera's point on a turn (the aim line counts them).
+enum class Point { None, Turned, Unreadable, Near, Far };
+
 // Turns a look-at camera's point about the camera's position: heading by -yaw (the view turns right as the point turns
-// clockwise), elevation by pitch (up), within the pitch limits (radians, up negative, as the orbit's).
-void turn_point(uintptr_t point, uintptr_t position, double pitch, double yaw, const Limits& limits) {
-    float p[3] = {}, c[3] = {};
-    if (!mem::guarded_copy(p, point, sizeof p) || !mem::guarded_copy(c, position, sizeof c)) return;
-    const double dx = double(p[0]) - c[0], dy = double(p[1]) - c[1], dz = double(p[2]) - c[2];
+// clockwise), elevation by pitch (up), within the pitch limits (radians, up negative, as the orbit's). before: the
+// point as found; out: as written (Turned only).
+Point turn_point(uintptr_t point, uintptr_t position, double pitch, double yaw, const Limits& limits, float (&before)[3],
+                 float (&out)[3]) {
+    float c[3] = {};
+    if (!mem::guarded_copy(before, point, sizeof before) || !mem::guarded_copy(c, position, sizeof c)) return Point::Unreadable;
+    const double dx = double(before[0]) - c[0], dy = double(before[1]) - c[1], dz = double(before[2]) - c[2];
     const double flat = std::hypot(dx, dy), dist = std::hypot(flat, dz);
-    if (!std::isfinite(dist) || dist < 0.1 || dist > 1e12) return;  // far: the aim ray's point at infinity (1e8 m)
+    if (!std::isfinite(dist)) return Point::Unreadable;
+    if (dist < 0.1) return Point::Near;
+    if (dist > 1e12) return Point::Far;  // the aim ray's point at infinity is at about 1e8 m
     const double heading = std::atan2(dy, dx) - kYawSense * yaw * kRad;
     const double elevation = std::clamp(std::atan2(dz, flat) - kPitchSense * pitch * kRad, double(-limits.pitch_max),
                                         double(-limits.pitch_min));
-    const float out[3] = {float(c[0] + dist * std::cos(elevation) * std::cos(heading)),
-                          float(c[1] + dist * std::cos(elevation) * std::sin(heading)), float(c[2] + dist * std::sin(elevation))};
-    mem::guarded_store(point, out, sizeof out);
+    out[0] = float(c[0] + dist * std::cos(elevation) * std::cos(heading));
+    out[1] = float(c[1] + dist * std::cos(elevation) * std::sin(heading));
+    out[2] = float(c[2] + dist * std::sin(elevation));
+    return mem::guarded_store(point, out, sizeof out) ? Point::Turned : Point::Unreadable;
 }
 
 // Game thread only (the gyro frame and the updates run there).
 uint32_t g_camera = 0;  // the active camera's handle at the last turn
-uint32_t g_logged[16] = {};  // the orbit cameras logged so far (each once)
+uint16_t g_logged[64] = {};  // the orbit cameras logged so far, each once (by entity: the generation changes on each switch)
 ULONGLONG g_last_update = 0;
 // The orbit update's argument: +8/+0x10 the begin and end of the 16-bit entities of every orbit camera, which it
 // integrates every frame, active or not.
@@ -243,13 +252,23 @@ bool view(double& pitch, double& yaw) { return g_installed && read_view(pitch, y
 
 namespace {
 
+// What turn_camera did to a look-at camera's point: the outcome, the point as found and as written.
+struct PointTurn {
+    Point result = Point::None;
+    float before[3] = {}, after[3] = {};
+};
+
 // Turns one camera: its orbit angles and, when it looks at a point, the point (each kind of camera follows one of them).
 // The pitch actually turned (the orbit's, within its limits), NAN if the camera has no orbit state.
-double turn_camera(uint32_t handle, uintptr_t orbit, const Limits& limits, double pitch, double yaw) {
+double turn_camera(uint32_t handle, uintptr_t orbit, const Limits& limits, double pitch, double yaw,
+                   PointTurn* point_turn = nullptr) {
     Orbit o{};
     if (!orbit || !mem::guarded_copy(&o, orbit, sizeof o)) return NAN;
     uintptr_t point = 0, position = 0;
-    if (look_at_point(handle, point, position)) turn_point(point, position, pitch, yaw, limits);
+    PointTurn unused;
+    PointTurn& pt = point_turn ? *point_turn : unused;
+    pt.result = look_at_point(handle, point, position) ? turn_point(point, position, pitch, yaw, limits, pt.before, pt.after)
+                                                       : Point::None;
     const float angles[2] = {
         float(std::remainder(o.yaw + kYawSense * yaw * kRad, 2 * kPi)),
         std::clamp(float(o.pitch + kPitchSense * pitch * kRad), std::min(limits.pitch_min, o.pitch), std::max(limits.pitch_max, o.pitch))};
@@ -295,6 +314,112 @@ bool turn_all(double pitch, double yaw) {
     return turned;
 }
 
+// One stretch of gyro turns on one active orbit camera (an "aim" when the camera looks at a point: L2's aim cameras),
+// summed up in one line when it ends: what became of the point, whether the game rewrote the one written, whether the
+// view followed the turns (the derived view's movement between consecutive gyro frames against the turns asked; the
+// right stick moves it too), and the game's own mouse/keyboard input meanwhile (a game that switches to its keyboard and
+// mouse controls may take the aim from the mouse). Aims: every one up to kAimLines. Past that, and for cameras without
+// a point, only the stretches whose view didn't follow (up to kStuckLines).
+struct Aim {
+    uint32_t handle = 0;
+    ULONGLONG start = 0, last = 0;
+    int frames = 0, points[5] = {}, rewritten = 0, pairs = 0, cursor_moves = 0;
+    double asked_yaw = 0, asked_pitch = 0, view_yaw = 0, view_pitch = 0;
+    bool have_view = false, wrote = false;
+    double prev_yaw = 0, prev_pitch = 0, pending_yaw = 0, pending_pitch = 0;
+    float written[3] = {};
+    uint32_t mouse = 0, keyboard = 0;
+    POINT cursor{};
+};
+Aim g_aim;
+int g_aim_lines = 0, g_stuck_lines = 0;
+constexpr int kAimLines = 40, kStuckLines = 50;
+constexpr ULONGLONG kAimGapMs = 500, kPairMs = 100;  // a stretch ends after kAimGapMs without a turn
+constexpr double kJudgeDeg = 2;                      // turns asked below this (in all) aren't judged,
+constexpr int kJudgePairs = 10;                      // nor stretches shorter than this (the derived view lags)
+
+void aim_end() {
+    Aim& a = g_aim;
+    if (!a.handle || !a.frames) {
+        a = {};
+        return;
+    }
+    const bool aim = a.frames > a.points[int(Point::None)];
+    const double asked = std::hypot(a.asked_yaw, a.asked_pitch);
+    const double followed = asked >= kJudgeDeg && a.pairs >= kJudgePairs
+                                ? (a.view_yaw * a.asked_yaw + a.view_pitch * a.asked_pitch) / (asked * asked)
+                                : NAN;
+    const bool stuck = !std::isnan(followed) && followed < 0.5;
+    if (stuck ? g_stuck_lines < kStuckLines : aim && g_aim_lines < kAimLines) {
+        ++(stuck ? g_stuck_lines : g_aim_lines);
+        uint32_t mouse = 0, keyboard = 0;
+        dinputpad::desktop_input(mouse, keyboard);
+        const std::string verdict = std::isnan(followed) ? std::string("too little turn to judge")
+                                    : stuck ? std::format("NOT FOLLOWED ({:.0f}%)", followed * 100)
+                                            : std::format("followed ({:.0f}%)", followed * 100);
+        log("glacier: %s %08X for %llu ms (ended %llu ms ago): %d gyro frames; point turned %d, none %d, unreadable %d, "
+            "near %d, far %d, rewritten by the game %d; asked yaw %.2f pitch %.2f, view moved yaw %.2f pitch %.2f over %d "
+            "frame pairs: %s; game mouse input %u, keyboard %u, cursor moved %d",
+            aim ? "aim" : "camera", a.handle, a.last - a.start, GetTickCount64() - a.last, a.frames,
+            a.points[int(Point::Turned)], a.points[int(Point::None)], a.points[int(Point::Unreadable)],
+            a.points[int(Point::Near)], a.points[int(Point::Far)], a.rewritten, a.asked_yaw, a.asked_pitch, a.view_yaw,
+            a.view_pitch, a.pairs, verdict.c_str(), mouse - a.mouse, keyboard - a.keyboard, a.cursor_moves);
+        if (stuck && g_stuck_lines == kStuckLines) log("glacier: further views that didn't follow not logged");
+    }
+    a = {};
+}
+
+// Before a turn of the active camera: starts or continues its stretch, and judges the last frame's turn.
+void aim_frame(uint32_t handle, ULONGLONG now) {
+    Aim& a = g_aim;
+    if (a.handle && (a.handle != handle || now - a.last > kAimGapMs)) aim_end();
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    if (!a.handle) {
+        a.handle = handle;
+        a.start = now;
+        dinputpad::desktop_input(a.mouse, a.keyboard);
+        a.cursor = cursor;
+    } else if (cursor.x != a.cursor.x || cursor.y != a.cursor.y) {
+        ++a.cursor_moves;
+        a.cursor = cursor;
+    }
+    double pitch = 0, yaw = 0;
+    const bool have = read_view(pitch, yaw);
+    if (have && a.have_view && a.frames && now - a.last <= kPairMs) {
+        a.view_yaw += std::remainder(yaw - a.prev_yaw, 360.0);
+        a.view_pitch += pitch - a.prev_pitch;
+        a.asked_yaw += a.pending_yaw;
+        a.asked_pitch += a.pending_pitch;
+        ++a.pairs;
+    }
+    a.have_view = have;
+    a.prev_yaw = yaw;
+    a.prev_pitch = pitch;
+    a.last = now;
+}
+
+// After the turn: what became of the point, and whether the game had moved the one written on the last frame.
+void aim_turned(const PointTurn& pt, double pitch, double yaw) {
+    Aim& a = g_aim;
+    ++a.frames;
+    ++a.points[int(pt.result)];
+    a.pending_yaw = yaw;
+    a.pending_pitch = pitch;
+    if (pt.result == Point::None) {
+        a.wrote = false;
+        return;
+    }
+    if (a.wrote) {
+        const double moved = std::hypot(std::hypot(double(pt.before[0]) - a.written[0], double(pt.before[1]) - a.written[1]),
+                                        double(pt.before[2]) - a.written[2]);
+        const double size = std::hypot(std::hypot(double(a.written[0]), double(a.written[1])), double(a.written[2]));
+        a.rewritten += moved > 1e-3 * std::max(size, 1.0);
+    }
+    a.wrote = pt.result == Point::Turned;
+    if (a.wrote) std::copy(std::begin(pt.after), std::end(pt.after), a.written);
+}
+
 }  // namespace
 
 bool turn(double pitch, double yaw) {
@@ -303,6 +428,7 @@ bool turn(double pitch, double yaw) {
     const uintptr_t orbit = active_orbit(limits, handle);
     Orbit o{};
     if (!orbit || !mem::guarded_copy(&o, orbit, sizeof o)) {
+        aim_end();
         if (handle && handle != g_transition) {
             transition_end();
             g_transition = handle;
@@ -314,18 +440,27 @@ bool turn(double pitch, double yaw) {
         return handle && turn_all(pitch, yaw);
     }
     transition_end();
-    if (handle != g_camera && std::find(std::begin(g_logged), std::end(g_logged), handle) == std::end(g_logged)) {
-        const auto slot = std::find(std::begin(g_logged), std::end(g_logged), 0u);
-        if (slot != std::end(g_logged)) *slot = handle;
-        uintptr_t point = 0, position = 0;
-        log("glacier: orbit camera %08X (state %s, limits pitch %.1f..%.1f deg%s)", handle, mem::module_offset(orbit).c_str(),
-            limits.pitch_min / kRad, limits.pitch_max / kRad, look_at_point(handle, point, position) ? ", looks at a point" : "");
+    const uint16_t entity = uint16_t(handle);
+    if (handle != g_camera && entity && std::find(std::begin(g_logged), std::end(g_logged), entity) == std::end(g_logged)) {
+        const auto slot = std::find(std::begin(g_logged), std::end(g_logged), uint16_t(0));
+        if (slot != std::end(g_logged)) {
+            *slot = entity;
+            uintptr_t point = 0, position = 0;
+            log("glacier: orbit camera %08X (state %s, limits pitch %.1f..%.1f deg%s)", handle,
+                mem::module_offset(orbit).c_str(), limits.pitch_min / kRad, limits.pitch_max / kRad,
+                look_at_point(handle, point, position) ? ", looks at a point now" : "");
+        }
     }
     g_camera = handle;
-    return !std::isnan(turn_camera(handle, orbit, limits, pitch, yaw));
+    aim_frame(handle, GetTickCount64());
+    PointTurn pt;
+    const bool turned = !std::isnan(turn_camera(handle, orbit, limits, pitch, yaw, &pt));
+    aim_turned(pt, pitch, yaw);
+    return turned;
 }
 
 std::string status() {
+    if (g_aim.handle && GetTickCount64() - g_aim.last > kAimGapMs) aim_end();
     double pitch = 0, yaw = 0;
     const bool ok = view(pitch, yaw);
     return std::format("glacier: orbit camera {} handle {:08X} view {}", g_installed ? (live() ? "live" : "idle") : "not hooked",
