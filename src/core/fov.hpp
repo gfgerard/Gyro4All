@@ -17,6 +17,10 @@ inline double vertical_from_horizontal(double horizontal, double aspect_ratio) {
     return is_valid(vertical) ? vertical : 0;
 }
 
+// [Gyro4All] ZoomReferenceFOV= (the profile's, else Gyro4All.ini's): the unzoomed horizontal FOV in degrees, 0 when unset
+// or not a valid FOV (logged). The one parse for the core and every engine module.
+double reference_setting();
+
 // The game window's client aspect (width / height) for the horizontal-to-vertical conversion: the largest visible
 // top-level window of this process, as in notify.cpp. Looked up again at most every 500 ms (EnumWindows is too costly
 // for every frame); 0 while there is no such window. Game thread.

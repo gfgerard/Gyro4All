@@ -62,9 +62,22 @@ uint32_t settings_get(const char* key, char* out, uint32_t out_size) {
     return 1;
 }
 
-// The panel's set: written to Gyro4All.ini (never the profile), so it persists between sessions.
+// The panel's set: where the value in effect comes from. A key the game's profile sets (it wins over Gyro4All.ini,
+// as settings_get shows) is changed in the profile, in the section that holds it; else written to Gyro4All.ini.
 int32_t settings_set(const char* key, const char* value) {
-    settings::set_string(widen(key).c_str(), widen(value).c_str());
+    const std::wstring wkey = widen(key), wvalue = widen(value);
+    const std::wstring& profile = settings::profile_path();
+    for (const wchar_t* section : {settings::kSection, settings::kLegacySection}) {
+        wchar_t buffer[2];
+        if (!profile.empty() && GetPrivateProfileStringW(section, wkey.c_str(), L"", buffer, 2, profile.c_str()) > 0) {
+            if (WritePrivateProfileStringW(section, wkey.c_str(), wvalue.c_str(), profile.c_str()))
+                log("settings: %s = %s (the game's profile, which sets it)", key, value);
+            else
+                log("settings: could not write %s to %s", key, narrow(profile).c_str());
+            return G4A_OK;
+        }
+    }
+    settings::set_string(wkey.c_str(), wvalue.c_str());
     return G4A_OK;
 }
 

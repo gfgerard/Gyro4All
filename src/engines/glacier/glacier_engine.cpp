@@ -429,11 +429,7 @@ public:
     // The unzoomed horizontal FOV for zoom compensation: the generic [Gyro4All] ZoomReferenceFOV= (profile or
     // Gyro4All.ini); 0 or implausible uses the widest FOV seen in game instead. At start and on save.
     void load_zoom_reference() {
-        double fov = std::atof(settings::get_string(L"ZoomReferenceFOV", L"0").c_str());
-        if (fov > 0 && (fov < 5 || fov > 170)) {
-            log("glacier: ZoomReferenceFOV=%.1f implausible: ignored", fov);
-            fov = 0;
-        }
+        const double fov = fov::reference_setting();
         if (fov != zoom_reference_fov_)
             log("glacier: zoom reference FOV %.1f degrees ([Gyro4All] ZoomReferenceFOV%s)", fov,
                 fov > 0 ? "" : ": 0, the widest FOV seen");
@@ -630,15 +626,30 @@ private:
         float current = 0;
         if (!mem::rd(controller_ + kFov, current) || !std::isfinite(current) || current < 5 || current > 170)
             return std::nullopt;
-        // The unzoomed reference: [Gyro4All] ZoomReferenceFOV= when set, else the widest FOV seen with this
-        // controller (aiming only ever narrows it in this game; there is no DefaultFOV-like property to read).
-        const double reference =
-            zoom_reference_fov_ > 0 ? zoom_reference_fov_ : (zoom_reference_ = std::max(zoom_reference_, double(current)));
+        // The unzoomed reference: [Gyro4All] ZoomReferenceFOV= when set, else learnt with this controller (aiming only
+        // ever narrows the FOV in this game; there is no DefaultFOV-like property to read).
+        const double reference = zoom_reference_fov_ > 0 ? zoom_reference_fov_ : learn_zoom_reference(current);
         ZoomFov z;
         z.current_vertical = fov::vertical_from_horizontal(current, fov::game_window_aspect());
         z.reference_vertical = fov::vertical_from_horizontal(reference, fov::game_window_aspect());
         if (!fov::is_valid(z.current_vertical) || !fov::is_valid(z.reference_vertical)) return std::nullopt;
         return z;
+    }
+
+    // The learnt unzoomed FOV: the first one seen, raised to a wider FOV only once that has held for kWiderMs (a blend or
+    // a short scripted camera doesn't count), and lowered to a narrower one that has held for kNarrowerMs (the FOV
+    // option lowered, or a long scripted wide camera over): aims rarely hold that long.
+    double learn_zoom_reference(double current) {
+        constexpr ULONGLONG kWiderMs = 1000, kNarrowerMs = 30000;
+        const ULONGLONG now = GetTickCount64();
+        if (std::abs(current - zoom_steady_) > 0.05) zoom_steady_ = current, zoom_steady_since_ = now;
+        const ULONGLONG held = now - zoom_steady_since_;
+        const double before = zoom_reference_;
+        if (zoom_reference_ <= 0 || (held >= kWiderMs && zoom_steady_ > zoom_reference_) ||
+            (held >= kNarrowerMs && zoom_steady_ < zoom_reference_))
+            zoom_reference_ = zoom_steady_;
+        if (zoom_reference_ != before) log("glacier: unzoomed FOV learnt: %.1f degrees horizontal", zoom_reference_);
+        return zoom_reference_;
     }
 
     // The game's frames: Gyro4All's own, one per pump of the game thread.
@@ -791,7 +802,9 @@ private:
     uintptr_t controller_ = 0;
     ULONGLONG next_scan_ = 0;
     uintptr_t turned_ = 0;  // the controller write_ and angles_mode_ are about
-    double zoom_reference_ = 0;  // the widest FOV seen with the current controller (the unzoomed reference)
+    double zoom_reference_ = 0;  // the learnt unzoomed FOV with the current controller (learn_zoom_reference)
+    double zoom_steady_ = 0;     // the FOV as last changed, and since when (learn_zoom_reference)
+    ULONGLONG zoom_steady_since_ = 0;
     double zoom_reference_fov_ = 0;  // [Gyro4All] ZoomReferenceFOV=, horizontal degrees; 0 = learn it in game
     bool paused_ = false;
     bool pending_writes_ = false;

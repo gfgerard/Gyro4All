@@ -795,8 +795,7 @@ private:
     // The generic [Gyro4All] ZoomReferenceFOV= (the profile's, else Gyro4All.ini's, where the settings panel writes it)
     // for views without their own; at start and when either file is saved. 0 reads PlayerCameraManager.DefaultFOV.
     void load_zoom_reference() {
-        const double fov = std::atof(settings::get_string(L"ZoomReferenceFOV", L"0").c_str());
-        const double value = fov::is_valid(fov) ? fov : 0;
+        const double value = fov::reference_setting();
         if (value != zoom_reference_fov_) log("ue: zoom reference FOV %.1f degrees ([Gyro4All] ZoomReferenceFOV%s)",
                                               value, value > 0 ? "" : ": 0, the camera's DefaultFOV");
         zoom_reference_fov_ = value;

@@ -5,7 +5,10 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace gyro4all::mem {
@@ -62,6 +65,64 @@ std::vector<Range> writable_sections(bool include_exec) {
         }
     }
     return out;
+}
+
+std::vector<Range> code_sections(uintptr_t base, bool skip_writable) {
+    std::vector<Range> text;
+    IMAGE_DOS_HEADER dos;
+    IMAGE_NT_HEADERS64 nt;
+    if (!base || !rd(base, dos) || dos.e_magic != IMAGE_DOS_SIGNATURE || !rd(base + dos.e_lfanew, nt) ||
+        nt.Signature != IMAGE_NT_SIGNATURE)
+        return text;
+    const uintptr_t first =
+        base + dos.e_lfanew + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + nt.FileHeader.SizeOfOptionalHeader;
+    for (WORD i = 0; i < nt.FileHeader.NumberOfSections; ++i) {
+        IMAGE_SECTION_HEADER s;
+        if (!rd(first + i * sizeof s, s)) return {};
+        if ((s.Characteristics & IMAGE_SCN_MEM_EXECUTE) && !(skip_writable && (s.Characteristics & IMAGE_SCN_MEM_WRITE)))
+            text.push_back({base + s.VirtualAddress, base + s.VirtualAddress + s.Misc.VirtualSize});
+    }
+    return text;
+}
+
+void parse_pattern(const char* text, std::vector<uint8_t>& bytes, std::vector<uint8_t>& mask) {
+    for (const char* p = text; *p;) {
+        if (*p == ' ') {
+            ++p;
+            continue;
+        }
+        const bool any = p[0] == '?';
+        const char hex[3] = {p[0], p[1], 0};
+        bytes.push_back(any ? 0 : uint8_t(std::strtoul(hex, nullptr, 16)));
+        mask.push_back(any ? 0 : 0xFF);
+        p += p[1] ? 2 : 1;
+    }
+}
+
+std::vector<uintptr_t> find_pattern(const std::vector<Range>& sections, const uint8_t* bytes, const uint8_t* mask, size_t n) {
+    std::vector<uintptr_t> found;
+    if (!n) return found;
+    std::vector<uint8_t> chunk(size_t(1) << 20);
+    for (const Range& r : sections) {
+        for (uintptr_t at = r.begin; at < r.end; at += chunk.size() - n) {
+            const size_t len = size_t(std::min<uintptr_t>(chunk.size(), r.end - at));
+            if (len < n || !guarded_copy(chunk.data(), at, len)) {
+                if (len < chunk.size()) break;
+                continue;
+            }
+            const uint8_t* const last = chunk.data() + len - n;
+            for (const uint8_t* p = chunk.data(); p <= last &&
+                                                  (p = static_cast<const uint8_t*>(std::memchr(p, bytes[0], last - p + 1)));
+                 ++p) {
+                size_t j = 1;
+                while (j < n && (p[j] & mask[j]) == (bytes[j] & mask[j])) ++j;
+                const uintptr_t hit = at + uintptr_t(p - chunk.data());
+                if (j == n && (found.empty() || found.back() < hit)) found.push_back(hit);
+            }
+            if (len < chunk.size()) break;
+        }
+    }
+    return found;
 }
 
 bool in_module(uintptr_t address) {

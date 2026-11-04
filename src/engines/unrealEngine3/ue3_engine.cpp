@@ -457,8 +457,7 @@ public:
     // [Gyro4All] ZoomReferenceFOV= (any engine's fallback); 0 reads PlayerController.DefaultFOV. At start and on save.
     void load_zoom_reference() {
         double fov = std::atof(settings::profile_string(L"Unreal3", L"ZoomReferenceFOV", L"0").c_str());
-        if (fov <= 0) fov = std::atof(settings::get_string(L"ZoomReferenceFOV", L"0").c_str());
-        if (!fov::is_valid(fov)) fov = 0;
+        if (!fov::is_valid(fov)) fov = fov::reference_setting();
         if (fov != zoom_reference_fov_)
             log("ue3: zoom reference FOV %.1f degrees ([Unreal3]/[Gyro4All] ZoomReferenceFOV%s)", fov,
                 fov > 0 ? "" : ": 0, PlayerController.DefaultFOV");
@@ -517,7 +516,7 @@ public:
 
     // The game's pitch limit isn't read from it (Camera.ViewPitchMin/Max aren't what every game clamps to): a pitch past
     // kMinLimit that stays put for kStuckMs while every turn asks for more is taken as the limit there, and the turn
-    // stops at it from then on (raised again if the pitch ever goes past it). While it's being learnt, the turn already
+    // stops at it from then on (forgotten if the pitch ever goes past it, which a push tries once a second). While it's being learnt, the turn already
     // stops wherever the pitch is stuck: the stick fallback's 8 undone frames come before kStuckMs at 165 frames/s (Mass
     // Effect LE 3: it started each time, a few ms before the limit was learnt).
     void limit_turn(double& pitch, double& /*yaw*/) override {
@@ -543,13 +542,29 @@ public:
                 log("ue3: the view stops at %.1f degrees down: the gyro's pitch stops there", -bottom_);
             }
         }
-        if (up > top_) top_ = up;
-        if (up < bottom_) bottom_ = up;
+        // The pitch past a learnt limit: it wasn't the game's (a scripted hold, cover, a hitch), forgotten.
+        if (top_ < 90 && up > top_ + 0.05) {
+            log("ue3: the view went past %.1f degrees up: not the game's limit, forgotten", top_);
+            top_ = 90;
+        }
+        if (bottom_ > -90 && up < bottom_ - 0.05) {
+            log("ue3: the view went past %.1f degrees down: not the game's limit, forgotten", -bottom_);
+            bottom_ = -90;
+        }
         // What the turn asks for, before any trim: a push stays a push on the next frames.
         asked_up_ = up + pitch;
+        const double asked = pitch;
         pitch = std::clamp(pitch, bottom_ - up, top_ - up);
         if (pushing > 0) pitch = std::min(pitch, 0.0);
         if (pushing < 0) pitch = std::max(pitch, 0.0);
+        // Once every kProbeMs, a push against a stop gets one frame's turn: where the game no longer holds the view, it
+        // moves past the stop and the stop is forgotten (above); at the game's real limit one undone frame a second is far
+        // below the stick fallback's 8.
+        constexpr ULONGLONG kProbeMs = 1000;
+        if (pitch != asked && now - probe_at_ >= kProbeMs) {
+            probe_at_ = now;
+            pitch = asked;
+        }
         asked_at_ = now;
         last_up_ = up;
     }
@@ -663,7 +678,7 @@ private:
     double acc_pitch_ = 0, acc_yaw_ = 0;
     // limit_turn: the pitch limits as seen (degrees, up positive) and the pitch the last turn asked for.
     double top_ = 90, bottom_ = -90, asked_up_ = 0, last_up_ = 0;
-    ULONGLONG asked_at_ = 0, stuck_since_ = 0;
+    ULONGLONG asked_at_ = 0, stuck_since_ = 0, probe_at_ = 0;
     int stuck_dir_ = 0;
 };
 

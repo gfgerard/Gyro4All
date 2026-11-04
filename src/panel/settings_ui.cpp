@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -96,10 +97,33 @@ void cog(ImDrawList* draw, ImVec2 centre, float r, float thick, ImU32 colour) {
     }
 }
 
+// Settings read through the host, cached: each host read opens and parses the INI files, and every widget reads its
+// value each frame. The cache is dropped on every set() and once a second (edits made to the files by hand).
+struct Cached {
+    bool found = false;
+    std::string value;
+};
+std::map<std::string, Cached> g_cache;
+std::chrono::steady_clock::time_point g_cache_at;
+
+void drop_cache() { g_cache.clear(); }
+
 std::string get(const char* key, const char* fallback = "") {
-    char buffer[256];
-    if (g_settings && g_settings->get(key, buffer, sizeof buffer)) return buffer;
-    return fallback;
+    if (!g_settings) return fallback;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - g_cache_at > std::chrono::seconds(1)) {
+        g_cache.clear();
+        g_cache_at = now;
+    }
+    auto it = g_cache.find(key);
+    if (it == g_cache.end()) {
+        char buffer[256];
+        Cached c;
+        c.found = g_settings->get(key, buffer, sizeof buffer) != 0;
+        if (c.found) c.value = buffer;
+        it = g_cache.emplace(key, std::move(c)).first;
+    }
+    return it->second.found ? it->second.value : fallback;
 }
 
 int get_int(const char* key, int fallback) { return std::atoi(get(key, std::to_string(fallback).c_str()).c_str()); }
@@ -114,6 +138,7 @@ float get_float(const char* key, float fallback) {
 
 void set(const char* key, const std::string& value) {
     if (g_settings) g_settings->set(key, value.c_str());
+    drop_cache();
 }
 
 // Defined below (after `section`): the undo-arrow reset button drawn next to non-default settings.
@@ -127,15 +152,33 @@ void checkbox(const char* label, const char* key, int fallback = 0) {
 
 // Sliders bound to int/float settings; `fallback` is the default used when the INI has no value (the class's own
 // defaults, so the slider shows the same value the game runs with).
+// A slider being dragged keeps its value here and writes it once, on release: writing every frame of the drag would
+// rewrite the INI and reload the settings each time.
+struct Drag {
+    std::string key;
+    float value = 0;
+};
+Drag g_drag;
+
+// After a slider: true when its edit ends (write `value` now); while it is held, its value is kept in g_drag.
+bool slider_commit(const char* key, float value) {
+    if (ImGui::IsItemActive()) g_drag = {key, value};
+    const bool commit = ImGui::IsItemDeactivatedAfterEdit();
+    if (!ImGui::IsItemActive() && g_drag.key == key) g_drag.key.clear();
+    return commit;
+}
+
 void slider_int(const char* label, const char* key, int min, int max, int fallback) {
-    int value = get_int(key, fallback);
-    if (ImGui::SliderInt(label, &value, min, max)) set(key, std::to_string(value));
+    int value = g_drag.key == key ? int(g_drag.value) : get_int(key, fallback);
+    ImGui::SliderInt(label, &value, min, max);
+    if (slider_commit(key, float(value))) set(key, std::to_string(value));
     reset_arrow(key, value != fallback, std::to_string(fallback));
 }
 
 void slider_float(const char* label, const char* key, float min, float max, float fallback, const char* fmt = "%.2f") {
-    float value = get_float(key, fallback);
-    if (ImGui::SliderFloat(label, &value, min, max, fmt)) {
+    float value = g_drag.key == key ? g_drag.value : get_float(key, fallback);
+    ImGui::SliderFloat(label, &value, min, max, fmt);
+    if (slider_commit(key, value)) {
         char text[32];
         std::snprintf(text, sizeof text, fmt, double(value));
         set(key, text);
@@ -446,6 +489,13 @@ void widgets(float s) {
             ImGui::SetTooltip("StickCameraPassButtons: held +200 ms, they give the right stick back to the game\n"
                               "(weapon wheels). Applies on save.");
     }
+
+    section("Stick fallback", s);
+    checkbox("Stick fallback", "StickFallback", 1);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("StickFallback: when the game undoes Gyro4All's camera writes (or its camera wasn't found),\n"
+                          "the gyro goes to the game as right-stick input. Off: the gyro may not turn the camera\n"
+                          "in those games. Restart the game to apply.");
 
     section("Zoom compensation", s);
     ImGui::TextDisabled("Switch \"Adapt to Zoom\" on in the F10 panel's main tab (the ADS tabs inherit it).");

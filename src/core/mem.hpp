@@ -41,7 +41,14 @@ struct Range {
 // Protected exes may merge data into writable+executable sections; those are only included with include_exec
 // (slower to scan: they can be hundreds of MB).
 std::vector<Range> writable_sections(bool include_exec = false);
-bool in_module(uintptr_t address);         // address lies in a loaded module (e.g. a vtable)
+// A module's executable sections (skip_writable: not the writable+executable ones), from its loaded headers.
+std::vector<Range> code_sections(uintptr_t module, bool skip_writable = false);
+// "48 8B ?? ..." as bytes and a mask (0x00 = any byte).
+void parse_pattern(const char* text, std::vector<uint8_t>& bytes, std::vector<uint8_t>& mask);
+// Every address in `sections` where bytes match under mask (mask[0] must be 0xFF), in order; each once. Guarded reads,
+// 1 MB at a time, the first byte found with memchr.
+std::vector<uintptr_t> find_pattern(const std::vector<Range>& sections, const uint8_t* bytes, const uint8_t* mask, size_t n);
+bool in_module(uintptr_t address);        // address lies in a loaded module (e.g. a vtable)
 std::string module_offset(uintptr_t address);  // "Game.exe+0x1234", or "heap 0x..." outside modules
 
 }  // namespace gyro4all::mem

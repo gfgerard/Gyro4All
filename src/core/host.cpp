@@ -533,8 +533,7 @@ void load_zoom(const char* why) {
     const std::string source = lower(settings::get_string(L"ZoomSource", L"Auto"));
     if (source != "auto" && source != "manual") log("settings: ZoomSource=%s not recognised (Auto or Manual)", source.c_str());
     z.manual_only = source == "manual";
-    const double reference = setting_number(L"ZoomReferenceFOV", 0);
-    if (fov::is_valid(reference)) z.reference = reference;
+    if (const double reference = fov::reference_setting(); reference > 0) z.reference = reference;
     for (const std::string& text : split(settings::get_string(L"ZoomLevelsFOV"), ',')) {
         const double level = std::strtod(text.c_str(), nullptr);
         if (fov::is_valid(level)) z.levels.push_back(level);

@@ -1,8 +1,26 @@
 #include "fov.hpp"
 
+#include "log.hpp"
+#include "settings.hpp"
+
 #include <windows.h>
 
+#include <cstdlib>
+#include <string>
+
 namespace gyro4all::fov {
+
+double reference_setting() {
+    const std::string text = settings::get_string(L"ZoomReferenceFOV", L"0");
+    const double fov = std::atof(text.c_str());
+    if (fov == 0 || is_valid(fov)) return fov > 0 ? fov : 0;
+    static std::string logged;
+    if (logged != text) {
+        logged = text;
+        log("settings: ZoomReferenceFOV=%s is not a field of view (degrees, 1-178): ignored", text.c_str());
+    }
+    return 0;
+}
 
 double game_window_aspect() {
     static ULONGLONG next = 0;

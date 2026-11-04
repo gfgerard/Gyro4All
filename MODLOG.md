@@ -7020,6 +7020,26 @@ heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 1
     Builds, 851 checks pass; not yet tested in game: deploying it got the DX12 exe blocked by Denuvo too (the second
     new build that day for DX12 after several earlier ones), which supports the activation-per-build reading above.
     To test the next day, in both exes: the cursor fix, `GyroOffButtons=Triangle` (wheel), the pause flag.
+  - 2026-11-04, DX12 test (user, DualSense): the game started (no Denuvo error); the pause flag works (`asura: paused` /
+    `unpaused`), `GyroOffButtons=Triangle` closes the gate (`gyro off: a GyroOffButtons button held`). **Bug (user): the
+    stick fallback still starts at times, mostly while aiming with a scope, and once near the pitch limit.** Log: about
+    a dozen `the game undid the gyro's camera writes 8 frames in a row`, each off again within 0.5-1.7 s (`keeps the
+    gyro's writes again`, a probe frame), and no `look copy` line in the whole session (the `[player+0x588]+0x20` copy
+    never held the look's direction, so it was never written). Two of them came right after a false pitch limit
+    (`pitch limit down 20.1` / `38.6 degrees (... aiming?)`): an undone write goes back to where it was, which
+    `learn_limits` took for a clamp when the yaw step was small. While the fallback ran it learnt a scoped stick
+    (radial 0.25, curve 1.25, about 60 deg/s, fit 50-56%: below `kSaveFit`, not saved; the saved axial model stays).
+    Reading: in some states (likely the scope) the look update starts from the copy, which the module left untouched, so
+    the game rebuilt the look from it. Changes (builds, 853 checks; not yet tested in game):
+    - the copy, while it is a unit vector but not the look's direction, is turned by the gyro's turn (its own pitch
+      clamped to 85) instead of left alone; still overwritten while it holds the look's direction;
+    - a pitch limit is learnt only from a real clamp: the yaw kept on a clear yaw step, or the pitch moved toward the
+      write before stopping (not back to where it was);
+    - diagnostics: `asura: the look copy at [player+0x588]+0x20: N degrees from the look (...)` / `no object` / `not a
+      direction` on each change, and `asura: the game undid the gyro's writes 3 frames in a row: look ..., written ...,
+      before ...; the copy N degrees from it and M from the write (...); paused flag N` with `writes kept again after N
+      undone` (first 30 each). If the copy is the cause, the undone runs and the fallback stop; if not, these lines say
+      whether the game put the look back to the copy's direction.
 
 - **In game (same day, DualSense, REFramework installed):** the TDB 82 build reads the TDB (`re: TDB 82 ready: 156902
   types`), finds via.Application (365 entries), hooks `LateUpdateBehavior` and runs the first gyro frame;

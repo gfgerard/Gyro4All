@@ -283,11 +283,19 @@ void set_string(const wchar_t* key, const wchar_t* value) {
     }
     std::string out;
     for (const std::string& line : lines) out += line + eol;
-    std::ofstream file(g_settings_path, std::ios::binary | std::ios::trunc);
-    if (file << out)
+    // Written next to it and swapped in: the game thread's settings watcher never reads a half-written file.
+    const std::wstring temp = g_settings_path + L".tmp";
+    bool written = false;
+    {
+        std::ofstream file(temp, std::ios::binary | std::ios::trunc);
+        written = bool(file << out);
+    }
+    if (written && MoveFileExW(temp.c_str(), g_settings_path.c_str(), MOVEFILE_REPLACE_EXISTING))
         log("settings: %s = %s", k.c_str(), v.c_str());
-    else
+    else {
+        DeleteFileW(temp.c_str());
         log("settings: could not write %s to %s", k.c_str(), narrow(g_settings_path).c_str());
+    }
 }
 
 std::string profile_setting(const wchar_t* key) {

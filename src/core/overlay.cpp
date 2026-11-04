@@ -1414,10 +1414,9 @@ bool attach(gl_context* ctx) {
         }
         // One frontend per context used to keep the panel DLL from a not-yet-presented D3D11 swapchain (see below);
         // with a captured DX12 swapchain the game's API is decided.
-        if (panel_host::attach_dx12(ctx, hwnd)) {
-            subclass(hwnd);
-            attach_bridge(ctx);
-        }
+        // GyroLib's panel needs the window's messages even when gyro4all.dll can't attach (subclass is idempotent).
+        subclass(hwnd);
+        if (panel_host::attach_dx12(ctx, hwnd)) attach_bridge(ctx);
         return true;
     }
     if (!g_overlay.load()) {  // no DX12 swapchain: a D3D10/D3D11/D3D9 game's panel, once it has a target

@@ -84,17 +84,43 @@ constexpr double kPi = 3.14159265358979323846, kMaxPitch = 1.5;  // radians (86 
 constexpr uintptr_t kProjectionY = 0x3ec0aa4;
 
 // The rendered vertical FOV in degrees, 0 if unreadable or implausible.
+// The offsets above are one RDR2 build's: used only in RDR2.exe and while both known zoom-camera vtables (exe+0x3399308,
+// exe+0x3399c08) start with a pointer into the exe's image. Another RAGE game (GTA IV) or another build gets no camera
+// (the stick fallback) instead of writes to unrelated memory. Checked once.
+bool build_ok() {
+    static const bool ok = [] {
+        const HMODULE exe = GetModuleHandleW(nullptr);
+        const uintptr_t base = reinterpret_cast<uintptr_t>(exe);
+        wchar_t path[MAX_PATH] = {};
+        GetModuleFileNameW(exe, path, MAX_PATH);
+        const wchar_t* name = wcsrchr(path, L'\\');
+        name = name ? name + 1 : path;
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+        const uintptr_t end = base + nt->OptionalHeader.SizeOfImage;
+        const auto code_ptr = [&](uintptr_t vtable) {
+            const uintptr_t fn = vtable < end ? mem::rdp(vtable) : 0;
+            return fn >= base && fn < end;
+        };
+        const bool good = _wcsicmp(name, L"RDR2.exe") == 0 && code_ptr(base + 0x3399308) && code_ptr(base + 0x3399c08);
+        log("rage: %ls %s", name, good ? "matches the known RDR2 build: camera offsets used"
+                                       : "is not the known RDR2 build: no camera hook (gyro as right stick)");
+        return good;
+    }();
+    return ok;
+}
+
 double vertical_fov() {
     static const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     float y = 0;
-    if (!mem::rd(base + kProjectionY, y) || !std::isfinite(y) || y <= 0) return 0;
+    if (!build_ok() || !mem::rd(base + kProjectionY, y) || !std::isfinite(y) || y <= 0) return 0;
     const double fov = 2 * atan(1.0 / y) * 180 / kPi;
     return fov >= 5 && fov <= 170 ? fov : 0;
 }
 
 uintptr_t director() {
     static const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    return mem::rdp(base + kDirector);
+    return build_ok() ? mem::rdp(base + kDirector) : 0;
 }
 
 // The zoom cameras, by vtable (MODLOG 2026-11-03): aiming (exe+0x3399308) and the binoculars (exe+0x3399c08).
@@ -230,11 +256,7 @@ public:
     // The unzoomed FOV for zoom compensation: the generic [Gyro4All] ZoomReferenceFOV= (horizontal degrees, profile or
     // Gyro4All.ini); 0 or implausible uses the FOV of the camera in use when it isn't a zoom camera. At start and on save.
     void load_zoom_reference() {
-        double fov = std::atof(settings::get_string(L"ZoomReferenceFOV", L"0").c_str());
-        if (fov > 0 && (fov < 5 || fov > 170)) {
-            log("rage: ZoomReferenceFOV=%.1f implausible: ignored", fov);
-            fov = 0;
-        }
+        const double fov = fov::reference_setting();
         if (fov != zoom_reference_fov_)
             log("rage: zoom reference FOV %.1f degrees ([Gyro4All] ZoomReferenceFOV%s)", fov,
                 fov > 0 ? "" : ": 0, the unzoomed camera's FOV");

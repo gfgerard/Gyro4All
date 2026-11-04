@@ -202,22 +202,6 @@ bool nt_headers(HMODULE module, IMAGE_NT_HEADERS64& nt, uintptr_t& at) {
     return true;
 }
 
-// The module's executable sections.
-std::vector<mem::Range> code_sections(HMODULE module) {
-    const uintptr_t base = reinterpret_cast<uintptr_t>(module);
-    std::vector<mem::Range> text;
-    IMAGE_NT_HEADERS64 nt;
-    uintptr_t at = 0;
-    if (!nt_headers(module, nt, at)) return text;
-    const uintptr_t first = at + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + nt.FileHeader.SizeOfOptionalHeader;
-    for (WORD i = 0; i < nt.FileHeader.NumberOfSections; ++i) {
-        IMAGE_SECTION_HEADER s;
-        if (!mem::rd(first + i * sizeof s, s)) return {};
-        if (s.Characteristics & IMAGE_SCN_MEM_EXECUTE) text.push_back({base + s.VirtualAddress, base + s.VirtualAddress + s.Misc.VirtualSize});
-    }
-    return text;
-}
-
 // The DLL's thread-local storage index (its implicit TLS: the slot in every thread's ThreadLocalStoragePointer), or -1.
 int64_t tls_index(HMODULE module) {
     IMAGE_NT_HEADERS64 nt;
@@ -231,45 +215,17 @@ int64_t tls_index(HMODULE module) {
     return index;
 }
 
-// "48 8B ?? ..." as bytes and a mask (0x00 = any byte).
-void parse_pattern(const char* text, std::vector<uint8_t>& bytes, std::vector<uint8_t>& mask) {
-    for (const char* p = text; *p;) {
-        if (*p == ' ') {
-            ++p;
-            continue;
-        }
-        const bool any = p[0] == '?';
-        bytes.push_back(any ? 0 : uint8_t(std::strtoul(std::string(p, 2).c_str(), nullptr, 16)));
-        mask.push_back(any ? 0 : 0xFF);
-        p += 2;
-    }
-}
-
 // Where the pattern matches in the module's code; 0 unless exactly once.
 uintptr_t find_code(HMODULE module, const char* pattern, const char* what) {
     std::vector<uint8_t> code, mask;
-    parse_pattern(pattern, code, mask);
-    const size_t n = code.size();
-    std::vector<uint8_t> chunk(1 << 20);
-    uintptr_t found = 0;
-    int hits = 0;
-    for (const mem::Range& r : code_sections(module)) {
-        for (uintptr_t at = r.begin; at < r.end; at += chunk.size() - n) {
-            const size_t len = std::min<uintptr_t>(chunk.size(), r.end - at);
-            if (len < n || !mem::guarded_copy(chunk.data(), at, len)) continue;
-            for (const uint8_t* p = chunk.data(); (p = static_cast<const uint8_t*>(std::memchr(p, code[0], chunk.data() + len - n + 1 - p)));
-                 ++p) {
-                size_t j = 1;
-                while (j < n && (p[j] & mask[j]) == code[j]) ++j;
-                if (j == n && at + (p - chunk.data()) != found) found = at + (p - chunk.data()), ++hits;
-            }
-            if (len < chunk.size()) break;
-        }
-    }
-    if (hits != 1) {
-        log("halo: %s matched %d times; not used", what, hits);
+    mem::parse_pattern(pattern, code, mask);
+    const std::vector<uintptr_t> hits =
+        mem::find_pattern(mem::code_sections(reinterpret_cast<uintptr_t>(module)), code.data(), mask.data(), code.size());
+    if (hits.size() != 1) {
+        log("halo: %s matched %zu times; not used", what, hits.size());
         return 0;
     }
+    const uintptr_t found = hits.front();
     log("halo: %s at %s", what, mem::module_offset(found).c_str());
     return found;
 }
@@ -319,6 +275,10 @@ std::mutex g_pending_mutex;
 double g_pending_yaw = 0, g_pending_pitch = 0;  // radians, Halo's senses
 std::atomic<uintptr_t> g_write_at{0};           // the player's desired yaw (pitch follows), 0 = none
 std::atomic<DWORD> g_update_thread{0};          // the thread that last ran the update
+std::atomic<ULONGLONG> g_update_at{0};          // when it last ran (GetTickCount64)
+// Turns are queued only while the update runs: a stretch without it (checkpoint load, cutscene) drops them instead of
+// handing the game their sum at once.
+constexpr ULONGLONG kUpdateStaleMs = 100;
 void* g_hooked = nullptr;                       // the hooked update
 uint8_t* g_thunk = nullptr;
 
@@ -328,6 +288,7 @@ bool valid_angles(const float* a) {
 
 void on_update() {
     g_update_thread.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    g_update_at.store(GetTickCount64(), std::memory_order_relaxed);
     double yaw, pitch;
     {
         std::lock_guard lock(g_pending_mutex);
@@ -488,6 +449,10 @@ public:
         if (!angles(a)) return false;
         if (hooked_) {
             std::lock_guard lock(g_pending_mutex);
+            if (GetTickCount64() - g_update_at.load(std::memory_order_relaxed) > kUpdateStaleMs) {
+                g_pending_yaw = g_pending_pitch = 0;  // the update isn't running: nothing builds up for its return
+                return true;
+            }
             g_pending_yaw -= yaw * kRad;
             g_pending_pitch += pitch * kRad;
             return true;
@@ -618,11 +583,7 @@ private:
     // The unzoomed FOV: [Gyro4All] ZoomReferenceFOV= (horizontal degrees, profile or Gyro4All.ini); 0 or implausible
     // uses the game's own (MCC's FOV setting, or the zoom scale). At start and on save.
     void load_zoom_reference() {
-        double fov = std::atof(settings::get_string(L"ZoomReferenceFOV", L"0").c_str());
-        if (fov > 0 && !fov::is_valid(fov)) {
-            log("halo: ZoomReferenceFOV=%.1f implausible: ignored", fov);
-            fov = 0;
-        }
+        const double fov = fov::reference_setting();
         if (fov != zoom_reference_fov_)
             log("halo: zoom reference FOV %.1f degrees ([Gyro4All] ZoomReferenceFOV%s)", fov,
                 fov > 0 ? "" : ": 0, the game's own");
