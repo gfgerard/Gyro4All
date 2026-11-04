@@ -148,6 +148,7 @@ std::wstring lower(std::wstring s) {
 // before this process's first gyro frame: a game that already runs Gyro4All keeps it when it starts a helper exe.
 HANDLE g_session = nullptr, g_legacy_session = nullptr;
 std::wstring g_install_dir;  // lower case
+gyro4all::Engine* g_session_engine = nullptr;  // this process's engine, which tells its helper exes apart
 using CreateProcessA_t = BOOL(WINAPI*)(LPCSTR, LPSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD, LPVOID,
                                        LPCSTR, LPSTARTUPINFOA, LPPROCESS_INFORMATION);
 using CreateProcessW_t = BOOL(WINAPI*)(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD,
@@ -166,6 +167,11 @@ void hand_session_to(std::wstring app, const std::wstring& cmd) {
     if (app.empty() || !GetFullPathNameW(app.c_str(), MAX_PATH, full, nullptr)) return;
     std::wstring path = lower(full);
     if (path.substr(0, path.find_last_of(L"\\/")) != g_install_dir) return;
+    // A helper the engine knows (Cyberpunk starts REDEngineErrorReporter.exe at launch): the game keeps the session.
+    if (g_session_engine && g_session_engine->is_launcher(full)) {
+        gyro4all::log("session: kept (%s, started by this process, is a helper)", gyro4all::narrow(full).c_str());
+        return;
+    }
     gyro4all::log("session: handed to %s (started by this process)", gyro4all::narrow(full).c_str());
     gyro4all::log_close();  // the child opens Gyro4All.log anew
     CloseHandle(g_session);
@@ -243,6 +249,12 @@ void attach(HMODULE self) {
     // The Xbox app's launcher (GameLaunchHelper.exe, next to every PC Game Pass game's exe) starts the game without
     // CreateProcess, so the session can't be handed over: it never runs Gyro4All (Wolfenstein: The New Order).
     if (lower(stem) == L"gamelaunchhelper") return;
+    // A launcher or helper exe of a detected engine (Cyberpunk's REDEngineErrorReporter.exe, which the game starts at
+    // launch and again when it crashes) stays a plain proxy before it touches the session or Gyro4All.log: opening the
+    // log truncates it, and the game's log was lost that way (MODLOG 2026-11-04). The check after select_engine below
+    // still covers an engine forced with Engine=.
+    for (gyro4all::Engine* e : gyro4all::all_engines())
+        if (e->detect(exe) && e->is_launcher(exe)) return;
 
     // Only one process per install runs Gyro4All: Windows loads the proxy into every exe started from this
     // folder (the game, but also a config tool or benchmark shipped next to it), and two instances would
@@ -284,6 +296,7 @@ void attach(HMODULE self) {
     gyro4all::settings::configure(data_dir, stem, mod_dir);
     gyro4all::settings::migrate_from_gyroue(dir);
     gyro4all::Engine& engine = gyro4all::select_engine(exe);
+    g_session_engine = &engine;
     if (engine.is_launcher(exe)) {
         gyro4all::log("session: %s is the game's launcher: no Gyro4All here, the session is left to the game it starts",
                       gyro4all::narrow(exe).c_str());

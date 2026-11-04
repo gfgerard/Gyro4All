@@ -1133,6 +1133,8 @@ void frame() {
     }
     float stick_x = 0, stick_y = 0;
     if (!g_stick_fallback.stick(stick_x, stick_y) || neutral) stick_x = stick_y = 0;
+    if (f.stick_nudge_x != 0 && stick_x == 0 && stick_y == 0 && !neutral && host.focused && !f.paused)
+        stick_x = std::clamp(f.stick_nudge_x, -1.0f, 1.0f);
     trace_stick();
     save_stick_model();
     dinputpad::set_stick(stick_x, stick_y);

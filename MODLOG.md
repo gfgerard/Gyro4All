@@ -7559,3 +7559,173 @@ heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 1
     `main_menu()` is always false there and `first_scene_` changes nothing. Last Light Redux runs the same code (same
     setter offsets): its boot menu stays off; its menu after quitting a level now turns with the gyro; its levels after a
     level change should no longer be taken for the menu. Not installed now, so not checked in game.
+
+## 2026-11-04 Cyberpunk 2077 (GOG, patch 2.50, REDengine 4): recon and the REDengine module's first slice
+- Recon: `games/Cyberpunk2077/MODDING_PLAN.md`. `Cyberpunk2077.exe` product 2.50, file version 3.0.88.46235, PE timestamp
+  `6ad55daf`. No Denuvo, `.text` not encrypted (entropy 6.54), no anti-cheat. Imports `XINPUT9_1_0.dll` and `HID.DLL` (it
+  reads PlayStation pads itself). Window class `W2ViewportClass`. The user's install also has RED4ext (as `winmm.dll`), the
+  Ultimate ASI Loader (`dinput8.dll`) with CET, and ReShade (`dxgi.dll`), so Gyro4All runs there as `version.dll`.
+  - The install's RED4ext 1.29.1 and CET 1.37.1 predate 2.50. RED4ext 1.31.0 and CET 1.38.0 are the first releases for 2.50.
+    The first run with Gyro4All 1.10.0 stopped in RED4ext's plugin loading (ArchiveXL), before any gyro frame. Gyro4All had
+    then no engine for it ("engine: none detected ... using Unreal").
+- **CD Projekt's address file**: `bin\x64\cyberpunk2077_addresses.json` is shipped and updated with the game (it is in GOG's
+  file list and has the exe's date). It is about 150 MB, with 1.1 M entries, of which only 84 are named. Its "Linker map timestamp" equals the exe's PE timestamp.
+  The entries are keyed by stable hashes, as in RED4ext.SDK's `Detail/AddressHashes.hpp`: `CGameEngine` 0x97F209D6 = `0003:002bcb38` (the
+  global `CGameEngine*`, RVA 0x3BBFB38, read by e.g. `mov rax,[rip+..]` at exe+0x18db92); `CRTTISystem_Get` 0x4A610F64 =
+  `0001:00280474`; `CNamePool_Get` 0x68DF07DC = `0001:004f192c`.
+- **gameCameraSystem keeps the active camera's data** (static, from the exe's native registrations: the "lea rdx,[name] ...
+  lea rax,[handler]" blocks at exe+0x1350000..0x1352000):
+  - `GetActiveCameraData` (handler exe+0x2b44364) copies a 0x80-byte struct from `this+0x500` (copy at exe+0x2a5c80);
+  - `GetActiveCameraFOV` (exe+0x18c6220) reads the float at `+0x520`;
+  - `GetActiveCameraForward` (exe+0x2b44384 -> exe+0x2a447c) reads `+0x500..0x508` as int32 (fixed-point world position,
+    scaled by a constant) and rotates by the quaternion at `+0x510`.
+  - So: `+0x500` int32[3] position, `+0x510` float[4] quaternion (i, j, k, r), `+0x520` FOV. Not yet known: whether the FOV
+    is horizontal or vertical, and whether a write there sticks (it is most likely a per-frame copy).
+- Scene path (RED4ext.SDK layouts, SDK commit of 2026-11-02, not yet checked live): CGameEngine `+0x348` framework, then `+0x10`
+  GameInstance, then `+0x38` `DynArray<Handle<IScriptable>>` of the game systems. IScriptable `+0x30` is its CClass*. A CClass has its
+  parent at `+0x10` and its name (CName = FNV-1a 64 of the name) at `+0x18`.
+- Camera classes (exe RTTI names and SDK):
+  - `gameFPPCameraComponent` (on foot; `pitchMin/Max` +0x3E0/+0x3E4, `yawMaxLeft/Right` +0x3E8/+0x3EC,
+    `headingLocked` +0x3F6, `sensitivityMultX/Y` +0x498/+0x49C);
+  - `vehicleTPPCameraComponent` (vehicles in third person, size 0x680). Its owner is a `vehicleCarBaseObject`, a
+    `vehicleBikeBaseObject` or another `vehicleBaseObject`;
+  - cinematic and other cameras: `vehicleCinematicCameraComponent`, `gameWorldSpaceBlendCamera`, `gameFreeCameraComponent`,
+    `gamePhotoModeBackgroundCameraComponent`, `entVirtualCameraComponent`;
+  - the common base is `entBaseCameraComponent` (`fov` +0x128, `zoom` +0x15C), and `entIPlacedComponent` keeps
+    `localTransform` at +0xC0.
+- `src/engines/redEngine/red_engine.cpp` (new, Engine= `REDengine`):
+  - Detection: `<root>\archive\pc\content` plus `<root>\engine\config`. `REDEngineErrorReporter.exe` is a launcher.
+  - A thread started in configure() resolves CGameEngine from the address file. Each frame the module reads the camera
+    system's active camera data.
+  - RTTI without calling game code: when `+0x30` is empty, it decodes the vtable's GetNativeType getter (`lea/mov rax,[rip+x]; ret`).
+  - It finds the camera components by scanning the PlayerPuppet (from gamePlayerSystem) and the camera system for pointers,
+    handles and arrays of handles. It logs them with their owners and learns, per class, which offset holds the orientation
+    that matches the active camera. That gives the kind: on foot (view 1), car (2), motorcycle (3), or cinematic (view 0, no gyro).
+  - No camera write yet: the blind stick fallback (`no_camera`).
+  - Built (no warnings). **Not run in game yet**: it waits for the user's RED4ext/CET update. Every offset and heuristic above
+    except the address-file lookup and the camera-system natives is unverified live.
+- Next: run it and read the `red:` log lines (camera components found, orientation offsets, kinds while walking, driving
+  a car or bike in FPP and TPP, and in a scene). Then find the write that sticks: the FPP camera's or player's orientation, and
+  the vehicle TPP camera's. Use camtrace if the components lead nowhere. Then FOV for zoom compensation (`+0x520` vs
+  `entBaseCameraComponent.fov` and `zoom`).
+- 2026-11-04 **First runs (user's install: no RED4ext/CET, ReShade on; DualSense USB)**:
+  - **Session lost to the crash reporter**: the game starts `REDEngineErrorReporter.exe` at launch. The CreateProcess
+    hook handed it the session before the first frame, and closed the game's log. The reporter's Gyro4All then
+    truncated `Gyro4All.log` again. This also explains why 1.10.0's runs left no trace and, very likely, why the user saw
+    no F10 panel then. Fixes in `dllmain.cpp`: a helper exe of a detected engine (`Engine::is_launcher`) returns before
+    the session mutex and before opening the log, and `hand_session_to` keeps the session when the child is such a helper
+    (log `session: kept (... is a helper)`).
+  - **Crash at the first scan**: Cyberpunk imports `AddVectoredExceptionHandler`. Its handler sees an access violation
+    before our `__except`, so a faulting guarded read ended the game (CrashInfo.json `timeCrash` in the same second as
+    `red: active camera data found`). Fix: the module checks every read with VirtualQuery first (committed, readable,
+    no guard page; regions cached for one frame). **Other engines' guarded reads would crash this game too.**
+  - Verified live (main menu and gameplay): the address-file lookup, the CGameEngine -> GameInstance -> systems path,
+    and the camera system's `+0x500` data (FOV 60, then 59.23).
+    - The camera system's `+0x48` is a DynArray of handles that holds the active camera component: on foot,
+      `gameFPPCameraComponent`, owner `PlayerPuppet`.
+    - The FPP component keeps the active orientation at `+0xF0`, so its world transform is probably at `+0xE0`.
+    - Not yet working: the PlayerPuppet scan of `gamePlayerSystem +0x48..0x70` ("no player").
+    - With 0 components (loading), the module reports "cinematic". The F10 panel attaches and opens (DX12, HDR10).
+- 2026-11-04 **Gyro "like jelly" on foot, then the hunt for the view's source.** The user reported that the gyro wobbles a lot on
+  foot, even with the pad lying on the table. The cause is the blind stick fallback: dead zone, curve, pulses for slow turns,
+  and drift while GyroLib calibrates. The fix is a direct write. Read-only search with camtrace `guided.py --up z`.
+  - **First run picked the wrong reference.** By itself it chose the largest group of identical unit vectors
+    (60 copies, heading only ±90). Pass `--ref` to the forward vector instead: one checked against the camera system's
+    `+0x510` quaternion (here the forward vector of the active camera, x/y/z with Z up).
+  - **Copies, with their writers** (one-hit hardware breakpoints, cdb; the game survives them with RED4ext/CET absent):
+    - `{roll, pitch, yaw}` in degrees in a render-frame struct (`+0x31210`), written by `exe+0x19c92c..0x19c93a` from a quaternion.
+    - `gameFPPCameraComponent +0x42C/+0x430` (pitch in degrees): pulled every frame (`exe+0x5fd7cc`) from the named float
+      variables of the player's `entAnimatedComponent` (the FPP component's `+0x380`), lookup `exe+0x5fd920`. The variable
+      table is rebuilt each frame (`exe+0x189c8f`, a bulk copy).
+    - `{roll, pitch, yaw}` copies on the FPP side, a stale unwrapped yaw on the character controller (+0xA0 of the native object at
+      `moveComponent +0xA8`), the player root `entPlaceholderComponent` (`PlayerPuppet +0xB0`) local orientation `+0xD0`
+      (rewritten by `exe+0x404389`) and world orientation `+0xF0` (kept but not read back), and `moveComponent +0x1D0`
+      (written by `exe+0x20d83d`).
+  - **Pitch source found:** a float in degrees in an animation graph node's state (a buffer of the anim graph instance,
+    no RTTI header). A +20 write kept, and the view's pitch followed (7.5 -> 27.5). The integrator is native, `exe+0xa93d7c`:
+    `state+0x1B0 += in[+0x8]`, clamped to `in[+0x14 .. +0x18]`, and `state+0x1C0 = state+0x1B0 + state+0x1B8`. Its yaw twin, just before,
+    is `state+0x1AC += in[+0x0]`, clamped to `in[+0xC .. +0x10]`; on foot it stays 0. The FOV is next to it (`state+0x1A8`, 59.23).
+    There is no stable pointer path to it yet: the only heap pointers come from inside the same buffer, and
+    none was found within three levels of the FPP component, the player, its animated component or the camera system.
+  - **Yaw source on foot: not found yet.** Path so far: the player root's local orientation <- `moveComponent` (`entIMoverComponent`) `+0x1D0`
+    <- a quaternion built in the mover update as `quatmul(moveComponent +0x240, current)` (`exe+0x20d569..0x20d5a4`), pushed
+    to the character controller (vtable call `+0x40` on `moveComponent +0xA8`). `+0x240` is identity while the
+    player stands still; a 30° write there kept but didn't turn the view (the update doesn't take that path while idle).
+  - **Yaw source found:** the mover update reads the body orientation every frame from `moveComponent +0x160` (a native
+    object, vtable `exe+0x3098390`) `+0x30` (quaternion i, j, k, r; getter `exe+0x1945270`, reached from `exe+0x20c984`
+    when `moveComponent +0x154 != 0` and `+0x140 != 0`). A 30° write there kept, and the view turned with it.
+  - **Stable paths:** the `moveComponent` is one of the PlayerPuppet's components (entEntity `+0xA0`). The look node
+    state is `FPP +0x380` (the player's entAnimatedComponent) `+0x240` (a second entAnimatedComponent) `+0x270` (graph
+    instance, no RTTI) `+0x28` -> pointer -> `+0xDA0`. Checked live: state `+0x1A8` = the camera system's FOV,
+    `+0x1B0` = `FPP +0x430`, `+0x1C0` = `+0x1B0` + `+0x1B8`. The FPP camera's pitch limits (`+0x3E0/+0x3E4`) are ±80.
+  - Live write test through those paths (scratchpad script, the same writes as the module): yaw +20 and pitch +15 both
+    held, and the view followed (heading -128.26 -> -108.26, pitch -9.41 -> 5.59).
+  - Module: on foot, `apply` now rotates the body quaternion about Z (a turn right is a negative rotation) and adds the
+    pitch to the look node. `limit_turn` keeps the pitch within the FPP limits. The sources are re-resolved and
+    checked every frame, and on any mismatch the module falls back to the stick with a logged reason. Vehicles still use the
+    stick. Built; **not run in game with the gyro yet.**
+  - First run in game: the module alternated every frame between the direct write and the stick fallback ("the look
+    node isn't where expected", about 1500 switches in a few seconds of turning). Cause: the value checks (pitch vs
+    `FPP+0x430`, `+0x1C0 == +0x1B0 + +0x1B8`, body yaw vs camera yaw) ran every frame, and on the frame after our own
+    write the camera and the FPP copy still hold last frame's view. Fix: the value checks run once per object the path
+    finds (`trusted_body_`, `trusted_look_`); after that only the structure (classes, mover mode, unit quaternion
+    with no pitch, pitch in range) is checked. Built; not run in game yet.
+  - Zoom FOV (read-only sampling while aiming in and out, then RTTI): the active camera data's FOV (camera system
+    `+0x520`, also `+0x80`) narrows while aiming (69 -> 56.85 with a pistol). The unzoomed one is the active camera
+    component's own `entBaseCameraComponent.fov` at `+0x128` (RTTI property; its siblings: `zoom +0x15C`,
+    `nearPlaneOverride +0x168`, `farPlaneOverride +0x16C`, `motionBlurScale +0x170`), which stayed at 69 throughout.
+    The FOV setting (70-100) is not either value: 80 gave about 60 and 90 gives 69 (tan(v/2) = 0.6875 tan(s/2) fits
+    both). Whether the camera's value is vertical is not verified; the module reports both as vertical and declares
+    zoom on all three views. First game run: Adapt to Zoom did nothing through a scope: the FOV stays put there.
+  - Scopes: the camera system has a zoom factor at `+0x53C` (copies at `+0x8C`, FPP `+0x27C`) that goes 1 -> 5.25 with a
+    sniper rifle's scope while `+0x520` stays at 59.23; the FPP component's RTTI `zoom` (`+0x15C`) stays 1. The module now
+    reports 2 atan(tan(fov / 2) / zoom), taking the factor as a focal-length one (not verified against the rendered view).
+    Built; not run in game yet.
+  - Vehicles in first person (car, read-only sampling with the stick, then a live write): the FPP camera stays active
+    and the body follows the vehicle, so the on-foot check failed and the gyro went to the blind stick. The look node's
+    yaw (`+0x1AC`, 0 on foot) turns the head: `+0x1BC = +0x1AC + +0x1B4`, copied to FPP `+0x42C`; it goes down to the
+    right and stays within +-177.5. Writing -20 turned the view 17 degrees right, then the game brought it back to 0 in
+    about 2 s (its own recentering, as after letting go of the stick). Pitch is the same `+0x1B0`; the FPP pitch limits
+    become -20/60 seated. Seated vs on foot: moveComponent `+0x158` 0 vs 1, FPP `+0x400` (and `+0x418`) 1 vs 0; the
+    mover mode stays 2 and `PlayerPuppet`'s RTTI `mountedVehicle` (`+0x450`) was null in the car. Third person in car
+    and bike: the vehicleTPPCameraComponent matched once and then not (its stored orientation lags the view), so the
+    module calls it cinematic and the gyro is off there. The module now writes the look yaw and pitch while seated.
+    Built; not run in game yet.
+  - Later the same day:
+    - Zoom FOV formula fix: the first build reported twice the angle (118 instead of 59). It now reports
+      atan(tan(fov / 2) / zoom) * 2.
+    - False stick fallback: closing the GyroLib panel made one frame's writes look undone, and the core switched to the
+      learning stick fallback. The camera id never changes, so it never came back. `view_angles` now returns false (no
+      write check): the sources are checked once when found (the trusted checks) instead.
+    - Seated in a vehicle (first person), the user asked for no gyro and no stick fallback while driving. The module
+      now reports no gameplay view there (`view_id` 0). The look yaw/pitch writes stay in the code for a weapon-drawn
+      case.
+    - Weapon drawn while seated: a read-only 40 s sample (draw and holster 4-5 times) over FPP 0x600, PlayerPuppet
+      0x1000, moveComponent 0x400, the look node 0x2000 and the camera system 0x780 found no clean step signal. The
+      camera system `+0x4A0..+0x4F4` dwords flip between 0 and 0xFFFFFFFF on their own timing (masks), and PlayerPuppet
+      `+0x130` takes 0x531/0x536/0x53B. Neither matched the draws without timed cues. Seated stays gyro off.
+    - Sound-cued resample (7 s phases, holstered/drawn x3, read-only) found clean steps: FPP `+0x454` 0 -> 10 and
+      `+0x460` 0 -> 50 with the weapon drawn in the seat (also `+0x3CC` 60 -> 25, `+0x444` 2.5 -> 5, `+0x450` 15 -> 30;
+      PlayerPuppet `+0xDF8` 6 -> 1). The FPP RTTI properties are pitchMin `+0x3E0`, pitchMax `+0x3E4`, yawMaxLeft
+      `+0x3E8`, yawMaxRight `+0x3EC`, headingLocked `+0x3F6`, sensitivityMultX/Y `+0x498`/`+0x49C`, so those steps are
+      unreflected. In game the steps came out the other way round: the first build turned the gyro on while driving and
+      off with the weapon out. The cues were probably followed in reverse. Corrected: `+0x454`/`+0x460` are 10/50 while
+      driving and 0 with a weapon drawn in the seat. The seated gyro is on only while both are 0; driving stays off,
+      with no stick fallback.
+    - In game (corrected build): the gyro turns on with the weapon drawn in the seat, but past some angle the game
+      recentres the look yaw. After one touch of the right stick the aim is free (no recentring) until the weapon is
+      holstered. A spoken-cue sample (holster / draw without touching the stick / nudge the stick, x3) over FPP 0x800,
+      PlayerPuppet 0x2000, the look node 0x3000, the camera system 0x800 and every player component 0x400 found no flag
+      for that free aim: only pose floats (head/bone positions) tell the two apart. The FPP at that moment: yawMaxLeft/
+      Right 177.5/-177.5, headingLocked 1, `+0x3F8`/`+0x3FC` 3.0/1.5.
+    - Core: `EngineFrame::stick_nudge_x`, a small right-stick deflection the host shows the game (XInput, the native pad,
+      DirectInput) on frames where the player's stick and the stick fallback are idle. The REDengine module sends 6
+      frames of +-0.2, alternating sides so the view doesn't turn, when a weapon is drawn in the seat.
+    - The user reports the game's camera recentring (an option that can't be turned off) locks the aim again once the
+      vehicle accelerates, even after the stick unlocked it. So the module also sends the nudge whenever the look yaw
+      goes back toward 0 on its own between frames: more than 0.15 per frame from beyond 3 degrees, measured against
+      its own last write, with a 20-frame cooldown. Each nudge is logged as "seated aim recentring".
+    - Tested in game by the user: the gyro aims from the car seat with a weapon drawn, is off while driving, and the user
+      reports it works well. Pad: DualSense, wired (64-byte 0x01 reports); Steam Input off. The log showed a recentring
+      nudge about every 1.6 s while aiming. The on-foot view, the scope zoom compensation and the panel-close fix were
+      not checked separately in this run.

@@ -48,6 +48,9 @@ struct EngineFrame {
     // Current and unzoomed reference FOV for GyroLib's zoom compensation. Both vertical degrees, same projection.
     // Empty or invalid values bypass compensation for this update; the engine converts any horizontal FOV itself.
     std::optional<ZoomFov> zoom_fov;
+    // A small right-stick deflection (-1..1, horizontal) shown to the game this frame, while the player's own stick and
+    // the stick fallback are idle: for games whose camera only goes free after seeing stick input (0 = none).
+    float stick_nudge_x = 0;
 };
 
 // View ids of the core's sensitivity profiles (ADS, ALT_ADS, OTHER): an engine must not give them to its own views.
