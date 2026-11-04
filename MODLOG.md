@@ -5,6 +5,266 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-03 **007 First Light: the gyro sometimes stops while aiming (L2); per-aim diagnostics added** (builds, 853
+  checks pass; not yet tested in game). User log (1.9.0, DualSense USB, GyroLib trigger activation on L2): no gate
+  problem (the only "gyro off" lines are pauses, loads and 25 ms cursor blips), motion at 1000 samples/s throughout,
+  every status block "100% turned". But "turned" only means the write landed: `turn_camera` reported success even when
+  `turn_point` skipped the aim camera's point (unreadable, < 0.1 m, > 1e12 m), and nothing checked that the view
+  followed. The aim cameras (006B, 0071, 0063) were logged with and without "looks at a point" seconds apart. Reporter's
+  finding afterwards: with the mouse cursor over the pause menu the game keeps switching to its keyboard layout; moving
+  the mouse away fixed it once, not the second time. The game reads the mouse through DirectInput (non-exclusive,
+  background), so mouse input reaches it in gameplay. Hypothesis (unconfirmed): in keyboard-and-mouse mode the aim
+  camera takes its aim from the mouse and rewrites the gyro's point.
+  - New line per stretch of gyro turns on one active camera (`glacier_look.cpp`, `aim_frame`/`aim_turned`/`aim_end`):
+    `glacier: aim|camera <handle> for N ms (ended N ms ago): N gyro frames; point turned/none/unreadable/near/far,
+    rewritten by the game N; asked yaw/pitch, view moved yaw/pitch over N frame pairs: followed (N%)|NOT FOLLOWED
+    (N%)|too little turn to judge; game mouse input N, keyboard N, cursor moved N`. The follow check compares the
+    derived view's movement between consecutive gyro frames (<= 100 ms apart) with the previous frame's turn; judged
+    from 2 degrees and 10 pairs, NOT FOLLOWED below 50%. "Rewritten": the point found differs from the one written on
+    the last frame by more than 1e-3 of its size (the stick, aim assist or the mouse). Aim lines: first 40 per session;
+    NOT FOLLOWED lines (any camera): up to 50. A stretch ends on a camera change, a transition, or 500 ms without a turn
+    (checked at each turn and status line).
+  - `dinputpad::desktop_input`: counts the game's DirectInput mouse/keyboard reads with motion or something held
+    (buffered reads: their events), not those idled for the panel. Cursor moves from `GetCursorPos` per gyro frame.
+  - Camera line fix: "once per camera" kept 16 full handles, whose generation changes on every switch, so after 16 it
+    logged every switch (the spam after 22:06 in that log). Now 64 entities; "looks at a point now" says it's the state
+    at the first turn only.
+  - **Reporter's clarification: the gyro is dead for the first 1-2 s of every L2 aim, then works until L2 is released;
+    fine at first, then "suddenly" on every aim; gyro on L1 is fine.** That is the zoom's transition camera (no orbit
+    state; 0.3-2.25 s in the first log). `turn_all` copied the orbit update's camera list into a 64-entry buffer and
+    turned nothing when the list was longer; the list grows as the level streams cameras in (entities up to 0x18E in
+    that log), and the transition line only covered the first 12 transitions, so it never showed. Fix (builds, 853
+    checks; not yet tested in game): up to 65536 entries (every 16-bit entity, so no limit the game can reach; a static buffer, game thread), and the transition line now also
+    comes for every transition whose frames didn't all turn the cameras (up to 50), with the list's length (`N cameras in
+    the list` / `camera list unreadable`); its frames and asked turn are counted even when nothing could be turned.
+    Unconfirmed until the reporter's log shows the list's length.
+  - Next: the reporter's log with this build after it happens; if `NOT FOLLOWED` comes with game mouse input, idle the
+    game's DirectInput mouse during controller gameplay (the panel's idling in `dinputpad.cpp` already does it).
+- 2026-11-03 **Halo: The Master Chief Collection (Xbox app, package 1.3528.0.0)**: plan in
+  `games/HaloMCC/MODDING_PLAN.md`. `MCCWinStore-Win64-Shipping.exe` is a UE4 shell; each game is a Blam! DLL
+  (`halo1\halo1.dll` ... `halo4\halo4.dll`) loaded into the same process when picked from the menu. User test: `winmm.dll`
+  loads, the XInput translation reaches Halo: Reach (slot 0 polled, the player's sticks pass), but the Unreal module saw
+  `MCCPlayerController` with a `DefaultPawn` during play ("gyro off: no gameplay view", gyro stick 0.00). New module
+  `src/engines/halo/` (`Halo`): detected by the game DLL folders four levels above the exe, ahead of Unreal (the fallback
+  is now `fallback_engine()`, still Unreal); no camera hook, so the gyro goes to every game as right stick (blind stick
+  fallback); menus by the mouse cursor only. User test: the gyro turns Halo CE's camera as right stick, launched through the
+  `HaloMCCShippingNoEAC` entry (`explorer.exe shell:AppsFolder\Microsoft.Chelan_8wekyb3d8bbwe!HaloMCCShippingNoEAC`).
+  Pad, connection and Steam Input state not recorded. The normal entry (EAC) fails at start with the proxy installed (no log).
+- 2026-11-03 **Halo CE (MCC `halo1.dll`, build 2025.08.16) view found statically.** Live searches failed (Z-up engine; the
+  view copies picked were the camera's up vector / reused buffers; `guided.py` gained `--up z` and `--module <dll>`, and
+  camtrace's `Proc.add_module`). Static route: the script functions `get_yaw_rate`/`set_yaw_rate` (found through their
+  `hs` function table entries, name pointer + `0xbfbc30` + impl) read the per-player look rates at RVA `0x2ea0610`
+  (stride `0x8a0`: yaw 120, pitch 60 deg/s). The input update `halo1.dll+0xa97cf4` turns stick x rate x tick into a
+  per-tick action: yaw delta `+0xc`, pitch delta `+0x10` (radians). The player-control update `halo1.dll+0xa99c1c` adds
+  it: player-control array pointer at `halo1.dll+0x2d8fe70` (`mov rdi, [rip+..]` at `+0xa99c3d`), stride `0x58`, unit
+  handle `+0x10`, **desired yaw `+0x1c`** (radians, wrapped by 2 pi), desired pitch `+0x20` (clamped to +-1.49226 rad).
+  Write test: +0.349 rad on yaw kept, and the view turned with it (user check): this is the source.
+  Halo module: finds the pointer by the player-control update's `mov rdi,[rip+..]` (`48 8B 3D ?? ?? ?? ?? 33 F6 4C 8B 0D
+  ?? ?? ?? ?? 4C 8B 15 ?? ?? ?? ?? 0F 29 70 B8`, one match) whenever `halo1.dll` loads, and writes entry 0's yaw (gyro
+  yaw right = Halo yaw down) and pitch (clamped to +-1.49226); in game while that entry has a unit (`+0x10` != -1).
+  Other games keep the blind stick fallback. Builds and deployed; not yet tested in game. The string `player control globals`
+  has no code reference in this build.
+- 2026-11-03 **MCC's other six games: the same player control, found statically** (same MCC build). Route: the string
+  `player control globals` names the game-state allocation (Halo 2: `0x2f8` bytes, pointer kept in a global; Halo 3 and
+  later: the pointer kept in the DLL's thread-local block, `gs:[0x58]` -> `[_tls_index]` -> slot); every game's
+  player-control update loads the pitch clamp +-1.49226 (the same constant as Halo CE) and does `yaw += delta`
+  (`addss` + `movss` on the entry's yaw), wraps by 2 pi, and keeps pitch at yaw + 4. In Halo 3, the gaze script functions
+  (`player_control_unlock_gaze` -> entry stride `0x110`, gaze flag `+0x1b8`) led there too. Entry 0 (first local player),
+  offsets from the globals' start:
+
+  | DLL | globals' pointer | entry stride | unit | desired yaw / pitch | update |
+  |---|---|---|---|---|---|
+  | `halo1.dll` | global `+0x2d8fe70` | `0x58` | `+0x10` | `+0x1c` / `+0x20` | `+0xa99c1c` |
+  | `halo2.dll` | global `+0x15e40d0` | `0xb8` | `+0x18` | `+0x38` / `+0x3c` | `+0x6c3df0` |
+  | `groundhog.dll` (H2A multiplayer) | TLS slot `0xb8` | `0x200` | `+0x120` | `+0x138` / `+0x13c` | `+0xa78d4` |
+  | `halo3.dll` | TLS slot `0xc0` | `0x110` | `+0xc0` | `+0xd4` / `+0xd8` | `+0xf7df0` |
+  | `halo3odst.dll` | TLS slot `0xd8` | `0x2c0` | `+0xc0` | `+0xd4` / `+0xd8` | `+0x113ab8` |
+  | `haloreach.dll` | TLS slot `0xd8` | `0x180` | `+0x80` | `+0x94` / `+0x98` | `+0x6375c` |
+  | `halo4.dll` | TLS slot `0xb0` | `0x1f0` | `+0x120` | `+0x138` / `+0x13c` | `+0xa8b34` |
+
+  The Halo module now has one table of these (`kGames`): per game, a signature of the update from the globals load to
+  entry 0's unit read and one of its `yaw += delta` (both one match per DLL, with the slot and offsets as literal bytes,
+  rip and branch displacements wildcarded). For TLS games the index comes from the DLL's TLS directory, and the pointer
+  from scanning every thread's TEB (`+0x58` ThreadLocalStoragePointer, through `NtQueryInformationThread`), at most once a
+  second while there is no player; the log lists each distinct pointer found. Unknown: which threads hold it and whether
+  writes from the shell's thread stick in the later games (Halo CE's write test is the only one). Builds and deployed; not
+  yet tested in game.
+  First in-game run (Halo CE): the update and pointer were found, but the player never was: the globals pointer is only
+  4-byte aligned (it ended in `...484`; entry 0 read live had unit set, yaw 3.78, pitch -0.17) and `mem::rdp`'s default
+  8-byte plausibility check returned 0. The module now reads that pointer (and the TLS slot's) with 4-byte alignment.
+  With the player missing the module reports a menu, so neither the gyro nor the stick fallback ran. After the fix the user
+  confirmed the gyro turns Halo CE's view in game (USB, Steam Input off; pad model not reported). The other six
+  games are still untested.
+- 2026-11-03 **Halo CE's FOV found** (MCC `halo1.dll`, same build; read-only, no debugger). Halo CE's code has no FOV
+  strings to follow, so I did a live scan with sound cues: snapshots of every RW region while not zoomed, then zoomed with
+  the pistol (2x), then not zoomed again. Each phase was read twice, a second apart, and a value had to stay the same while
+  the player held still. Without that check, UI and particle animations swamped the results. Result: **1.36136 rad
+  (exactly 78.0 deg) -> 0.68068 (exactly half) with the 2x zoom**. Halo CE divides the angle itself by the
+  magnification; it does not use tan. Live copies at `halo1.dll+0x2d9b978`, `+0x2d9b9e0`, `+0x2d9bd88`, `+0x2d9be0c`
+  and `+0x2d9be2c`. `+0x2d9b9c0` looks like the rendered camera: position `+0x4` (x, y, z), **FOV `+0x20`**, forward
+  `+0x24` and up `+0x30` (unit vectors). `+0x2d9b978` is set by the camera update `halo1.dll+0xb14c48`
+  (`lea rcx,[rip+..]` to it at `+0xb14c6b`). 78 deg is the default of MCC's FOV setting for Halo CE (user check); taken as horizontal (not yet confirmed by
+  moving the slider and checking the value follows). Another value (degrees), `halo1.dll+0x1baa97c`, went 78.153 -> 40.345 on
+  zoom.
+  Halo module: finds `+0x2d9b978` by the camera update's `lea rcx,[rip+..]` (`4C 8B C2 0F 29 7C 24 30 48 8B FA 0F 28 FB
+  48 8B D1 48 8D 0D ?? ?? ?? ?? E8`, one match) whenever `halo1.dll` loads, and reports it to the zoom compensation as
+  horizontal degrees converted to vertical with the window's aspect. The view is marked `zoom_available`.
+  **MCC's FOV settings** (first and third person, up to 120 deg): with them set to 83 and 97, a value search found them
+  only as radians, next to each other: `halo1.dll+0x2b32cdc` (first person) and `+0x2b32ce0` (third person). Degree
+  copies elsewhere were too many to tell apart. The camera FOV then read 83 deg. The settings are found by the DLL's
+  static initializer that clears both (`44 21 35 ?? ?? ?? ?? 44 8D 43 F8 44 21 35 ?? ?? ?? ?? 48 8D 0D ?? ?? ?? ?? 33 D2 4C
+  89 35 ?? ?? ?? ?? 4C 89 35 ?? ?? ?? ??`, one match; displacements at +3 and +14, checked to be 4 bytes apart). The
+  reference is `ZoomReferenceFOV=` (horizontal degrees) or else the setting for the camera in use. The third-person
+  setting applies while the camera FOV equals it exactly (vehicles), otherwise the first-person one; the last mode is kept
+  through a zoom. This replaced a first version that took the widest FOV held for a second: after a vehicle with a wider
+  third-person FOV, it would have treated walking as zoomed. Unverified: whether Halo CE's vehicle camera uses the
+  third-person setting, and whether the value is horizontal. The other games report no FOV yet. Builds; not yet deployed
+  (MCC was running) or tested in game.
+- 2026-11-04 **Halo 2's FOV found** (MCC `halo2.dll`, same build; read-only, no debugger). The user confirmed Halo 2's gyro
+  works with the defaults (USB, Steam Input off). MCC's FOV settings were still 83 and 97. A value search found 83 as radians (1.44862) only in
+  copies of the camera inside `halo2.dll`, never as a stored setting, and no 97 in radians. The zoom scan (the same
+  sound-cued scan, a zoom weapon) showed **1.44862 -> 0.48287 (exactly a third)**, so Halo 2 also divides the angle by
+  the magnification. The local players' cameras are at `halo2.dll+0x15f2978`, stride `0x368`, 4 players, set by
+  the camera update `halo2.dll+0x6f1a60`. Its `lea r14,[rip+..]` at `+0x6f1a7d` points to the start of player 0's
+  camera. Within that camera: an active byte `+0`, position `+0x4`, forward and up after it, FOV `+0x3c` (horizontal
+  radians), `+0x40` = 1.3333, `+0x50` = 1.1717 (the vertical FOV for 4:3), and **zoom scale `+0x54`**: 1.0 unzoomed,
+  0.3333 at this zoom, so 1 / magnification. Render copies of the FOV are at `+0x15f28f0` and `+0x15eb238`.
+  Halo module: signature `48 81 EC A0 00 00 00 F3 0F 10 0D ?? ?? ?? ?? 4C 8D 35 ?? ?? ?? ?? F3 0F 59 C8 48 8D 2D ?? ?? ??
+  ?? 33 F6` (one match; the lea at +15), FOV at the lea's target `+0x3c`, zoom scale at `+0x54` (new `Game` fields
+  `fov_at`, `zoom_scale`). The reference FOV is `ZoomReferenceFOV=` or else the current FOV / zoom scale, so a vehicle's
+  or any other unzoomed FOV is its own reference and only a zoom counts. Builds; not yet tested in game.
+- 2026-11-04 **Halo 3's FOV found** (MCC `halo3.dll`, same build; read-only, no debugger). MCC's FOV settings are in
+  `halo3.dll` as **degrees**, first then third person, at `+0x2d3ede4` / `+0x2d3ede8`. They sit in player 0's profile
+  at `+0x2d3ed70`: 4 local players' profiles of `0xd78` bytes, built by the constructor at `+0x6f8de8` (`lea rcx` at
+  `+0x6f8e07`), with the FOVs at `+0x74` / `+0x78`. Nothing in RW memory with 83 deg as radians changed on zoom. The
+  zoom scan found the render camera at `+0x2d2f688` (position, forward, up), followed by two FOVs:
+  - `+0x2d2f6b0` went 0.91977 -> 0.28672 (ratio 0.312);
+  - **`+0x2d2f6b4` went 0.93079 -> 0.31026, exactly a third**.
+
+  The user then set the first-person setting to 100 (game resolution 3840x2160). `+0x2d2f6b4` read **1.1214286**, so
+  it is linear in the setting: setting x 9/14, in degrees converted with pi = 3.14 (100 -> 157/140), taken as the
+  vertical FOV. At 100, `+0x2d2f6b0` read 1.14514 (above `+0x6b4`; at 83 it was below), unexplained and not used.
+  Halo module:
+  - camera: `lea rcx,[rip+..]` to `+0x2d2f688` at `+0x24cc12` (`48 8D 0D ?? ?? ?? ?? 48 03 D3 E8 ?? ?? ?? ?? 4C 8B 05 ??
+    ?? ?? ?? 48 8D 0D ?? ?? ?? ?? 48 8B 15 ?? ?? ?? ?? 49 81 C0 A0 00 00 00 48 03 D3 0F 57 DB`, one match), FOV at `+0x2c`;
+  - settings: the profile constructor (`48 83 EC 38 48 C7 44 24 20 FE FF FF FF 4C 8D 0D ?? ?? ?? ?? BA 78 0D 00 00 41
+    B8 04 00 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 90 48 83 C4 38 C3`, one match, lea at +31), then `+0x74`;
+  - new `Game` fields `fov_settings_at`, `fov_settings_scale` (3.14 / 280) and `fov_vertical`;
+  - the settings match the camera within 1e-4 relative, not exactly;
+  - `ZoomReferenceFOV=` is scaled to the same unit.
+
+  Aspect check (user, windowed 1600x1200 = 4:3, in game and unpaused): `+0x2d2f6b4` still 1.1214286 and `+0x2d2f6b0`
+  still 1.14514. Both FOVs ignore the aspect, so the 9/14 constant holds at any resolution. A fixed FOV across aspects
+  fits a vertical FOV (Hor+). At 2142x1231, with the game paused or in a menu, the value at `+0x2d2f6b8` read 0.0
+  instead of 1.0.
+  Unverified: whether the vehicle camera uses the third-person setting. Builds; not yet tested in game.
+- 2026-11-04 **Halo 3: ODST's FOV found** (MCC `halo3odst.dll`, same build; read-only). Neither of Halo 3's two
+  signatures matches ODST's code. MCC keeps its FOV setting per game: ODST showed 83 while Halo 3 was at 100 (user check
+  in ODST's menu). The zoom scan (pistol, 2x) found **0.9307858 -> 0.46539, exactly half**, at `+0x2d735c4`. That is 83 x
+  9/14 in pi = 3.14 degrees, the same formula as Halo 3, with the other FOV of the pair at `+0x2d735c0`. Layout like Halo 3:
+  - render views: 4 per-player views at `+0x2d73590`, stride `0x2810`, set up by `+0x6b60` (`48 89 5C 24 08 57 48 83 EC
+    20 48 8D 1D ?? ?? ?? ?? BF 04 00 00 00 48 8B CB E8 ?? ?? ?? ?? 48 81 C3 10 28 00 00 48 83 EF 01`, one match with the
+    stride literal, lea at +10). Player 0's FOV at `+0x34`.
+  - profiles: 4 of `0xeb0` bytes at `+0x2d81860`, from the constructor with the size `B0 0E` (Halo 3's pattern with that
+    size, one match). FOV settings (83, 97) at `+0x78`.
+
+  The same view-setup pattern with a wildcarded stride also matches Halo 3, at `+0x2d2f680` (stride `0x2820`), which
+  could replace Halo 3's camera signature. Builds; not yet tested in game.
+- 2026-11-04 **Halo: Reach's FOV found** (MCC `haloreach.dll`, same build; read-only). The settings (83, 97) are in
+  degrees at `+0x2a03cdc`, `+0x8c` into the profiles at `+0x2a03c50`, which are set up at start by `+0x7aa0`.
+  The zoom scan used a 3x zoom:
+  - `+0xc9fb08` (and its copy `+0xc9fc5c`) went 0.91977 -> 0.28672;
+  - `+0x291c77c` went 1.06949 -> 0.33339, always 1.16279 x the first;
+  - both changed by 0.3117, not a third.
+
+  No value linear in the setting exists anywhere in memory. With the setting at 100, `+0xc9fb08` read 1.1451385.
+  These are exactly the values of Halo 3's other FOV (`+0x2d2f6b0`) at the same setting and zoom, so both games share
+  one function of Halo 3's vertical FOV v = setting x 9/14 / magnification. The FOV ratio with zoom, 0.3117, equals the
+  ratio of tan(v/2) (0.3114). Fit: v' = 2 atan(a tan(b v)), a = 0.6725665, b = 0.6814241. It is exact at the 100 and
+  zoomed points and 0.08% off at 83; the true formula is not known.
+  Halo module:
+  - camera: `lea rcx` to the view at `+0xc9fae0` (`+0xc3729`, `49 8D 97 D0 F5 FF FF 45 8B C6 48 8D 0D ?? ?? ?? ?? E8 ??
+    ?? ?? ?? 44 8B 2D ?? ?? ?? ??`, one match), FOV at `+0x28`, converted back to v with the fit (new `Game` fields
+    `fov_fit_a`/`fov_fit_b`);
+  - settings: the profiles' setup (`48 83 EC 40 48 C7 44 24 30 FE FF FF FF 48 89 5C 24 58 48 8D 1D ?? ?? ?? ?? BF 04 00
+    00 00 48 8B CB E8`, one match, lea at +18), then `+0x8c`, scaled like Halo 3;
+  - setting match tolerance 0.2%.
+
+  Builds; not yet tested in game.
+- 2026-11-04 **Halo 4's FOV found** (MCC `halo4.dll`, same build; read-only). Settings 83, 97 (degrees) at `+0x30ebf6c`:
+  `+0x9c` into the profiles at `+0x30ebed0` (stride `0xcc0`). They are set up by the same code as Reach (Reach's pattern,
+  one match, lea at +18). The zoom scan (3x) found Reach's transformed FOV again: 0.91977 -> 0.28672 at `+0x10db008`
+  (copies `+0x10db154`, `+0x10beea8`). That is `+0x28` into the view at `+0x10dafe0`, found by a function's prologue
+  (`48 83 EC 50 48 8B D9 0F 29 74 24 40 4C 8D 2D ?? ?? ?? ?? 49 63 E8 49 8B CD 48 63 F2 45 8B F9`, one match, lea at +12).
+  Same fit and scale as Reach. Builds; not yet tested in game.
+- 2026-11-04 **Halo 2: Anniversary multiplayer (`groundhog.dll`): gyro confirmed, FOV found** (same build; read-only).
+  User check in an offline custom game (USB, Steam Input off): the gyro turns the view (the player-control globals were found in one of two
+  threads' TLS blocks). H2A's campaign runs on `halo2.dll`; only its multiplayer loads `groundhog.dll`, which runs
+  Halo 4's engine. Settings 83, 97 (degrees) at `+0x1b1f4f4`, which is `+0xa4` into the profiles at `+0x1b1f450`
+  (Halo 4's profile pattern, one match). The zoom scan (2x) found:
+  - Reach's transformed FOV at `+0x10cd108` (copy `+0x10cd254`): 0.91977 -> 0.43466, against 0.43461 predicted by the
+    fit for v / 2;
+  - a horizontal FOV in radians at `+0x11ec68c`: 1.44862 -> 0.72431 (exactly 83 deg, then half). No usable code
+    reference to it was found.
+
+  The module uses the view at `+0x10cd0e0` (Halo 4's view pattern, one match), `+0x28`, with Reach's fit. Builds; zoom
+  compensation not yet tested in game.
+- 2026-11-04 **Halo 4: fatal error on loading a checkpoint, from the gyro's writes; now written on the game's thread**
+  (same build). User report: loading a checkpoint in Halo 4 showed MCC's "fatal error" and closed the game. MCC's crash
+  dump (`UE4Minidump.dmp` in MCC's `Saved\Crashes`, read offline with cdb) stops at an `int3` at `halo4.dll+0x3bda47`,
+  after "game_state: failed to verify hash for in-place gamestate - this is an unrecoverable error!". The path: checkpoint
+  load (`+0x607c8`) -> in-place load (`+0x49470`) -> hash check (`+0x49a60`). The game state is `0xae6000` bytes at the
+  pointer in `+0x27c6090`, its hash header at `[+0x27c60a8]+0x2d0ac`, copied by `+0x49df8`. Only `halo4.dll` and
+  `groundhog.dll` (H2A multiplayer, Halo 4's engine) have that string. The player-control globals (the desired yaw and
+  pitch the gyro writes) are in that game state, and Gyro4All wrote them from MCC's main thread while the game runs on
+  its own thread: a write between the copy and the hash check breaks the check.
+  - First fix, dropped: no writes in those two games and the gyro as right stick (the blind stick fallback), which the
+    user rejected: these games must keep direct writes. The stick fallback stays for games whose code doesn't match.
+  - Fix: `Game::write_in_update` (Halo 4, groundhog). The main thread queues the turn (radians, under a mutex). An
+    inline MinHook hook at the start of the player-control update adds it to entry 0's yaw and pitch before the update
+    runs, on the game's thread, so it can't land inside a checkpoint save or load. The update is found from the
+    player-control signature by the function's unwind entry (`RtlLookupFunctionEntry`, following chained entries):
+    `halo4.dll+0xa8b34` and `groundhog.dll+0xa78d4`. Both prologues are `mov rax,rsp; mov [rax+10h],rbx; ...`, with
+    one direct caller each. The update takes float arguments in xmm registers, so the hook enters through a small thunk
+    that saves rcx/rdx/r8/r9 and xmm0-3 around the call, then jumps to MinHook's trampoline. The hook is removed when
+    the DLL unloads (an `LdrRegisterDllNotification` unload callback), and again by `find_game` on any module change.
+    `view_angles` returns false while hooked, so the core's automatic stick fallback can't take over: hook writes land
+    on the next tick and would look undone.
+  - Unknown: whether the checkpoint saved during that session kept a broken hash (if so, it fails without the mod too).
+
+  Second report with this build (the hook installed, `halo4.dll+0xa8b34`): the same fatal error on loading, the same
+  stack (int3 at `+0x3bda47`, from the game's own thread). The hooked update never ran (no "runs on thread" line in the
+  log: the gyro was on for about 3 s while the game wasn't simulating yet), and with the hook nothing writes from the
+  main thread, so **the mod wrote nothing into the game state before this crash**. Most likely the save being loaded
+  already holds a broken hash, written in the first session by the main-thread race. To confirm: load the same save
+  without Gyro4All. If it also fails, the save is damaged and the hook stays (it prevents new broken saves; it still
+  needs a test in play: checkpoint, revert, reload). If it loads, the race wasn't the cause and the hook goes. An
+  unrelated `halo3.dll` crash dump from earlier that night (`halo3+0xbca3` -> `+0x269936`) is not looked at yet.
+  **Confirmed by the user: the same save fails the same way without Gyro4All** (`winmm.dll` renamed away). The save is
+  damaged: its hash was broken when it was saved, most likely in an earlier Halo 4 session of that night with the
+  main-thread writes (the first crash was already on loading it). The hook stays, to keep new saves intact. Still to
+  test in play: the update runs on the game's thread (log line), the gyro turns, and a checkpoint reached with the gyro
+  on loads again (revert to checkpoint, and from MCC's menu).
+- 2026-11-04 **MCC's pause menu found** (Xbox app build; read-only, no debugger). User report: with MCC's pause menu
+  open (opened with the pad, so no mouse cursor), the gyro kept turning the view behind it. The menu is MCC's shell
+  (the UE4 exe), the same in every game. A sound-cued scan (5 phases, paused / playing, two snapshots each, the
+  writable sections of the exe and of the game DLL) ran in Halo 2, then Halo 3. The bytes that followed the menu in
+  both games: `exe+0x3e4efef` (set to 1 at `exe+0x1e8074`, to 0 at `exe+0x1e8b41`, ~30 readers) and `exe+0x3e4efe3`.
+  The function at `exe+0x1e1780` sets `+0x3e4efe3` to 1 when any of the shell's UI flags `+0x3e4efe2`, `+0x3e4efef`,
+  `+0x3e4efe5`, `+0x3e4efe4`, `+0x3e4eff0` is on or the count `+0x3e4efe8` is above 0, else to 0, and then calls two
+  functions. So it is the aggregate "the shell holds the game" flag, with the pause menu among its inputs. Signature
+  from `exe+0x1e1789` (the six `cmp byte ptr [rip+..],0` with `je`/`jne`, the `cmp dword`, then `mov byte ptr
+  [rip+..],0` at +0x3f and `mov byte ptr [rip+..],1`; 81 bytes, one match in `.text`).
+  Halo module: found in the exe on the first frame (`shell_paused`); while set, `EngineFrame::paused` (the gyro's gate
+  stops it), and the turns queued for the game's thread are dropped. Builds; not yet tested in game. Not yet checked:
+  multiplayer (whose games don't pause), and MCC's other overlays.
+  Then confirmed in game by the user's log: the gyro stopped and came back with the menu in Halo 3: ODST and in H2A
+  multiplayer (which doesn't pause). The flag is also 1 on ODST's loading screen.
+- 2026-11-04 **Halo 3: ODST black screen after resuming: not Gyro4All.** User report: after resuming the campaign it
+  loads, then stays black while MCC's menu still works. The log showed the game window losing focus to an
+  `explorer.exe` shell window (`XamlExplorerHostIslandWindow`) at that moment, and the player's angles frozen after it.
+  No crash dump and no MCC log. **The user confirmed it happens the same way without Gyro4All** (`winmm.dll` renamed
+  away), including after reverting to the checkpoint and restarting the mission. Not a mod issue.
 - 2026-11-03 **1.10.0 — One panel on the controller at a time** (built with MSVC 14.51, 851 checks pass; tested by the
   user in a DX11 and a DX12 game, 007 First Light the DX12 one). With the Gyro4All settings window expanded, the d-pad also moved through GyroLib's panel behind it. In
   DX12 games GyroLib's panel is its DX12 frontend inside gyrolib.dll, with its own ImGui context that reads the
@@ -7118,3 +7378,10 @@ heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 1
 - Follow-up: GyroLib's panel looked right (its AUTO rule: RGB10A2 on an HDR output = HDR10); only the Gyro4All window
   was wrong. The DX12 window now uses the same rule when no SetColorSpace1 was seen (`guess_color_space`, IDXGIOutput6
   ColorSpace), and `PanelHdr=` was removed again (not needed). D3D11 keeps its no-auto rule (Mortal Shell). scRGB value fixed to 1.
+
+- 2026-11-04 **Remnant: From the Ashes (Steam, UE 4.2x, exe `Remnant-Win64-Shipping.exe`), Gyro4All 1.10.0**: "the engine's
+  data still can't be read". GUObjectArray found (exe+0x34B2C18, chunked, stride 0x18) but no name table. Live read-only
+  scan: GNames is a global pointer (exe+0x34AE908, also exe+0x33608E8) to a heap `TNameEntryArray` with **`Chunks[256]`**
+  (not the stock 128): NumElements (~389k) and NumChunks (24) at table+0x800; text at entry +0x0C. Fix in `ue.cpp`:
+  `legacy_names_at` tries 128 and 256 chunk slots (`g_name_max_chunks`), and requires the last used chunk pointer to be
+  set. Built, 853 checks pass; **not tested in game yet**.

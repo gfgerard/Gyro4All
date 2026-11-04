@@ -33,6 +33,7 @@
 | Ghostrunner | ✅ Works | Unreal Engine 4.26.2 | |
 | Ghostrunner II | ✅ Works | Unreal Engine 4.27.2 | |
 | Ghostwire: Tokyo | ✅ Works | Unreal Engine 4.27.2 | |
+| Halo: The Master Chief Collection | ✅ Works (tested on the Xbox app / Game Pass version) | Blam! | Install in `Content\mcc\binaries\win64`, next to `MCCWinStore-Win64-Shipping.exe`. Start MCC without anti-cheat. Gyro tested in Halo CE, Halo 2 (campaign and multiplayer) and Halo 2: Anniversary multiplayer; Halo 3, ODST, Reach and Halo 4. Zoom compensation (*Adapt to Zoom*) in all seven games, following MCC's FOV settings |
 | Hitman 3 (World of Assassination) | ✅ Works (tested on the Epic version) | Glacier 2 | Install in `Retail`, next to `HITMAN3.exe`. Offline / single-player only: never play the online modes with it. |
 | Hogwarts Legacy | ✅ Works | Unreal Engine 4 | Needs custom profile |
 | Indiana Jones and the Great Circle | ✅ Works (tested on the Game Pass / Microsoft Store version) | Motor (id Tech 7 based) | Install next to `TheGreatCircle.exe` |
@@ -82,7 +83,6 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 
 | Game | Engine | Year | Notes |
 |---|---|---|---|
-| Halo: The Master Chief Collection | Blam! / Saber 3D / Halo | 2014 |
 | Halo: Campaign Evolved | Unreal Engine 5 | 2026 |
 | Borderlands 3 | Unreal Engine 4 | 2019 |
 | Borderlands 4	| Unreal Engine 5 | 2025 |

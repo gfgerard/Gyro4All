@@ -34,17 +34,34 @@ class Proc:
         mods = (ctypes.c_void_p * 1)(); n = wt.DWORD()
         psapi.EnumProcessModules(self.h, mods, ctypes.sizeof(mods), ctypes.byref(n))
         self.base = mods[0]
-        hdr = self.read(self.base, 0x1000)
-        nt = self.base + struct.unpack_from("<I", hdr, 0x3C)[0]
+        self.size, self.sections = self._pe(self.base)
+        self.dlls = []  # (name, base, size, sections) of the DLLs added with add_module
+
+    def _pe(self, base):
+        """A loaded image's size and sections [(name, va, vsize, characteristics)]."""
+        hdr = self.read(base, 0x1000)
+        nt = base + struct.unpack_from("<I", hdr, 0x3C)[0]
         h = self.read(nt, 0x400)
         nsec, optsize = struct.unpack_from("<H", h, 6)[0], struct.unpack_from("<H", h, 20)[0]
-        self.size = struct.unpack_from("<I", h, 24 + 56)[0]
-        self.sections = []
+        sections = []
         for i in range(nsec):
             o = 24 + optsize + 40 * i
             name = h[o:o + 8].rstrip(b"\0").decode("latin1")
             vsize, va, chars = struct.unpack_from("<II", h, o + 8) + (struct.unpack_from("<I", h, o + 36)[0],)
-            self.sections.append((name, va, vsize, chars))
+            sections.append((name, va, vsize, chars))
+        return struct.unpack_from("<I", h, 24 + 56)[0], sections
+
+    def add_module(self, name):
+        """A loaded DLL by file name: its writable sections join exe_rw() and its addresses print as name+off."""
+        mods = (ctypes.c_void_p * 4096)(); n = wt.DWORD()
+        psapi.EnumProcessModulesEx(self.h, mods, ctypes.sizeof(mods), ctypes.byref(n), 3)
+        for m in mods[: n.value // ctypes.sizeof(ctypes.c_void_p)]:
+            buf = ctypes.create_unicode_buffer(260)
+            psapi.GetModuleBaseNameW(self.h, ctypes.c_void_p(m), buf, 260)
+            if buf.value.lower() == name.lower():
+                self.dlls.append((buf.value, m) + self._pe(m))
+                return m
+        sys.exit(f"{name} is not loaded in {self.exe}")
 
     @staticmethod
     def _find(exe):
@@ -70,8 +87,11 @@ class Proc:
         return bool(k32.WriteProcessMemory(self.h, ctypes.c_void_p(a), data, len(data), None))
 
     def name(self, a):
-        """exe+off for addresses in the exe image, else hex."""
-        return f"exe+{a - self.base:#x}" if self.base <= a < self.base + self.size else hex(a)
+        """exe+off for addresses in the exe image, name+off in an added DLL, else hex."""
+        if self.base <= a < self.base + self.size: return f"exe+{a - self.base:#x}"
+        for name, base, size, _ in self.dlls:
+            if base <= a < base + size: return f"{name}+{a - base:#x}"
+        return hex(a)
 
     def in_front(self):
         pid = ctypes.c_ulong(); u32.GetWindowThreadProcessId(u32.GetForegroundWindow(), ctypes.byref(pid))
@@ -125,8 +145,9 @@ class Proc:
         return out
 
     def exe_rw(self):
-        """The exe's writable sections as (start, size)."""
-        return [(self.base + va, vs) for n, va, vs, ch in self.sections if ch & 0x80000000]
+        """The writable sections of the exe and of the DLLs added with add_module, as (start, size)."""
+        return [(base + va, vs) for base, secs in [(self.base, self.sections)] + [(d[1], d[3]) for d in self.dlls]
+                for n, va, vs, ch in secs if ch & 0x80000000]
 
 
 def addr(p, s):

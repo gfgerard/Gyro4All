@@ -17,7 +17,7 @@ anti-debugging (Denuvo, Themida) use Gyro4All's own write watcher instead of `bp
 
 ## Guided search (start here)
 
-`uv run --with numpy python -I tools/camtrace/guided.py <exe> [--ref ADDR] [--eye ADDR] [--poses 6] [--exe-only] [--out FILE]`
+`uv run --with numpy python -I tools/camtrace/guided.py <exe> [--ref ADDR] [--eye ADDR] [--poses 6] [--exe-only] [--up z] [--out FILE]`
 
 The user stands still in gameplay (solo, nothing moving nearby helps) with the game in front. Three rising beeps: the
 first snapshot is taken. Then at each **high beep** the user turns left or right (30-170 degrees) **and** looks up or
@@ -35,6 +35,8 @@ high beep (after the second move the comparison takes up to a minute). Three fal
   points whose direction from the eye follows the view (aim or look-at targets). Yaw and pitch separately.
 - The first two moves must each change yaw and pitch by 5 degrees or more, otherwise those tests are dropped (it says so).
 - `--exe-only` searches only the exe's static data: much faster, but misses heap objects.
+- `--up z` for Z-up engines (Blam!: x forward, y left, z up); the default is Y up. `--module halo1.dll` also searches that
+  DLL's static data (DLLs are skipped otherwise: games whose engine lives in a DLL, like Halo: MCC).
 
 Read the result: the directions and quaternions are mostly copies (expected). Write-test every listed value
 (`write-test <addr> --yaw 20` for a direction, `--add 5` or `--add 0.1` for an angle in degrees or radians, or the ratio

@@ -26,8 +26,9 @@ Engine& select_engine(const std::wstring& exe_path) {
         }
         tried += std::string(tried.empty() ? "" : ", ") + e->name();
     }
-    log("engine: none detected (%s), using %s", tried.c_str(), engines.front()->name());
-    return *engines.front();
+    Engine& fallback = fallback_engine();
+    log("engine: none detected (%s), using %s", tried.c_str(), fallback.name());
+    return fallback;
 }
 
 }  // namespace gyro4all

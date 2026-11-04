@@ -21,6 +21,9 @@ LAYOUTS = {"rows": (0, 1, 2), "columns": (0, 4, 8), "columns3": (0, 3, 6)}
 TOL = 0.8      # degrees, angles and directions
 RTOL = 0.03    # relative, values proportional to the turn
 MIN_MOVE = 5   # degrees each of the first two moves must change yaw (pitch) by for the yaw (pitch) tests
+# Components of a direction as (heading sine side, up, heading cosine side): heading atan2(v[AX[0]], v[AX[2]]), pitch
+# asin(v[AX[1]]). Y up (most engines) by default; --up z for Z-up engines (Blam!: x forward, y left, z up).
+AX = (0, 1, 2)
 
 
 def wrap(d, period):
@@ -30,6 +33,11 @@ def wrap(d, period):
 def arr(buf, dt):
     isz = np.dtype(dt).itemsize
     return np.frombuffer(buf[: len(buf) // isz * isz], dt)
+
+
+def hp(v):
+    """Heading and pitch (degrees) of a direction, with the up axis AX says."""
+    return ct.heading_pitch(*(v[i] for i in AX))
 
 
 def take(a, idx, offs):
@@ -98,9 +106,9 @@ def check(test, v0, v1, mv, r):
         l0, l1 = np.sqrt((v0 * v0).sum(1)), np.sqrt((v1 * v1).sum(1))
         if kind == "dir": ok = (np.abs(l0 - 1) < 1e-3) & (np.abs(l1 - 1) < 1e-3)
         else: ok = (l0 > 0.05) & (l0 < 1e5) & (np.abs(l0 - 1) > 5e-3) & (np.abs(l1 - l0) < 0.02 * l0 + (0.3 if kind == "aim" else 0))
-        ok &= np.hypot(v0[:, 0], v0[:, 2]) > 0.3 * l0
+        ok &= np.hypot(v0[:, AX[0]], v0[:, AX[2]]) > 0.3 * l0
         if abs(mv.dh) < 3: return ok & np.all(np.abs(v1 - v0) < 1e-3 * (np.abs(v0) + 1), 1), r
-        d = wrap(np.degrees(np.arctan2(v1[:, 0], v1[:, 2]) - np.arctan2(v0[:, 0], v0[:, 2])), 360.0)
+        d = wrap(np.degrees(np.arctan2(v1[:, AX[0]], v1[:, AX[2]]) - np.arctan2(v0[:, AX[0]], v0[:, AX[2]])), 360.0)
         return ok & ((np.abs(d - mv.dh) < TOL) | (np.abs(d + mv.dh) < TOL)), r
 
 
@@ -113,8 +121,13 @@ def main():
     ap.add_argument("--move", type=float, default=2.5, help="seconds to turn after the high beep")
     ap.add_argument("--exe-only", action="store_true", help="only the exe's static data (fast; misses heap objects)")
     ap.add_argument("--out", help="also write the log to this file")
+    ap.add_argument("--up", choices=("y", "z"), default="y", help="the engine's up axis (z: Blam!)")
+    ap.add_argument("--module", action="append", default=[], help="also a DLL's static data (e.g. halo1.dll)")
     a = ap.parse_args()
+    global AX
+    if a.up == "z": AX = (1, 2, 0)
     p = ct.Proc(a.exe); out = open(a.out, "w") if a.out else None
+    for m in a.module: p.add_module(m)
     def log(*x):
         s = " ".join(str(v) for v in x); print(s, flush=True)
         if out: out.write(s + "\n"); out.flush()
@@ -137,7 +150,7 @@ def main():
         return np.array(struct.unpack("<3f", p.read(eye, 12))) if eye else np.zeros(3)
 
     def view_of(vec, e):
-        return ct.heading_pitch(*vec) + (e,)
+        return hp(vec) + (e,)
 
     def view_now():
         return view_of(struct.unpack("<3f", p.read(ref, 12)), eye_now()) if ref else None
@@ -170,20 +183,21 @@ def main():
             with np.errstate(all="ignore"):
                 ok = np.ones(m, bool); hs = []
                 for x in f:  # unit, and not near vertical (an up vector's heading is noise)
-                    ok &= np.abs(x[:m] ** 2 + x[1:m + 1] ** 2 + x[2:m + 2] ** 2 - 1) < 1e-3
-                    ok &= x[:m] ** 2 + x[2:m + 2] ** 2 > 0.25; hs.append(np.degrees(np.arctan2(x[:m], x[2:m + 2])))
+                    c = [x[j:m + j] for j in range(3)]
+                    ok &= np.abs(c[0] ** 2 + c[1] ** 2 + c[2] ** 2 - 1) < 1e-3
+                    ok &= c[AX[0]] ** 2 + c[AX[2]] ** 2 > 0.25; hs.append(np.degrees(np.arctan2(c[AX[0]], c[AX[2]])))
                 ok &= (np.abs(wrap(hs[1] - hs[0], 360.0)) >= 10) & (np.abs(wrap(hs[2] - hs[1], 360.0)) >= 10)
             for i in np.nonzero(ok)[0]:
                 key = tuple(round(float(x[i + j]), 3) for x in f for j in range(3))
                 groups.setdefault(key, []).append(s + 4 * int(i))
         if not groups: sys.exit("no unit vector turned in both moves: turn more, or give --ref")
         # The forward vector changes pitch too; the camera's right vector (also turned by the yaw) stays level.
-        def pitches(key): return [ct.heading_pitch(*key[3 * k: 3 * k + 3])[1] for k in range(3)]
+        def pitches(key): return [hp(key[3 * k: 3 * k + 3])[1] for k in range(3)]
         def pitched(key): ps = pitches(key); return max(abs(ps[1] - ps[0]), abs(ps[2] - ps[1])) >= MIN_MOVE
         best = sorted(groups.items(), key=lambda g: (not pitched(g[0]), -len(g[1]), min(g[1])))
         for key, where in best[:5]:
-            hp = [ct.heading_pitch(*key[3 * k: 3 * k + 3]) for k in range(3)]
-            log(f"view copies? x{len(where)} (" + " -> ".join(f"{h:.0f}/{pt:.0f}" for h, pt in hp) + "): "
+            hps = [hp(key[3 * k: 3 * k + 3]) for k in range(3)]
+            log(f"view copies? x{len(where)} (" + " -> ".join(f"{h:.0f}/{pt:.0f}" for h, pt in hps) + "): "
                 + ", ".join(p.name(w) for w in sorted(where)[:8]))
         key, where = best[0]
         ref = sorted(where, key=lambda w: (not (p.base <= w < p.base + 0x40000000), w))[0]

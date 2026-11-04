@@ -141,9 +141,11 @@ public:
 
 // Every engine module linked in (src/engine_registry.cpp), in detection order.
 std::span<Engine* const> all_engines();
+// The engine used when none detects the game (src/engine_registry.cpp).
+Engine& fallback_engine();
 
 // DllMain: Engine= in Gyro4All.ini (or the game's profile) forces an engine by name; else the first one whose detect()
-// matches; else the first one. Logs the choice. Needs settings::configure first.
+// matches; else fallback_engine(). Logs the choice. Needs settings::configure first.
 Engine& select_engine(const std::wstring& exe_path);
 
 }  // namespace gyro4all
