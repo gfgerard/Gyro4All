@@ -30,4 +30,8 @@ void start();
 using AddressFn = uintptr_t (*)();
 void provide(const char* name, AddressFn fn);
 
+// An engine asks to watch setting (as WriteWatch takes it, e.g. "player+5a0") for seconds, any thread: armed within
+// 500 ms when WriteWatch=on and nothing is armed (else dropped), so a watch can start at the moment something happens.
+void request(const char* setting, int seconds, const char* why);
+
 }  // namespace gyro4all::writewatch

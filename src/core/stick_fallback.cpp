@@ -15,6 +15,9 @@ constexpr int kLogFrames = 60;     // a changed model is logged at most this oft
 constexpr int kSaveFrames = 600;   // and saved at most this often while the fallback runs (also when it stops)
 constexpr double kSaveFit = 0.7;     // saved only when it explains this much of the camera's motion
 constexpr double kSaveWindows = 300;  // from this many windows of clear deflection
+// Nor a model faster than this at full stick (degrees per second): no game's stick turns that fast, so it fitted
+// something else moving the camera (Zombie Army 4's scope: 1700+ deg/s learnt and saved over a good model).
+constexpr double kMaxSaveSpeed = 900;
 
 double wrap180(double degrees) { return std::remainder(degrees, 360.0); }
 
@@ -241,6 +244,7 @@ std::string StickFallback::status() const {
 bool StickFallback::take_save(std::string& text) {
     // Only a model that explains the camera well, from enough data, is kept for the next session.
     if (!learnt_ || save_wait_ > 0 || learner_.fit() < kSaveFit || learner_.windows() < kSaveWindows ||
+        std::abs(model_.yaw_speed) > kMaxSaveSpeed || std::abs(model_.pitch_speed) > kMaxSaveSpeed ||
         (has_saved_ && !differs(model_, saved_model_, 0.05)))
         return false;
     text = model_.serialize();

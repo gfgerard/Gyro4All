@@ -61,6 +61,9 @@ with its registers, callers and code bytes, then how often each wrote: the same 
   layer; watch where it stores the value (`r:` on that), and so on, until the code that adds it to the view angles:
   that store is the source, or the place to hook. A buffer on the caller's stack (the log says so) is reused by other
   code: there, keep only the reads right after the call.
+- With `WriteWatch=on`, an engine module can arm a watch itself at the moment something happens (Asura: on
+  `player+5a0` for 3 s when the game starts undoing the gyro's writes, the first 3 times): the log says
+  `asked for by the engine`.
 - Remove `WriteWatch` for playing: each hit stops a game thread for an exception.
 
 ## Commands

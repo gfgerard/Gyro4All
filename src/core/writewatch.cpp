@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstring>
 #include <cstdio>
+#include <mutex>
 #include <string>
 
 namespace gyro4all::writewatch {
@@ -54,6 +55,11 @@ struct Provider {
 };
 Provider g_providers[4];
 std::atomic<bool> g_exec{false};      // execute mode
+
+// An engine's request to arm a watch (request()), taken by the watcher with WriteWatch=on.
+std::mutex g_request_mutex;
+std::string g_request, g_request_why;
+int g_request_seconds = 0;
 
 // Execute mode: rcx (a method's this) and the floats at WriteWatchFields offsets from it, on every call.
 struct Sample {
@@ -130,8 +136,12 @@ LONG CALLBACK on_exception(EXCEPTION_POINTERS* info) {
     // the next instruction. Also after disarming, while a thread still has the old DR0 set: swallowed, never passed on,
     // and that thread lets go of DR0 right away (as it does once the watch has had kMaxHits hits; the watcher thread
     // clears the other threads).
+    // DR6 names DR0 (B0), or names nothing at all while DR0 is enabled and the trap flag is clear (no single step): a hit
+    // of DR0 whose DR6 came cleared (Zombie Army 4: dr6=0 in the context of a second hit of a write watch, the first had
+    // B0; passed on, it crashed the game).
     const uintptr_t previous = g_previous.load(std::memory_order_relaxed);
-    if (!(c.Dr6 & 1) || !c.Dr0 || (target && c.Dr0 != target && c.Dr0 != previous)) return EXCEPTION_CONTINUE_SEARCH;
+    const bool b0 = c.Dr6 & 1, unnamed = !(c.Dr6 & 0x400F) && (c.Dr7 & 1) && !(c.EFlags & 0x100);
+    if ((!b0 && !unnamed) || !c.Dr0 || (target && c.Dr0 != target && c.Dr0 != previous)) return EXCEPTION_CONTINUE_SEARCH;
     // A thread still watching where a named address was: it watches the new place from now on.
     if (target && c.Dr0 == previous && previous != target) {
         c.Dr0 = target;
@@ -383,17 +393,31 @@ DWORD WINAPI watcher(void*) {
     std::string armed_name;  // the address as written, when it is an engine's name (followed while armed)
     for (;;) {
         Sleep(500);
-        const std::string setting = settings::get_string(L"WriteWatch");
+        const std::string ini = settings::get_string(L"WriteWatch");
         const ULONGLONG now = GetTickCount64();
-        if (setting != last) {
-            last = setting;
+        // What to arm now: a changed WriteWatch, or with WriteWatch=on an engine's request (dropped while armed).
+        std::string wanted;
+        int wanted_seconds = 0;
+        if (ini != last) {
+            last = ini;
             if (g_target.load()) {
                 set_breakpoint(0);
                 g_target = 0;
                 log_new_writers();
                 summary("disarmed (WriteWatch changed)");
             }
-            if (setting.empty() || setting == "on") continue;
+            if (!ini.empty() && ini != "on") wanted = ini;
+        } else if (ini == "on") {
+            std::lock_guard lock(g_request_mutex);
+            if (!g_request.empty() && !g_target.load()) {
+                wanted = g_request;
+                wanted_seconds = g_request_seconds;
+                log("writewatch: %s asked for by the engine (%s)", wanted.c_str(), g_request_why.c_str());
+            }
+            g_request.clear();
+        }
+        if (!wanted.empty()) {
+            const std::string& setting = wanted;
             const Mode mode = setting.rfind("x:", 0) == 0   ? Mode::execute
                               : setting.rfind("r:", 0) == 0 ? Mode::access
                                                             : Mode::write;
@@ -401,7 +425,8 @@ DWORD WINAPI watcher(void*) {
             uintptr_t address = resolve(mode == Mode::write ? setting : setting.substr(2), what);
             if (mode != Mode::execute) address &= ~uintptr_t(3);
             uint32_t probe = 0;
-            if (!mem::plausible(address, 4) || !mem::rd(address, probe)) {
+            // An instruction (execute mode) may start at any byte; data watches are 4 bytes, aligned.
+            if (!mem::plausible(address, mode == Mode::execute ? 1 : 4) || !mem::rd(address, probe)) {
                 log("writewatch: WriteWatch=%s is not a readable address%s%s%s; not armed", setting.c_str(),
                     what.empty() ? "" : " (", what.c_str(), what.empty() ? "" : ")");
                 continue;
@@ -412,7 +437,7 @@ DWORD WINAPI watcher(void*) {
                 continue;
             }
             reset();
-            seconds = ULONGLONG(std::max(1, settings::get(L"WriteWatchSeconds", 10)));
+            seconds = ULONGLONG(std::max(1, wanted_seconds > 0 ? wanted_seconds : settings::get(L"WriteWatchSeconds", 10)));
             // Execute mode: WriteWatchFields=<hex offset>,... from rcx, sampled on every call.
             g_field_count = 0;
             const std::string fields = settings::get_string(L"WriteWatchFields");
@@ -456,7 +481,7 @@ DWORD WINAPI watcher(void*) {
                 uintptr_t moved = resolve(armed_name, what);
                 if (armed_mode != Mode::execute) moved &= ~uintptr_t(3);
                 const uintptr_t old = g_target.load();
-                if (moved && moved != old && mem::plausible(moved, 4)) {
+                if (moved && moved != old && mem::plausible(moved, armed_mode == Mode::execute ? 1 : 4)) {
                     g_previous = old;
                     g_target = moved;
                     set_breakpoint(moved, armed_mode);
@@ -482,6 +507,13 @@ void provide(const char* name, AddressFn fn) {
             p.fn = fn;
             return;
         }
+}
+
+void request(const char* setting, int seconds, const char* why) {
+    std::lock_guard lock(g_request_mutex);
+    g_request = setting;
+    g_request_seconds = seconds;
+    g_request_why = why;
 }
 
 void start() {

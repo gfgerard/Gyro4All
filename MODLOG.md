@@ -7032,14 +7032,145 @@ heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 1
     Reading: in some states (likely the scope) the look update starts from the copy, which the module left untouched, so
     the game rebuilt the look from it. Changes (builds, 853 checks; not yet tested in game):
     - the copy, while it is a unit vector but not the look's direction, is turned by the gyro's turn (its own pitch
-      clamped to 85) instead of left alone; still overwritten while it holds the look's direction;
-    - a pitch limit is learnt only from a real clamp: the yaw kept on a clear yaw step, or the pitch moved toward the
-      write before stopping (not back to where it was);
+      clamped to 85), only within 30 frames of an undone write (else left alone, so a copy the game doesn't keep
+      collects nothing); still overwritten while it holds the look's direction (2.5 degrees in, 3.6 out: no flicker);
+    - each write gets a verdict on yaw alone, like the core's stick fallback (kept / undone / none); a pitch limit is
+      learnt only from a write not undone with the yaw kept, or the pitch moved at least a quarter of the way toward the
+      write before stopping (not an aim-assist nudge); a recenter after the gyro's turn keeps the frame's first angles;
     - diagnostics: `asura: the look copy at [player+0x588]+0x20: N degrees from the look (...)` / `no object` / `not a
       direction` on each change, and `asura: the game undid the gyro's writes 3 frames in a row: look ..., written ...,
       before ...; the copy N degrees from it and M from the write (...); paused flag N` with `writes kept again after N
       undone` (first 30 each). If the copy is the cause, the undone runs and the fallback stop; if not, these lines say
       whether the game put the look back to the copy's direction.
+  - 2026-11-04, Vulkan test of that build (user, DualSense): **the copy is not the cause**, the fallback still starts at
+    times while aiming with a scope (not every time). Log: no false pitch limit any more. The copy at
+    `[player+0x588]+0x20` was 65.7 degrees from the look as soon as the player loaded (before any gyro write) and 66-77
+    in every undone run: it never holds the look's direction, so it is something else (not a copy of the look; its
+    meaning unknown). The game puts the look back to its own value from before the write (e.g. look yaw -76.40, written
+    -76.60, before -76.41), not to the copy's. So while scoped the look update starts from state of its own (not
+    `player+0x5A0`, not the copy) and the gyro's write is overwritten. Five undone runs in 25 s, each over in 0.5-3 s.
+    Changes (builds, 853 checks; not yet tested in game):
+    - the copy is no longer turned after undone writes (it was writing the gyro's turn into an unknown vector); still
+      written only while it holds the look's direction, which hasn't happened;
+    - core WriteWatch: `writewatch::request(setting, seconds, why)`, an engine's request to arm a watch, taken within
+      500 ms when `WriteWatch=on` and nothing is armed (`asked for by the engine`); the Asura module provides the name
+      `player` (the local player) and asks for `player+5a0` for 3 s at the start of each of the first 3 undone runs. To
+      find the scope's look source: `WriteWatch=on` in `Gyro4All.ini`, aim with the scope until the fallback starts;
+      the watch logs every instruction that writes the look then, with its callers (look for a writer or caller other
+      than the look setter `exe+0x7A44E0` / look update `exe+0xA00EA0`, or their source registers);
+    - the undone-run line also gives the copy's own pitch and yaw.
+  - User: the undone runs come from the scope's **zoom animation** (moving the gyro while it plays). Offline reading of
+    `ZA4_vulkan.exe` (capstone, the 8 callers of the look setter `exe+0x7A44E0`): the controller's update
+    (`exe+0x9B90A0`, the controller in rdi, its handle at +0x30) calls its camera manager's update (`[controller+0x50]`,
+    virtual +8) and then, unless the controller's state `+0x38` is 4, **sets the player's look from the manager's view
+    matrix** (`exe+0x9B922B`: the floats at manager +0x54, +0x60, +0x6C, a column of the matrix at +0x40). The manager
+    first pushes the look to its current and previous cameras (`exe+0x652CB0`: `+0x190`, and `+0x198` while blending,
+    each only if its virtual +0x38 says it takes it; the setter is `exe+0x62B780`, storing at camera +0x34..+0x3C, not
+    `exe+0x62B770` as noted above). So normally the look survives the round trip; a camera that doesn't take it (likely
+    the ADS camera during its zoom animation) keeps its own direction, the matrix is built from it, and the look is put
+    back: the gyro's write is undone, which matches the logs (the look back at its old value). Other callers of the look
+    setter are timed blends toward a target (`exe+0x8B58A9`, `+0x8B5C3D`, `+0x9D2647`) and a reset at `exe+0x98F79B`;
+    not followed. Change ("move every camera", as in other games): each gyro write also turns the manager's current and
+    previous cameras' look directions (`+0x34`, unit vectors only, pitch clamped to 85) by the same amount; a camera
+    that takes the look is overwritten with it anyway. Log `asura: cameras: current ... (type N, D degrees from the
+    look), previous ...` on each change (type = camera +8), and both cameras in the undone-run line. Builds, 853 checks;
+    not yet tested in game; the DX12 exe is assumed to have the same layout (the player's offsets matched).
+  - Vulkan test of that build (user, DualSense, scope zoom while moving the gyro; `WriteWatch=on`): still undone runs
+    and fallback starts. **Not the cameras**: no `asura: cameras:` line at all (`[controller+0x50]` gave no camera with a
+    unit direction at +0x34, so nothing was turned), and the two engine-armed watches on `player+5a0` (3 s each, during
+    undone runs) saw only two writers: Gyro4All and the look setter's store `exe+0x7A45F2`, called from the look update
+    (`exe+0xA02196` <- `0x9FF932` <- `0x9BC566` <- `0x69F98A`, the controllers' loop), on the game thread; never the
+    look-from-camera path (`exe+0x9B922B`). So the write is undone inside the look update. Its offline reading
+    (`exe+0xA00EA0`, rsi = player, rdi = an input/aim object): start direction = `player+0x5A0` (or `[player+0x588]+0x20`
+    when the player's virtual +0x90 says no and that object exists; that copy read (0, 0, 1) every time, a local
+    forward), angles relative to the body (`[player+8]` transform), the deltas (input times sensitivities, aim assist
+    `exe+0x5C02F0` on the aim state at rdi+0x16C, which looks a target entity up), pitch clamp and yaw wrap, a cone
+    limit while the player's state (virtual +0x2E0) is 0x15 (axis `player+0x948`, cosine `+0x944`), and then, when
+    `rdi+0x18` or `+0x19` is set and `rdi+0x1C` (an entity id, 999 = none) names an entity, **the look is pulled toward
+    that entity's position** (direction from the player's position to it, a cone of `rdi+0x20`, `exe+0xA01EA8`..
+    `0xA02148`): an aim-assist lock or snap, which would put a gyro turn back while it holds and only near enemies (the
+    "sometimes yes, sometimes no"). To check: the same test with the game's aim assist off.
+  - Side effect: while the fallback ran during those undone runs it learnt the snap as the game's stick (yaw 1700+ deg/s,
+    fit 72%, above `kSaveFit`) and saved `StickFallbackLearned=axial,0.350,3.00,1728.2,242.9,0` over the good model in
+    the Vulkan profile (`axial,0.325,1.00,262.2,92.6,0`).
+  - User: the game's aim assist options were already off, so not the aim assist; and the fallback seemed to start more
+    often with this build (likely the bad saved model: its runs lasted longer, 2-7 s, against 0.5-3 s before; the number
+    of undone runs was about the same). Further reading: the look update is only called while the camera manager's
+    current camera (`r15+0x190` in `exe+0x9FF627`) says yes (virtual +0x38). The undo matching the old look within 0.01
+    degrees fits the **cone limit** best: while the player's state (virtual +0x2E0) is 0x15 and `exe+0x7B1A50` says
+    yes, with `player+0x944` < 1 (the cosine of the cone's half angle), the new look's dot with the axis at
+    `player+0x948` (float x, y, z, the look's convention: dot = ax*x + ay*y + az*z with y down, checked from the code
+    that builds the look) is compared with it, and a look outside is rotated onto the cone's edge (cross product axis,
+    `exe+0x9BD00`): a narrow cone around the look from the animation's start puts every turn back. Which state 0x15 is
+    is not known. Changes (builds, 853 checks; not yet tested in game):
+    - the camera turning above removed (the cameras are not involved);
+    - the cone's axis is turned with the gyro's turn (pitch clamped to 85) while the cone is active (cosine below
+      0.99999, axis a unit vector) and the look is within its half angle + 2 degrees; logged `asura: the look's cone
+      limit on: half angle N degrees, axis M degrees from the look` / `off` on each change, and in the undone-run line;
+    - core stick fallback: a model faster than 900 deg/s at full stick is never saved (`kMaxSaveSpeed`).
+  - Checked in game before deploying that build (the earlier build still running, Vulkan, DualSense; read-only
+    sampling from outside with camtrace's `Proc`, plus Gyro4All's WriteWatch armed through its INI while it ran):
+    - **the cone is not it**: `player+0x944` stayed 1.0 (axis 0) in 13,644 samples over 60 s of scoping in and out;
+    - every undone run starts 20-100 ms after `zoom: level 1` or `zoom: not aiming` (the user's manual zoom button):
+      on entering and on leaving the scope;
+    - the look-from-camera path runs **every frame in play** (execute watch on `exe+0x9B9204`, rcx = the manager: 9,892
+      calls in 60 s, about 165 a second, like the look update), and in the pause menu;
+    - the manager (`[controller+0x50]`) has two cameras: the third-person one embedded at manager +0x1A0 (vtable
+      `exe+0xC189C8`, type 0, vertical FOV 0.8727 rad = 50 degrees at +0x18, eye +0x28, look +0x34) and the scope's
+      (another heap object, type 3, **vertical FOV 13.2 degrees**); `+0x190` = current, `+0x198` = previous (both the same
+      outside blends). Entering or leaving the scope the manager blends them for about 0.25 s: byte +0x14 = 1, and byte
+      +0x16 = 1 in most transitions, which makes `exe+0x652CB0` push the look to no camera; the cameras keep their
+      directions and the look is put back from the blended view. The three fallback starts of the test fell on such
+      blends (`010001ff` = +0x14..+0x17). The user's suggestion (move every camera) is the fix;
+    - **bug in the camera build**: `read_cameras` passed a size to `mem::plausible`, whose second argument is the
+      alignment (0x40), so the third-person camera at an address ending in 0x60 was rejected: "camera none" everywhere,
+      nothing turned. Fixed (no alignment beyond the default 8);
+    - WriteWatch bug: execute addresses had to be 4-byte aligned (`x:exe+0x9B922B` was refused as "not a readable
+      address"); execute mode now takes any byte. Also: `exe+<offset>` needs the `0x`.
+    Changes: the cone code removed; both cameras' look directions turned with every gyro write (pitch clamped to 85),
+    logged `asura: cameras: current ... (type N, vertical FOV F, D degrees from the look), previous ...; blending B, look
+    pushed always / only outside blends`. Builds, 853 checks; not yet tested in game.
+  - **Zoom compensation from the game's FOV** (same build, to spend one Denuvo activation). Read live (third person,
+    after a scope): the third-person camera (manager +0x1A0, vtable `exe+0xC189C8`) +0x18..+0x24 = 0.87266, 0.87266,
+    0.34907, 0.1 (vertical FOV 50 degrees twice, 20 degrees, near); the scope camera (vtable `exe+0xC17530`, type 3)
+    +0x18 = 0.23038 (13.2 degrees), +0x1C 0.92502, +0x24 1.5332 (meaning unknown). The manager's blend: elapsed at +0x18
+    (0.25039 after a blend), length at +0x1C (0.25). The manager also keeps a projection block (+0x13C near 0.1, +0x140
+    aspect 1.7778, +0x144 its inverse, +0x148 0.79843, +0x14C 1.433, ...) whose 0.79843 rad (45.7 degrees) matches no
+    camera's FOV: not used. Module: `views()` reports zoom, `zoom_fov()` = the current camera's +0x18, linearly blended
+    from the previous camera's while the manager blends (elapsed / length; the game's own curve is not known), against
+    `ZoomReferenceFOV=` (horizontal, converted with the window's aspect) or else the third-person camera's +0x18; logged
+    `asura: camera FOV N degrees vertical (unzoomed M)` on each change (first 30). With `ZoomSource=Auto` (default) it
+    replaces the manual zoom button. Builds, 853 checks; not yet tested in game; variable-zoom scopes and the DX12 exe not
+    checked.
+  - **In game (2026-11-04, ZA4_dx12.exe, DualSense):** all found by code in the DX12 exe too. Zoom compensation works:
+    `the game's field of view 13.2, unzoomed 50.0 ... gyro x0.248` in the scope, back to x1.0 outside; the scope's zoom
+    is variable and followed (13.2 down to 9.8 degrees). The stick fallback started on the first blends, found that the
+    stick turned nothing and stayed off; what remained (user: "the gyro only stops during the zoom animation") were the
+    undone runs during each blend (4-28 frames). The current camera stays 0.00 degrees from the look while the previous
+    one drifts away with the gyro's turns (up to 15 degrees): turning the cameras doesn't reach the blend's view. Another
+    bad model was saved by the fallback (`axial,0.350,3.00,288.8,86.8,10`, 10 frames late, 71%) into za4_dx12.ini.
+  - **The blend's source** (WriteWatch set live in the INI on the manager's view, manager +0x54: writer
+    `ZA4_dx12.exe+0x64E041`, in the manager update `exe+0x64D720`, called from `exe+0x64D4CA`; read offline): while
+    blending (+0x14) it advances t = +0x18 / +0x1C (stored at +0x20), lerps the eye from the previous camera's +0x28 to
+    the current one's, then: with +0x16 set the direction is normalize(manager +0x75A0 - eye), a world aim point set as
+    the blend starts (writers `exe+0x650710` from the previous camera's +0xA0 distance, `exe+0x64CB34`, `exe+0x64C677`
+    at init; flags +0x75AC/+0x75AD), checked against a pitch range (else +0x16 is cleared); without it, normalize(lerp
+    of the cameras' +0x34). The direction is pushed to the current camera (virtual +0x48, the setter), the eye stored at
+    +0x40 and the 3x3 matrix at +0x4C..+0x6C, from which the controller resets the look. Same offsets in the Vulkan exe
+    (+0x75A0 readers at `ZA4_vulkan.exe+0x65252C`, `+0x652A98`). Fix: while blending with +0x16 set, the aim point is
+    turned around the eye (+0x40, last frame's) by the gyro's delta, keeping its distance; logged `asura: blending: the
+    aim point N away turned with the gyro` (first 30). Builds, 853 checks; not yet tested in game.
+  - **WriteWatch crashed the game** (same session, the watch on manager +0x54): the second hit came with dr0 = the target,
+    dr7 = 0xD0001 but **dr6 = 0** in the exception context (the first hit had B0), so the handler passed it on and the
+    single step was unhandled (WER 0x80000004 at `exe+0x64E041`; read from the crash dump offline). The handler now also
+    takes a single step whose DR6 names no breakpoint while DR0 is enabled and the trap flag is clear. Who cleared DR6 is
+    not known (another vectored handler ahead of ours is a guess).
+  - **In game (2026-11-04, ZA4_vulkan.exe, DualSense; user: "worked perfectly"):** the gyro keeps turning through the
+    scope's zoom animation in and out. Log: the aim point turned on every blend frame (about 71 m away; the 30 log lines
+    were all spent on the first blend: logging once per blend would be better), no stick fallback at all, one undone run
+    of 3 frames (another weapon's aim camera, type 4 at 33.8 degrees, 0.6 s into its blend; the engine-armed watch then
+    saw only the look setter `exe+0x7A45F2` and our own write). Other camera types seen: 21 (50 degrees, blend with
+    the look pushed always). Zoom compensation also on that aim camera (x0.651 at 33.8 degrees).
 
 - **In game (same day, DualSense, REFramework installed):** the TDB 82 build reads the TDB (`re: TDB 82 ready: 156902
   types`), finds via.Application (365 entries), hooks `LateUpdateBehavior` and runs the first gyro frame;

@@ -9,22 +9,38 @@
 // kept and the view follows (write-test, user check). The pitch limit is 85 degrees both ways, less while aiming with a
 // weapon (learnt from the game's clamp, so the gyro stops there instead of being undone). The update reads the current
 // direction from [player+0x588]+0x20 instead when that object exists and a player virtual (+0x90) says so; that copy is
-// written too while it holds the same direction, and turned by the gyro's turn while it doesn't (to check: the stick
-// fallback started at times while aiming with a scope, the game putting the look back; undone runs are logged). The player, the game's own way: the first player controller in the
-// list at kControllers (items, count) holds its entity handle at +0x30; the entity handle table at kEntities maps it to
-// the player. Both globals are found by the code that loads them (the same patterns resolve in both exes).
+// written too while it holds the same direction (in play it was always 65-77 degrees from the look: not a copy of it).
+// Every frame the controller's update (ZA4_vulkan.exe+0x9B922B, checked in play: about 165 calls a second) sets the look
+// again from its camera manager's view ([controller+0x50]+0x40, a matrix), built from its current and previous cameras
+// (+0x190, +0x198: type +8, vertical FOV in radians +0x18, look direction +0x34; third person type 0 at 50 degrees, the
+// scope type 3 at 13.2) after pushing the look to them (exe+0x652CB0). While it blends two cameras (manager +0x14, about
+// 0.25 s entering or leaving the scope: elapsed +0x18, length +0x1C) it moves the eye (+0x40) from the previous camera's
+// position to the current one's; with +0x16 set it pushes nothing and aims the view from that eye at a world point
+// (+0x75A0) set as the blend starts, then puts the look back to it, undoing the gyro's write (ZA4_dx12.exe+0x64D720,
+// found with WriteWatch on the manager's view). Without +0x16 (also when that point is too far up or down) the view is
+// the blend of the two cameras' directions. So the aim point is turned around the eye, and both cameras, with the look.
+// Undone runs are logged, and with WriteWatch=on each of the first few arms a watch on player+0x5A0. The player, the
+// game's own way: the first player controller in the list at kControllers (items, count) holds its entity handle at
+// +0x30; the entity handle table at kEntities maps it to the player. Both globals are found by the code that loads them (the same patterns resolve in both exes).
 // Menus: the mouse cursor; the pause menu: the game's pause flag (a byte its player input code checks, found by that
 // code). The weapon wheel (held triangle) has no flag found and the game keeps the gyro's writes while it is open:
 // GyroLib's hold-to-disable activation on triangle covers it.
+// Zoom compensation: the current camera's vertical FOV (the scope's 13.2 degrees), blended like the cameras (elapsed
+// and length at manager +0x18, +0x1C), against ZoomReferenceFOV= or else the third-person camera's (embedded at manager
+// +0x1A0, 50 degrees by default).
 #include "asura.hpp"
 
 #include "engine.hpp"
+#include "fov.hpp"
 #include "log.hpp"
 #include "mem.hpp"
+#include "util.hpp"
+#include "writewatch.hpp"
 
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <format>
@@ -65,13 +81,24 @@ constexpr uintptr_t kObjects = 0x0, kKeys = 0x8, kCapacity = 0x10;
 constexpr uint32_t kMaxCapacity = 1u << 20;
 // The player's look direction, and the object whose +0x20 copy of it the look update may read instead.
 constexpr uintptr_t kLook = 0x5A0, kLookOwner = 0x588, kOwnerLook = 0x20;
-// The copy counts as the look's while within this of the look direction (dot product of the unit vectors: about 2.5
-// degrees); further away it is turned by the gyro's turn instead of overwritten.
-constexpr float kSameDirection = 0.999f;
-// A write moved less than this (degrees) gets no kept/undone verdict.
+// A controller's camera manager, its blend flags, its current and previous cameras; a camera's type, vertical FOV and
+// look direction.
+constexpr uintptr_t kManager = 0x50, kBlending = 0x14, kNoPush = 0x16, kCameras[2] = {0x190, 0x198}, kCameraType = 0x8,
+                    kCameraFov = 0x18, kCameraLook = 0x34;
+// The manager's blend (seconds elapsed, its length) and its embedded third-person camera. Its eye position (+0x40, the
+// view matrix's origin) and the world point it keeps aimed at while blending with +0x16 set.
+constexpr uintptr_t kBlendTime = 0x18, kBlendLength = 0x1C, kThirdPerson = 0x1A0, kEye = 0x40, kAimPoint = 0x75A0;
+// The copy counts as the look's from within this of the look direction (dot product of the unit vectors: about 2.5
+// degrees) until further than kLeaveSame (about 3.6 degrees); apart, it is left alone.
+constexpr float kSameDirection = 0.999f, kLeaveSame = 0.998f;
+// A write that turned the yaw less than this (degrees) gets no kept/undone verdict.
 constexpr double kMinStep = 0.11;
-// Logged at most this many times a session: undone runs, the copy's changes.
-constexpr int kMaxLogs = 30;
+// Logged at most this many times a session: undone runs, the copy's changes. WriteWatch requests: the first few undone
+// runs, each watched this long (seconds).
+constexpr int kMaxLogs = 30, kMaxWatches = 3, kWatchSeconds = 3;
+
+// The local player, for WriteWatch=player+<hex offset> (read on the watcher thread).
+std::atomic<uintptr_t> g_player{0};
 
 bool exists(const std::wstring& path) { return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES; }
 
@@ -128,8 +155,6 @@ bool unit(const float* d) {
     return n > 0.98f && n < 1.02f;
 }
 
-double wrap180(double degrees) { return std::remainder(degrees, 360.0); }
-
 // Degrees between two unit directions.
 double angle_between(const float* a, const float* b) {
     return std::acos(std::clamp(double(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]), -1.0, 1.0)) / kRad;
@@ -146,9 +171,10 @@ public:
         return exists(parent + L"\\misc\\common.asr") || exists(dir + L"\\misc\\common.asr");
     }
 
-    void configure() override {}
+    void configure() override { load_zoom_reference(); }
+    void settings_changed() override { load_zoom_reference(); }
 
-    std::vector<ViewInfo> views() const override { return {{1, "Default", 0}}; }
+    std::vector<ViewInfo> views() const override { return {{1, "Default", 0, true}}; }
 
     // The default view while the local player's look direction can be read (else loading or the front end). Without the
     // globals at all: the gyro as right stick.
@@ -170,21 +196,25 @@ public:
         float d[3];
         player_ = find_player();
         if (player_ && !look(d)) player_ = 0;
-        if (player_ != had) stored_ = false, limit_up_ = limit_down_ = kMaxPitch;
+        if (player_ != had) stored_ = false, limit_up_ = limit_down_ = kMaxPitch, g_player = player_;
         if (player_ != had)
             log("asura: local player %s", player_ ? std::format("at {} (look direction +{:#x})", mem::module_offset(player_), kLook).c_str()
                                                   : "gone");
         read_copy(d);
+        read_cameras(d);
         if (!player_) return f;
         std::memcpy(last_, d, sizeof d);
         const bool wrote = stored_;  // the gyro wrote the look last frame
         stored_ = false;
+        verdict_ = Verdict::None;
         if (wrote) judge_write(d);
+        else undone_run_ = 0;
         learn_limits(d, wrote);
         f.in_game = true;
         f.paused = paused();
         f.view_id = 1;
         f.target = "player look";
+        if (auto z = zoom_fov()) f.zoom_fov = *z;
         return f;
     }
 
@@ -247,6 +277,7 @@ public:
 private:
     void find_globals() {
         searched_ = true;
+        writewatch::provide("player", [] { return g_player.load(); });
         pause_flag_ = data_from_code(kPauseCode, kPauseMask, sizeof kPauseCode, "the pause flag", kPauseDisp, kPauseInsnEnd);
         controllers_ = data_from_code(kControllersCode, kControllersMask, sizeof kControllersCode, "the player controllers' list");
         entities_ = data_from_code(kEntitiesCode, kEntitiesMask, sizeof kEntitiesCode, "the entity handle table");
@@ -254,13 +285,15 @@ private:
     }
 
     // The first controller's entity, through the handle table; 0 if any step doesn't hold.
-    uintptr_t find_player() const {
+    uintptr_t find_player() {
+        controller_ = 0;
         uint32_t count = 0;
         const uintptr_t items = mem::rdp(controllers_ + kItems);
         if (!items || !mem::rd(controllers_ + kCount, count) || count == 0 || count > 64) return 0;
         const uintptr_t controller = mem::rdp(items);
         uint32_t handle = 0;
         if (!controller || !mem::rd(controller + kHandle, handle) || handle == 0) return 0;
+        controller_ = controller;
         const uintptr_t objects = mem::rdp(entities_ + kObjects), keys = mem::rdp(entities_ + kKeys, 4);
         uint32_t capacity = 0;
         if (!objects || !keys || !mem::rd(entities_ + kCapacity, capacity) || capacity == 0 || capacity > kMaxCapacity ||
@@ -285,67 +318,176 @@ private:
     // its address while it is a unit vector; copy_same_: within kSameDirection of the look d. Its changes are logged.
     void read_copy(const float* d) {
         const uintptr_t owner = player_ ? mem::rdp(player_ + kLookOwner) : 0;
-        float c[3];
+        float* const c = copy_dir_;
         const uintptr_t had = copy_;
         const bool had_same = copy_same_;
-        copy_ = owner && mem::guarded_copy(c, owner + kOwnerLook, sizeof c) && unit(c) ? owner + kOwnerLook : 0;
-        copy_same_ = copy_ && c[0] * d[0] + c[1] * d[1] + c[2] * d[2] > kSameDirection;
+        copy_ = owner && mem::guarded_copy(c, owner + kOwnerLook, sizeof copy_dir_) && unit(c) ? owner + kOwnerLook : 0;
+        copy_same_ = copy_ && c[0] * d[0] + c[1] * d[1] + c[2] * d[2] > (copy_ == had && had_same ? kLeaveSame : kSameDirection);
         if ((copy_ != had || copy_same_ != had_same) && copy_logs_ < kMaxLogs && ++copy_logs_) {
             if (!copy_) log("asura: the look copy at [player+0x588]+0x20: %s", owner ? "not a direction" : "no object");
             else log("asura: the look copy at [player+0x588]+0x20: %.1f degrees from the look (%s)", angle_between(c, d),
-                     copy_same_ ? "the same: written with it" : "turned by the gyro's turn");
+                     copy_same_ ? "the same: written with it" : "left alone");
         }
+    }
+
+    // The camera manager's current and previous cameras (cameras_: 0 where none, or not a direction). Their changes
+    // are logged (with the blend flags).
+    void read_cameras(const float* d) {
+        const uintptr_t manager = player_ && controller_ ? mem::rdp(controller_ + kManager) : 0;
+        uintptr_t now[2] = {};
+        float c[3];
+        for (int i = 0; i < 2; ++i) {
+            const uintptr_t camera = manager ? mem::rdp(manager + kCameras[i]) : 0;
+            if (camera && mem::guarded_copy(c, camera + kCameraLook, sizeof c) && unit(c)) now[i] = camera;
+        }
+        manager_ = now[0] ? manager : 0;
+        uint8_t blending = 0, no_push = 0;
+        if (manager) mem::rd(manager + kBlending, blending), mem::rd(manager + kNoPush, no_push);
+        if ((now[0] != cameras_[0] || now[1] != cameras_[1]) && camera_logs_ < kMaxLogs && ++camera_logs_)
+            log("asura: cameras: current %s, previous %s; blending %d, look pushed %s", describe_camera(now[0], d).c_str(),
+                describe_camera(now[1], d).c_str(), int(blending), no_push ? "only outside blends" : "always");
+        cameras_[0] = now[0], cameras_[1] = now[1];
+    }
+
+    // [Gyro4All] ZoomReferenceFOV= (horizontal degrees, profile or Gyro4All.ini); 0 = the third-person camera's.
+    void load_zoom_reference() {
+        const double fov = fov::reference_setting();
+        if (fov != zoom_reference_)
+            log("asura: zoom reference FOV %.1f degrees ([Gyro4All] ZoomReferenceFOV%s)", fov,
+                fov > 0 ? "" : ": 0, the third-person camera's");
+        zoom_reference_ = fov;
+    }
+
+    // A camera's vertical FOV in degrees, 0 if not readable or not a FOV.
+    static double camera_fov(uintptr_t camera) {
+        float radians = 0;
+        if (!camera || !mem::rd(camera + kCameraFov, radians)) return 0;
+        const double degrees = radians / kRad;
+        return fov::is_valid(degrees) ? degrees : 0;
+    }
+
+    // The current and unzoomed vertical FOV for GyroLib's zoom compensation: the current camera's, blended from the
+    // previous one's during a blend; the unzoomed one ZoomReferenceFOV= (converted with the window's aspect) or the
+    // third-person camera's. Changes of the current camera's are logged.
+    std::optional<ZoomFov> zoom_fov() {
+        if (!manager_) return std::nullopt;
+        double current = camera_fov(cameras_[0]);
+        if (!current) return std::nullopt;
+        const double target = current;
+        uint8_t blending = 0;
+        float elapsed = 0, length = 0;
+        if (cameras_[1] && cameras_[1] != cameras_[0] && mem::rd(manager_ + kBlending, blending) && blending &&
+            mem::rd(manager_ + kBlendTime, elapsed) && mem::rd(manager_ + kBlendLength, length) && length > 0) {
+            if (const double from = camera_fov(cameras_[1]))
+                current = from + (current - from) * std::clamp(double(elapsed) / length, 0.0, 1.0);
+        }
+        double reference = zoom_reference_ > 0 ? fov::vertical_from_horizontal(zoom_reference_, fov::game_window_aspect())
+                                               : camera_fov(manager_ + kThirdPerson);
+        if (!fov::is_valid(reference)) return std::nullopt;
+        if (std::abs(target - logged_fov_) > 0.05 && fov_logs_ < kMaxLogs && ++fov_logs_) {
+            log("asura: camera FOV %.1f degrees vertical (unzoomed %.1f)", target, reference);
+            logged_fov_ = target;
+        }
+        return ZoomFov{current, reference};
+    }
+
+    std::string describe_camera(uintptr_t camera, const float* d) const {
+        if (!camera) return "none";
+        uint32_t type = 0;
+        float fov = 0, c[3];
+        mem::rd(camera + kCameraType, type);
+        mem::rd(camera + kCameraFov, fov);
+        const bool read = mem::guarded_copy(c, camera + kCameraLook, sizeof c);
+        return std::format("{} (type {}, vertical FOV {:.1f}, {:.2f} degrees from the look)", mem::module_offset(camera), type,
+                           fov / kRad, read ? angle_between(c, d) : -1.0);
+    }
+
+    // While the manager blends with +0x16 set, the view looks from the moving eye at a fixed world point (the aim point,
+    // set as the blend starts) and the look is put back to that: the point is turned around the eye with the gyro.
+    void turn_aim_point(double pitch, double yaw) {
+        uint8_t blending = 0, aimed = 0;
+        float eye[3], point[3];
+        if (!manager_ || !mem::rd(manager_ + kBlending, blending) || !blending || !mem::rd(manager_ + kNoPush, aimed) ||
+            !aimed || !mem::guarded_copy(eye, manager_ + kEye, sizeof eye) ||
+            !mem::guarded_copy(point, manager_ + kAimPoint, sizeof point))
+            return;
+        float v[3] = {point[0] - eye[0], point[1] - eye[1], point[2] - eye[2]};
+        const double length = std::sqrt(double(v[0]) * v[0] + double(v[1]) * v[1] + double(v[2]) * v[2]);
+        if (!std::isfinite(length) || length < 0.01 || length > 1e6) return;
+        for (float& x : v) x = float(x / length);
+        double p = 0, h = 0;
+        angles_of(v, p, h);
+        direction_of(std::clamp(p + pitch, -kMaxPitch, kMaxPitch), h + wrap180(yaw), v);
+        for (int i = 0; i < 3; ++i) point[i] = eye[i] + float(v[i] * length);
+        if (mem::guarded_store(manager_ + kAimPoint, point, sizeof point) && aim_logs_ < kMaxLogs && ++aim_logs_)
+            log("asura: blending: the aim point %.1f away turned with the gyro", length);
     }
 
     // pre_*: the angles before the turn.
     bool store(double pitch, double yaw, double pre_pitch, double pre_yaw) {
         float d[3];
         direction_of(pitch, yaw, d);
-        if (copy_) {
-            // Overwritten while it holds the look's direction; else turned by the same amount (the game keeps it apart
-            // from the look in some states and may start its look update from it: an untouched copy undoes the turn).
+        // The cameras, turned by the same amount: while the manager blends them it doesn't push the look to them and puts
+        // the look back to their directions; outside blends they are overwritten with the look anyway.
+        for (int i = 0; i < 2; ++i) {
+            const uintptr_t camera = cameras_[i];
             float c[3];
-            if (copy_same_) {
-                mem::guarded_store(copy_, d, sizeof d);
-            } else if (mem::guarded_copy(c, copy_, sizeof c) && unit(c)) {
-                double cp = 0, ch = 0;
-                angles_of(c, cp, ch);
-                direction_of(std::clamp(cp + pitch - pre_pitch, -kMaxPitch, kMaxPitch), ch + wrap180(yaw - pre_yaw), c);
-                mem::guarded_store(copy_, c, sizeof c);
-            }
+            if (!camera || (i == 1 && camera == cameras_[0]) || !mem::guarded_copy(c, camera + kCameraLook, sizeof c) || !unit(c))
+                continue;
+            double cp = 0, ch = 0;
+            angles_of(c, cp, ch);
+            direction_of(std::clamp(cp + pitch - pre_pitch, -kMaxPitch, kMaxPitch), ch + wrap180(yaw - pre_yaw), c);
+            mem::guarded_store(camera + kCameraLook, c, sizeof c);
         }
+        turn_aim_point(pitch - pre_pitch, yaw - pre_yaw);
+        // The copy, overwritten while it holds the look's direction (else it is something else: left alone).
+        if (copy_ && copy_same_ && mem::guarded_store(copy_, d, sizeof d)) std::memcpy(copy_dir_, d, sizeof d);
         if (!mem::guarded_store(player_ + kLook, d, sizeof d)) return false;
-        stored_pitch_ = pitch, stored_yaw_ = yaw, pre_pitch_ = pre_pitch, pre_yaw_ = pre_yaw, stored_ = true;
+        // A second write in the frame (a recenter after the gyro's turn) keeps the first one's starting angles.
+        if (!stored_) pre_pitch_ = pre_pitch, pre_yaw_ = pre_yaw;
+        stored_pitch_ = pitch, stored_yaw_ = yaw, stored_ = true;
         return true;
     }
 
-    // Last frame's write against the look now: kept, undone (back where it was before), or neither (the game's own turn,
-    // a clamp). Runs of undone writes are logged with the copy's state, to tell what puts the look back.
+    // Last frame's write against the look now (verdict_): kept, undone (back where it was before), or neither (the game's
+    // own turn). Judged on yaw alone, like the core's stick fallback: the pitch limit stops a pitch write as if it were
+    // undone. Runs of undone writes are logged with the copy's state, to tell what puts the look back.
     void judge_write(const float* d) {
         double p = 0, h = 0;
         angles_of(d, p, h);
-        const double step = std::hypot(stored_pitch_ - pre_pitch_, wrap180(stored_yaw_ - pre_yaw_));
-        if (step <= kMinStep) return;
-        const double to_pre = std::hypot(p - pre_pitch_, wrap180(h - pre_yaw_));
-        const double to_kept = std::hypot(p - stored_pitch_, wrap180(h - stored_yaw_));
-        if (to_pre < 0.5 * step) {
-            if (++undone_run_ == 3 && undone_logs_ < kMaxLogs && ++undone_logs_) {
+        const double step = std::abs(wrap180(stored_yaw_ - pre_yaw_));
+        const double to_pre = std::abs(wrap180(h - pre_yaw_)), to_kept = std::abs(wrap180(h - stored_yaw_));
+        if (step > kMinStep && to_pre < 0.5 * step) verdict_ = Verdict::Undone;
+        else if (step > kMinStep && to_kept < 0.5 * step) verdict_ = Verdict::Kept;
+        if (verdict_ == Verdict::Undone) {
+            if (++undone_run_ == 3 && watches_ < kMaxWatches) {
+                ++watches_;
+                writewatch::request(std::format("player+{:x}", kLook).c_str(), kWatchSeconds, "the game undid the gyro's writes");
+            }
+            if (undone_run_ == 3 && undone_logs_ < kMaxLogs) {
+                ++undone_logs_;
+                run_logged_ = true;
                 std::string copy = "no copy";
-                float c[3];
-                if (copy_ && mem::guarded_copy(c, copy_, sizeof c)) {
+                if (copy_) {
                     float written[3];
                     direction_of(stored_pitch_, stored_yaw_, written);
-                    copy = std::format("the copy {:.2f} degrees from it and {:.2f} from the write ({})", angle_between(c, d),
-                                       angle_between(c, written), copy_same_ ? "written with it" : "turned with it");
+                    double cp = 0, ch = 0;
+                    angles_of(copy_dir_, cp, ch);
+                    copy = std::format("the copy (pitch {:.2f} yaw {:.2f}) {:.2f} degrees from it and {:.2f} from the write ({})",
+                                       cp, ch, angle_between(copy_dir_, d), angle_between(copy_dir_, written),
+                                       copy_same_ ? "written with it" : "left alone");
                 }
                 log("asura: the game undid the gyro's writes 3 frames in a row: look pitch %.2f yaw %.2f, written %.2f %.2f, "
-                    "before %.2f %.2f; %s; paused flag %d",
-                    p, h, stored_pitch_, stored_yaw_, pre_pitch_, pre_yaw_, copy.c_str(), int(paused_));
+                    "before %.2f %.2f; %s; camera %s, previous %s; paused flag %d",
+                    p, h, stored_pitch_, stored_yaw_, pre_pitch_, pre_yaw_, copy.c_str(), describe_camera(cameras_[0], d).c_str(),
+                    describe_camera(cameras_[1], d).c_str(), int(paused_));
             }
-        } else if (to_kept < 0.5 * step) {
-            if (undone_run_ >= 3 && undone_logs_ <= kMaxLogs) log("asura: writes kept again after %d undone", undone_run_);
-            undone_run_ = 0;
+            return;
         }
+        // A run is undone writes in consecutive frames only.
+        if (verdict_ == Verdict::Kept && run_logged_) log("asura: writes kept again after %d undone", undone_run_);
+        undone_run_ = 0;
+        run_logged_ = false;
     }
 
     // The pause flag is set (not found or not readable: not paused).
@@ -359,19 +501,19 @@ private:
 
     // The game's pitch limit is smaller while aiming with a weapon: a write past it comes back clamped, and that pitch is
     // the limit that way from then on. The full limit again once the view is kRelax inside it, or past it (the mouse).
-    // A clamp, not an undone write: the yaw kept (judged on a clear yaw step only) or the pitch moved toward the write
-    // before it stopped. An undone write goes back to where it was, which read as a 20-degree limit while aiming.
+    // A clamp, not an undone write (judge_write's verdict): the yaw kept, or the pitch moved a good part of the way toward
+    // the write before it stopped (not a nudge from the game's aim assist). An undone write goes back to where it was,
+    // which read as a 20-degree limit while aiming.
     void learn_limits(const float* d, bool wrote) {
         double p = 0, h = 0;
         angles_of(d, p, h);
-        const double yaw_step = std::abs(wrap180(stored_yaw_ - pre_yaw_)), yaw_off = std::abs(wrap180(h - stored_yaw_));
-        if (wrote && yaw_off < 0.5) {
-            const bool yaw_kept = yaw_step > kMinStep && yaw_off < 0.25 * yaw_step;
-            if (stored_pitch_ > p + kClamped && p > kMinLimit && p < limit_up_ - kClamped &&
-                (yaw_kept || p > pre_pitch_ + kClamped))
+        if (wrote && verdict_ != Verdict::Undone && std::abs(wrap180(h - stored_yaw_)) < 0.5) {
+            const bool yaw_kept = verdict_ == Verdict::Kept;
+            const double moved = std::max(kClamped, 0.25 * std::abs(stored_pitch_ - pre_pitch_));
+            if (stored_pitch_ > p + kClamped && p > kMinLimit && p < limit_up_ - kClamped && (yaw_kept || p > pre_pitch_ + moved))
                 set_limit(limit_up_, p, "up");
             if (stored_pitch_ < p - kClamped && -p > kMinLimit && -p < limit_down_ - kClamped &&
-                (yaw_kept || p < pre_pitch_ - kClamped))
+                (yaw_kept || p < pre_pitch_ - moved))
                 set_limit(limit_down_, -p, "down");
         }
         if (limit_up_ < kMaxPitch && (p > limit_up_ + kClamped || p < limit_up_ - kRelax)) set_limit(limit_up_, kMaxPitch, "up");
@@ -387,11 +529,22 @@ private:
     bool searched_ = false;
     uintptr_t controllers_ = 0, entities_ = 0;
     uintptr_t player_ = 0;
-    uintptr_t copy_ = 0;  // read_copy() this frame
+    uintptr_t controller_ = 0;   // find_player()
+    uintptr_t manager_ = 0;      // read_cameras(): the camera manager while it has a current camera
+    double zoom_reference_ = 0;  // [Gyro4All] ZoomReferenceFOV=, horizontal degrees; 0 = the third-person camera's
+    double logged_fov_ = 0;
+    int fov_logs_ = 0;
+    uintptr_t cameras_[2] = {};  // read_cameras(): the manager's current and previous cameras
+    int aim_logs_ = 0;           // turn_aim_point()
+    int camera_logs_ = 0;
+    uintptr_t copy_ = 0;  // read_copy() this frame, its direction (kept up to date by store())
+    float copy_dir_[3] = {0, 0, 1};
     bool copy_same_ = false;
     bool stored_ = false;  // the gyro wrote the look last frame, at these angles, from these
     double stored_pitch_ = 0, stored_yaw_ = 0, pre_pitch_ = 0, pre_yaw_ = 0;
-    int undone_run_ = 0, undone_logs_ = 0;  // judge_write()
+    enum class Verdict { None, Kept, Undone } verdict_ = Verdict::None;  // judge_write(), this frame
+    int undone_run_ = 0, undone_logs_ = 0, watches_ = 0;
+    bool run_logged_ = false;  // this run's start was logged
     double limit_up_ = kMaxPitch, limit_down_ = kMaxPitch;  // learn_limits()
     uintptr_t pause_flag_ = 0;
     bool paused_ = false;
