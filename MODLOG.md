@@ -7536,3 +7536,26 @@ heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 1
   (not the stock 128): NumElements (~389k) and NumChunks (24) at table+0x800; text at entry +0x0C. Fix in `ue.cpp`:
   `legacy_names_at` tries 128 and 256 chunk slots (`g_name_max_chunks`), and requires the last used chunk pointer to be
   set. Built, 853 checks pass; **not tested in game yet**.
+- 2026-11-04 **Metro 2033 Redux (Next-Gen Update, Gyro4All 1.10.0): the gyro stopped after ~2 min of play** (user report;
+  DualSense USB, Steam Input not handling the pad). Log: `4a: main menu` / `gyro off: no gameplay view (target main menu)` in
+  mid-play, the view's angles still readable. The main-menu flag (`metro.exe+0xF4B838`, found by `kMenuCode`) went back to
+  1 at a level change (the view owner object changed with no "view angles gone") and stayed 1. It also stayed 1 after
+  Continue from the menu reached by quitting. `+0xF49424..0xF49434` stayed at the menu value (-1) too.
+  - Read-only checks (ReadProcessMemory; scripts not kept): the code that sets the flag is the same in 2033 and Last Light
+    (setters at `+0x73C1AA` (1), `+0x73C0EB` (0), `+0x73AAAD` (esi), readers at the same six offsets). Each setter is
+    wrapped in `inc/dec` of a counter around a call: a load-state guard rather than a menu flag.
+  - In 2033 only the first scene after launch (~15 s before the menu, flag 1) has a readable view. The main menu itself
+    (at boot and after quitting) has none (`4a: view angles gone`), so the gyro is off there anyway.
+  - `.data` snapshots, menu with no view vs three gameplay states: no small dword was stable across both sides apart from
+    string bytes. No replacement signal found.
+  - Fix (`foura_engine.cpp`): the flag counts only in the first scene after start (`first_scene_`). It stops counting
+    once it reads 0 or that scene's view is gone (log `4a: the first scene is over: the main-menu flag no longer counts`).
+    Known cost: in Last Light Redux the main menu reached by quitting a level (a live scene) turns with the gyro again.
+    Built, 853 checks pass.
+  - Verified in 2033 (user: menus, pause, gameplay and a level change; DualSense USB; log): `4a: main menu` in the
+    first scene, then `the first scene is over`, `left the main menu` and `gyro on` in play; pause and the cursor still
+    turn it off; still on after the level change.
+  - Other 4A games, by code (not run): Metro Exodus EE doesn't match `kMenuCode` (log `main-menu flag not found`), so
+    `main_menu()` is always false there and `first_scene_` changes nothing. Last Light Redux runs the same code (same
+    setter offsets): its boot menu stays off; its menu after quitting a level now turns with the gyro; its levels after a
+    level change should no longer be taken for the menu. Not installed now, so not checked in game.

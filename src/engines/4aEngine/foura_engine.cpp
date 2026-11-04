@@ -65,7 +65,8 @@ constexpr uint8_t kClockMask[] = {0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF
 constexpr uintptr_t kClockOwnerRva = 0xF4C430, kClockOwnerVtableRva = 0xE53C88, kClock = 0xBFF0;
 constexpr ULONGLONG kPausedMs = 200;
 
-// Main menu: a dword in .data, 1 in the main menu and 0 in a level (MODLOG 2026-10-24, Metro: Last Light Redux). Found
+// Main menu: a dword in .data, 1 in the main menu and 0 in a level (MODLOG 2026-10-24, Metro: Last Light Redux), trusted only in
+// the first scene after start (see main_menu; MODLOG 2026-11-04). Found
 // by the code that sets it: mov dword ptr [rip+flag],1; mov word ptr [rip+..],di; test rsi,rsi (metro.exe+0x73C1AA in
 // Last Light Redux 1.0.0.4, flag at +0xF4B838, unique). The disp32 is followed by the 4-byte immediate.
 constexpr uint8_t kMenuCode[] = {0xC7, 0x05, 0, 0, 0, 0, 0x01, 0x00, 0x00, 0x00, 0x66, 0x89, 0x3D, 0, 0, 0, 0, 0x48, 0x85, 0xF6};
@@ -177,7 +178,11 @@ public:
         const bool had = angles_ != 0;
         angles_ = view_angles_address(a) ? angles_ : 0;
         if (bool(angles_) != had) log("4a: view angles %s", angles_ ? std::format("at {}", mem::module_offset(angles_)).c_str() : "gone");
-        if (!angles_) return f;
+        if (!angles_) {
+            if (had && first_scene_ && menu_flag_) log("4a: the first scene is over: the main-menu flag no longer counts");
+            if (had) first_scene_ = false;
+            return f;
+        }
         std::memcpy(last_, a, sizeof a);
         if (main_menu()) {
             f.target = "main menu";
@@ -275,11 +280,16 @@ private:
                                                 : "not found: the main menu turns the gyro like gameplay");
     }
 
-    // The game's main-menu flag is 1 (anything but 0 or 1, or not readable: not the main menu).
+    // The game's main-menu flag is 1 (anything but 0 or 1, or not readable: not the main menu), in the first scene with a
+    // view after the game starts. Later the flag is no guide: Metro 2033 Redux keeps it at 1 in gameplay after a level
+    // change and after Continue from a menu reached by quitting (MODLOG 2026-11-04), so it counts only until the flag
+    // reads 0 or the first scene's view is gone.
     bool main_menu() {
         uint32_t flag = 0;
         const bool was = main_menu_;
-        main_menu_ = menu_flag_ && mem::rd(menu_flag_, flag) && flag == 1;
+        const bool readable = menu_flag_ && mem::rd(menu_flag_, flag);
+        if (readable && flag == 0) first_scene_ = false;
+        main_menu_ = first_scene_ && readable && flag == 1;
         if (main_menu_ != was) log("4a: %s", main_menu_ ? "main menu" : "left the main menu");
         return main_menu_;
     }
@@ -327,6 +337,7 @@ private:
     bool paused_ = false;
     uintptr_t menu_flag_ = 0;
     bool main_menu_ = false;
+    bool first_scene_ = true;  // no view lost and the main-menu flag never 0 yet: the flag still counts
 };
 
 }  // namespace
