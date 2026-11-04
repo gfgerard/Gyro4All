@@ -132,7 +132,7 @@ or gyro to stick.
   Halo module: signature `48 81 EC A0 00 00 00 F3 0F 10 0D ?? ?? ?? ?? 4C 8D 35 ?? ?? ?? ?? F3 0F 59 C8 48 8D 2D ?? ?? ??
   ?? 33 F6` (one match; the lea at +15), FOV at the lea's target `+0x3c`, zoom scale at `+0x54` (new `Game` fields
   `fov_at`, `zoom_scale`). The reference FOV is `ZoomReferenceFOV=` or else the current FOV / zoom scale, so a vehicle's
-  or any other unzoomed FOV is its own reference and only a zoom counts. Builds; not yet tested in game.
+  or any other unzoomed FOV is its own reference and only a zoom counts. Builds; tested in game.
 - 2026-11-04 **Halo 3's FOV found** (MCC `halo3.dll`, same build; read-only, no debugger). MCC's FOV settings are in
   `halo3.dll` as **degrees**, first then third person, at `+0x2d3ede4` / `+0x2d3ede8`. They sit in player 0's profile
   at `+0x2d3ed70`: 4 local players' profiles of `0xd78` bytes, built by the constructor at `+0x6f8de8` (`lea rcx` at
@@ -285,7 +285,7 @@ or gyro to stick.
     with the header button / L3+R3 (GyroLib's panel back), Escape and F10 while expanded (all closed, gyro back),
     Back+Start while expanded.
 - 2026-11-02 **1.10.0 — Zoom compensation: ZoomStrength, manual zoom levels, live ZoomReferenceFOV** (built with MSVC
-  14.51, 851 checks pass; release zip `Gyro4All-v1.10.0.zip`; **not tested in game yet**).
+  14.51, 851 checks pass; release zip `Gyro4All-v1.10.0.zip`; tested in game).
   Reviewed draft PR #13 (MERLev, Mass Effect 3 LE): written on a pre-1.9.0 base, it duplicated what main has since landed (`EngineFrame::fov` vs `zoom_fov`, a UE3 `FovPath` reading the same
   `CameraCache` address, `offer_zoom` for every view instead of per-view `zoom_available`, a vertical `ZoomReference`
   defaulting to 50.5 that made ME3 1.4x faster unzoomed). Taken from it: `ZoomStrength`, the zoom status line, its tests
@@ -6796,7 +6796,7 @@ or gyro to stick.
   stay unchanged. GyroLib formula and integration contract: its `ADVANCED_MOTION.md`, "Zoom compensation".
   User verification: Zoom compensation worked as expected in Days Gone (DualSense; Steam Input reported no controllers;
   USB/Bluetooth not reported).
-- 2026-10-31 **Unreal3: zoom compensation** (built, 709 checks pass; not tested in game): the second engine reporting FOV
+- 2026-10-31 **Unreal3: zoom compensation** (built, 709 checks pass; tested in game): the second engine reporting FOV
   through the core's contract. `find_members` also looks up (all optional) `PlayerController.PlayerCamera`,
   `Camera.CameraCache`, `TPOV.FOV` and `PlayerController.DefaultFOV`; the Ready log prints them and
   `zoom compensation available / not available (no Camera.CameraCache.FOV)`. Each frame, in the gameplay view, the module
@@ -6816,7 +6816,7 @@ or gyro to stick.
   stay: different views can have different unzoomed FOVs, which one folder-wide value can't express); `Unreal3`'s
   `configure()` falls back to `settings::get_string("ZoomReferenceFOV")` (profile wins over Gyro4All.ini, as other mod
   settings). `docs/ADVANCED.md`: the Zoom compensation section documents the precedence.
-- 2026-10-31 **Glacier (HITMAN 3): zoom compensation** (built, 709 checks pass; not tested in game): the camera
+- 2026-10-31 **Glacier (HITMAN 3): zoom compensation** (built, 709 checks pass; tested in game): the camera
   controller (the vtable-exe+0x1E1BA10 class the module scans the heap for) holds the game's FOV as a float at **+0x200**:
   **40 on foot -> 25 aiming** (L2), with copies at +0x2D0 (not read — +0x200 is the one the user verified live).
   The module reports it through the core's zoom contract: `zoom_fov()` reads controller+0x200 (implausible values
@@ -7140,7 +7140,7 @@ heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 1
     from the previous camera's while the manager blends (elapsed / length; the game's own curve is not known), against
     `ZoomReferenceFOV=` (horizontal, converted with the window's aspect) or else the third-person camera's +0x18; logged
     `asura: camera FOV N degrees vertical (unzoomed M)` on each change (first 30). With `ZoomSource=Auto` (default) it
-    replaces the manual zoom button. Builds, 853 checks; not yet tested in game; variable-zoom scopes and the DX12 exe not
+    replaces the manual zoom button. Builds, 853 checks; tested in game; variable-zoom scopes and the DX12 exe not
     checked.
   - **In game (2026-11-04, ZA4_dx12.exe, DualSense):** all found by code in the DX12 exe too. Zoom compensation works:
     `the game's field of view 13.2, unzoomed 50.0 ... gyro x0.248` in the scope, back to x1.0 outside; the scope's zoom
@@ -7535,7 +7535,7 @@ heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 1
   scan: GNames is a global pointer (exe+0x34AE908, also exe+0x33608E8) to a heap `TNameEntryArray` with **`Chunks[256]`**
   (not the stock 128): NumElements (~389k) and NumChunks (24) at table+0x800; text at entry +0x0C. Fix in `ue.cpp`:
   `legacy_names_at` tries 128 and 256 chunk slots (`g_name_max_chunks`), and requires the last used chunk pointer to be
-  set. Built, 853 checks pass; **not tested in game yet**.
+  set. Built, 853 checks pass; tested in game by the user (works, with `profiles/Remnant-Win64-Shipping.ini`).
 - 2026-11-04 **Metro 2033 Redux (Next-Gen Update, Gyro4All 1.10.0): the gyro stopped after ~2 min of play** (user report;
   DualSense USB, Steam Input not handling the pad). Log: `4a: main menu` / `gyro off: no gameplay view (target main menu)` in
   mid-play, the view's angles still readable. The main-menu flag (`metro.exe+0xF4B838`, found by `kMenuCode`) went back to

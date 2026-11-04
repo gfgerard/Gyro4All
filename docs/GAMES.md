@@ -20,6 +20,7 @@
 | Control (2019, Ultimate Edition) | ✅ Works (tested on the Steam version, DX12) | Northlight | Install next to `Control_DX12.exe` in the game's main folder. DX11 (`Control_DX11.exe`) not tested. |
 | Cronos: The New Dawn | ✅ Works | Unreal Engine 5.5.4 | |
 | Crysis (2007) | ✅ Works (tested on the EA app version, 1.2.1, 64-bit) | CryEngine 2 | Install in `Bin64`, next to `Crysis64.exe`. 64-bit only. |
+| Cyberpunk 2077 | ✅ Works (tested on the GOG version, patch 2.50) | REDengine 4 | Install in `bin\x64`, next to `Cyberpunk2077.exe`. With RED4ext installed (it uses `winmm.dll`), install Gyro4All **as `version.dll`** (rename `winmm.dll`). Gyro on foot and when aiming from a car seat with a weapon drawn; off while driving. Single-player only. |
 | Crysis Remastered | ✅ Works | CryEngine | Install in `Bin64`, next to `CrysisRemastered.exe`. Rename `MSVCP140.dll`.|
 | Crysis 2 Remastered | ✅ Works | CryEngine | Install in `Bin64`, next to `Crysis2Remastered.exe`. Rename `MSVCP140.dll`.|
 | Days Gone | ✅ Works (tested on the Steam version) | Unreal Engine 4 | Install in `BendGame\Binaries\Win64`, next to `DaysGone.exe`. Aim has its own view in settings. Bike has its own `Vehicle` view in the `F10` panel: set its Activation to Off to keep the gyro off on the bike. |
@@ -53,10 +54,12 @@
 | Out of sight | ✅ Works | Unreal Engine 5.5.4 | |
 | Robocop: Rogue city | ✅ Works | Unreal Engine 5.2.0 | |
 | The Outer Worlds: Spacer's Choice Edition | ✅ Works | Unreal Engine 4.27.2 | Native DualSense support: Gyro4All leaves the controller to the game. |
+| Onimusha: Way of the Sword | ✅ Works (tested on the demo) | RE Engine | Install next to the game's exe in its main folder. The gyro turns off during lock-on. Needs REFramework installed.|
 | Pacific Drive | ✅ Works | Unreal Engine 4.27 | Gyro on foot **and** in the car. |
 | PAYDAY 3 | ✅ Works | Unreal Engine 5.5.4 | ✅⚠️ **Always-online co-op game: use at your own risk**, in private or solo lobbies only. Its profile lets the gyro follow the camera during actions that take it over. |
 | Pragmata | ✅ Works, **with [REFramework](https://github.com/praydog/REFramework)** | RE Engine | Install next to `PRAGMATA.exe` in the game's main folder, **together with a recent REFramework**: the game has Capcom's anti-tamper, which crashes the game about 30 s after start without it (an older REFramework build crashed it too). **Turn off the game's own gyro option** (it works while aiming with L2): Gyro4All's gyro also works while aiming, and the two would add up. |
 | Red Dead Redemption 2 | ✅ Works (tested on the Rockstar launcher version) | RAGE | Install next to `RDR2.exe` in the game's main folder. Story mode only: never play Red Dead Online with it. Binoculars turn through the right stick (less precise). |
+| Remnant: From the Ashes | ✅ Works (tested on the Steam version) | Unreal Engine 4 | Needs the profile provided |
 | Remnant 2 | ✅ Works | Unreal Engine 5 | Needs the profile provided |
 | Resident Evil 2 (remake) | ✅ Works (tested on the Game Pass & Steam versions) | RE Engine | Install next to `re2.exe` in the game's main folder **as `version.dll`** (rename `winmm.dll`): this version never loads a `winmm.dll` from its folder. Gyro in free look and while aiming; off in the inventory, the pause menu, cutscenes and fixed or puzzle cameras. REFramework is not needed. The game reads the DualSense through DirectInput; Gyro4All can't show a controller as an Xbox one in this version. |
 | Resident Evil 3 (remake) | ✅ Works (tested on the Game Pass version) | RE Engine | Install next to `re3.exe` in the game's main folder **as `version.dll`** (rename `winmm.dll`), as for RE2. Gyro in free look and while aiming; off in the inventory, the pause menu, cutscenes and fixed cameras. REFramework is not needed. The game reads the DualSense through DirectInput; Gyro4All can't show a controller as an Xbox one in this version. |
@@ -100,7 +103,6 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 | BioShock 2 | Unreal Engine 2.5 (modified) | 2010 | 32bit |
 | BioShock Infinite | Unreal Engine 3 | 2013 | 32bit |
 | Subnautica | Unity | 2018 | |
-| Cyberpunk 2077 | REDengine 4 | 2020 | |
 | Death Stranding | Decima | 2019 | |
 | Death Stranding 2 | Decima | 2025 | |
 | Horizon Zero Dawn | Decima | 2017 | |
