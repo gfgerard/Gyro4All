@@ -26,12 +26,18 @@ using PeekMessageW_t = BOOL(WINAPI*)(LPMSG, HWND, UINT, UINT, UINT);
 PeekMessageW_t g_real_peek = nullptr;
 std::atomic<DWORD> g_game_thread{0};
 std::atomic<bool> g_game_thread_pumped{false}, g_frames_started{false};
+// g_turned: a gyro frame applied a camera turn (this process is the game). g_handed_over: the session went to an exe this
+// process started (hand_session_to); no more gyro frames here.
+std::atomic<bool> g_turned{false}, g_handed_over{false};
 bool g_in_frame = false;
 LARGE_INTEGER g_freq{}, g_last_frame{};
 
+bool session_taken_over();
+void session_turned();
+
 // One gyro frame, on the game thread: from the PeekMessageW hook, or from the engine module (Engine::frame_source).
 void run_frame() {
-    if (g_in_frame) return;
+    if (g_in_frame || g_handed_over || session_taken_over()) return;
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
     // At most one gyro frame per 0.5 ms, in case the game pumps several times per frame.
@@ -41,6 +47,7 @@ void run_frame() {
     g_frames_started = true;
     const int64_t start = gyro4all::perf::now();
     const bool active = gyro4all::host_frame();
+    if (active && !g_turned.exchange(true)) session_turned();
     gyro4all::perf::record(active ? gyro4all::perf::Active : gyro4all::perf::Idle, start);
     g_in_frame = false;
 }
@@ -144,8 +151,10 @@ std::wstring lower(std::wstring s) {
 }
 
 // Launchers: an exe that starts another exe of this folder (DOOM 2016's DOOMx64.exe relaunches DOOMx64vk.exe for
-// Vulkan) hands the session to it: the mutex is released before the child starts, so the child runs Gyro4All. Only
-// before this process's first gyro frame: a game that already runs Gyro4All keeps it when it starts a helper exe.
+// Vulkan, RDR2's PlayRDR2.exe starts RDR2.exe) hands the session to it: the mutex is released before the child starts, so
+// the child runs Gyro4All, and this process runs no more gyro frames (GyroLib stays loaded but is no longer polled). Only
+// while this process has never turned a camera: a game that already runs Gyro4All keeps it when it starts a helper exe.
+// Gyro frames alone don't count: engines with their own frame thread (RAGE) run them from the start, in the launcher too.
 HANDLE g_session = nullptr, g_legacy_session = nullptr;
 std::wstring g_install_dir;  // lower case
 gyro4all::Engine* g_session_engine = nullptr;  // this process's engine, which tells its helper exes apart
@@ -156,9 +165,102 @@ using CreateProcessW_t = BOOL(WINAPI*)(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, L
 CreateProcessA_t g_real_create_a = nullptr;
 CreateProcessW_t g_real_create_w = nullptr;
 
+// Launchers that start the game through another program (Steam's PlayRDR2.exe goes through the Rockstar Games Launcher,
+// another folder, so hand_session_to never sees the game start): the session owner publishes in shared memory, until a
+// deadline (kLauncherHandoverSeconds after it started), that a later exe of this folder may take the session over. A
+// game exe of this folder (an engine detects it, not a launcher) that finds the session taken claims it while the
+// window is open; the owner stops at its next gyro frame, closes its log and session handles and acknowledges. The
+// window closes for good when the owner turns a camera (it is the game: a tool started next to it stays a plain proxy).
+// Long enough for the Rockstar Games Launcher to sign in and update before it starts RDR2.exe.
+constexpr int kLauncherHandoverSeconds = 180;
+struct SharedSession {
+    volatile LONG state;  // 0 = open, -1 = closed (camera turned or window off), > 0 = pid of the process that claimed it
+    volatile LONG acked;  // the old owner stopped
+    DWORD owner_pid;
+    ULONGLONG deadline;   // GetTickCount64 (system-wide) at which the window closes
+};
+HANDLE g_shared_map = nullptr;
+SharedSession* g_shared = nullptr;
+
+void close_shared() {
+    if (g_shared) UnmapViewOfFile(g_shared);
+    if (g_shared_map) CloseHandle(g_shared_map);
+    g_shared = nullptr;
+    g_shared_map = nullptr;
+}
+
+// created: no process had it (an owner from an older Gyro4All, or none).
+bool open_shared(const std::wstring& folder, bool& created) {
+    HANDLE map = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(SharedSession),
+                                    (L"Local\\Gyro4All-session-" + folder).c_str());
+    if (!map) return false;
+    created = GetLastError() != ERROR_ALREADY_EXISTS;
+    void* view = MapViewOfFile(map, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedSession));
+    if (!view) {
+        CloseHandle(map);
+        return false;
+    }
+    g_shared_map = map;
+    g_shared = static_cast<SharedSession*>(view);
+    return true;
+}
+
+// DllMain of a later process that found the session taken: true when it claimed it (and should run Gyro4All).
+bool take_session_over(const std::wstring& folder, const std::wstring& exe) {
+    bool game = false;
+    for (gyro4all::Engine* e : gyro4all::all_engines())
+        if (e->detect(exe) && !e->is_launcher(exe)) game = true;
+    bool created = false;
+    if (!game || !open_shared(folder, created)) return false;
+    if (created || GetTickCount64() >= g_shared->deadline ||
+        InterlockedCompareExchange(&g_shared->state, LONG(GetCurrentProcessId()), 0) != 0) {
+        close_shared();
+        return false;
+    }
+    // The owner stops at its next gyro frame; a frozen or frameless owner isn't waited for long. Its log is closed
+    // before this process opens (and truncates) it.
+    for (int i = 0; i < 300 && !g_shared->acked; ++i) Sleep(10);
+    return true;
+}
+
+// The owner, once its settings are read: opens the window (again, after a takeover: from this process's start).
+void open_session_window(const std::wstring& folder, int seconds) {
+    if (!g_shared) {
+        bool created = false;
+        if (!open_shared(folder, created)) return;
+    }
+    g_shared->owner_pid = GetCurrentProcessId();
+    g_shared->deadline = GetTickCount64() + ULONGLONG(seconds > 0 ? seconds : 0) * 1000;
+    g_shared->acked = 0;
+    InterlockedExchange(&g_shared->state, seconds > 0 ? 0 : -1);
+    if (seconds > 0)
+        gyro4all::log("session: for %d s, a game exe of this folder started later (by a launcher) takes Gyro4All over "
+                      "unless a camera turns here first", seconds);
+}
+
+void session_turned() {
+    if (g_shared) InterlockedCompareExchange(&g_shared->state, -1, 0);
+}
+
+bool session_taken_over() {
+    if (!g_shared) return false;
+    const LONG claimer = g_shared->state;
+    if (claimer <= 0 || DWORD(claimer) == GetCurrentProcessId()) return false;
+    g_handed_over = true;
+    gyro4all::log("session: taken over by process %ld (a game exe of this folder, started later); the gyro stops here",
+                  claimer);
+    gyro4all::log_close();
+    if (g_session) CloseHandle(g_session);
+    if (g_legacy_session) CloseHandle(g_legacy_session);
+    g_session = g_legacy_session = nullptr;
+    InterlockedExchange(&g_shared->acked, 1);
+    close_shared();
+    return true;
+}
+
 // The child's exe: the application name, else the command line's first (possibly quoted) token, as a full path.
 void hand_session_to(std::wstring app, const std::wstring& cmd) {
-    if (!g_session || g_frames_started) return;
+    if (!g_session || g_turned) return;
     if (app.empty()) {
         if (!cmd.empty() && cmd[0] == L'"') app = cmd.substr(1, cmd.find(L'"', 1) - 1);
         else app = cmd.substr(0, cmd.find(L' '));
@@ -172,11 +274,14 @@ void hand_session_to(std::wstring app, const std::wstring& cmd) {
         gyro4all::log("session: kept (%s, started by this process, is a helper)", gyro4all::narrow(full).c_str());
         return;
     }
-    gyro4all::log("session: handed to %s (started by this process)", gyro4all::narrow(full).c_str());
+    g_handed_over = true;
+    gyro4all::log("session: handed to %s (started by this process%s)", gyro4all::narrow(full).c_str(),
+                  g_frames_started ? "; the gyro stops here" : "");
     gyro4all::log_close();  // the child opens Gyro4All.log anew
     CloseHandle(g_session);
     if (g_legacy_session) CloseHandle(g_legacy_session);
     g_session = g_legacy_session = nullptr;
+    close_shared();
 }
 
 std::wstring widen(const char* s) {
@@ -265,15 +370,19 @@ void attach(HMODULE self) {
     const std::wstring folder = std::to_wstring(std::hash<std::wstring>{}(lower(dir)));
     HANDLE instance = CreateMutexW(nullptr, FALSE, (L"Local\\Gyro4All-" + folder).c_str());
     if (!instance) return;
+    bool took_over = false;
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        CloseHandle(instance);
-        return;
+        took_over = take_session_over(folder, exe);
+        if (!took_over) {
+            CloseHandle(instance);
+            return;
+        }
     }
     // Also the mutex of GyroUE (this project's former name, same hash): a GyroUE proxy left in this folder under the
     // other proxy name (winmm.dll / version.dll) loads into the same process. Whichever starts first runs; the other
     // stays a plain proxy.
     HANDLE legacy = CreateMutexW(nullptr, FALSE, (L"Local\\GyroUE-" + folder).c_str());
-    if (legacy && GetLastError() == ERROR_ALREADY_EXISTS) {
+    if (legacy && GetLastError() == ERROR_ALREADY_EXISTS && !took_over) {
         CloseHandle(legacy);
         CloseHandle(instance);
         return;
@@ -290,6 +399,7 @@ void attach(HMODULE self) {
     if (data_dir != mod_dir)
         gyro4all::log("settings: %s is read-only; settings, profiles and logs are in %s",
                       gyro4all::narrow(mod_dir).c_str(), gyro4all::narrow(data_dir).c_str());
+    if (took_over) gyro4all::log("session: taken over from the process that started Gyro4All first (a launcher)");
 
     QueryPerformanceFrequency(&g_freq);
     g_game_thread = GetCurrentThreadId();
@@ -303,6 +413,7 @@ void attach(HMODULE self) {
         gyro4all::log_close();  // the game opens Gyro4All.log anew
         if (legacy) CloseHandle(legacy);
         CloseHandle(instance);
+        close_shared();
         return;
     }
     gyro4all::settings::use_profile_alias(engine.profile_aliases(stem));
@@ -312,18 +423,10 @@ void attach(HMODULE self) {
     gyro4all::hooks::init(engine.module_prefix(stem), engine.inline_hooks());
     gyro4all::host_configure(engine);
     gyro4all::overlay::install(data_dir + L"\\gyrolib.ini");
-    if (engine.frame_source(&run_frame)) {
-        gyro4all::log("hook: the %s module runs the gyro frame on its game thread", engine.name());
-        return;
-    }
-    // Modular builds import PeekMessageW from one of the game's own DLLs (Unreal: ApplicationCore/Core) instead of the
-    // exe; the hook covers every game module, including ones loaded later.
-    if (!gyro4all::hooks::add("USER32.dll", "PeekMessageW", reinterpret_cast<void*>(&hooked_peek),
-                              reinterpret_cast<void**>(&g_real_peek)))
-        gyro4all::log("hook: PeekMessageW not imported by any loaded game module yet");
     g_session = instance;
     g_legacy_session = legacy;
     g_install_dir = lower(dir);
+    open_session_window(folder, kLauncherHandoverSeconds);
     // Inline on the export, not in the game modules' import tables: the relaunch can come from any DLL (Kena's
     // CODEX64.dll restarts the exe through its own CreateProcessW import). kernel32's CreateProcess* only jump to
     // KERNELBASE's.
@@ -337,6 +440,15 @@ void attach(HMODULE self) {
         !gyro4all::hooks::hook_function(create_w, reinterpret_cast<void*>(&hooked_create_w),
                                         reinterpret_cast<void**>(&g_real_create_w)))
         gyro4all::log("session: CreateProcess hook failed: a relaunched game exe won't run Gyro4All");
+    if (engine.frame_source(&run_frame)) {
+        gyro4all::log("hook: the %s module runs the gyro frame on its game thread", engine.name());
+        return;
+    }
+    // Modular builds import PeekMessageW from one of the game's own DLLs (Unreal: ApplicationCore/Core) instead of the
+    // exe; the hook covers every game module, including ones loaded later.
+    if (!gyro4all::hooks::add("USER32.dll", "PeekMessageW", reinterpret_cast<void*>(&hooked_peek),
+                              reinterpret_cast<void**>(&g_real_peek)))
+        gyro4all::log("hook: PeekMessageW not imported by any loaded game module yet");
     if (gyro4all::hooks::add("USER32.dll", "PeekMessageA", reinterpret_cast<void*>(&hooked_peek_a),
                              reinterpret_cast<void**>(&g_real_peek_a)))
         gyro4all::log("hook: PeekMessageA hook registered too");

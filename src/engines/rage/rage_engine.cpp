@@ -21,6 +21,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
@@ -84,30 +85,46 @@ constexpr double kPi = 3.14159265358979323846, kMaxPitch = 1.5;  // radians (86 
 constexpr uintptr_t kProjectionY = 0x3ec0aa4;
 
 // The rendered vertical FOV in degrees, 0 if unreadable or implausible.
-// The offsets above are one RDR2 build's: used only in RDR2.exe and while both known zoom-camera vtables (exe+0x3399308,
-// exe+0x3399c08) start with a pointer into the exe's image. Another RAGE game (GTA IV) or another build gets no camera
-// (the stick fallback) instead of writes to unrelated memory. Checked once.
+// The offsets above are one RDR2 build's (1.0.1491.50; the Steam and Rockstar Games Launcher copies are the same):
+// used only in RDR2.exe and while both known zoom-camera vtables (exe+0x3399308, exe+0x3399c08) start with a pointer
+// into the exe's image. Another RAGE game (GTA IV) or another build gets no camera (the stick fallback) instead of writes
+// to unrelated memory. The exe's data is unpacked a few seconds after start (anti-tamper): a check right at start failed
+// on the Steam copy (MODLOG 2026-11-05), so a failed check is retried twice a second for as long as the game runs
+// (the stick fallback meanwhile, so nothing is written), logged once after 60 s. A match is final.
 bool build_ok() {
-    static const bool ok = [] {
-        const HMODULE exe = GetModuleHandleW(nullptr);
-        const uintptr_t base = reinterpret_cast<uintptr_t>(exe);
-        wchar_t path[MAX_PATH] = {};
-        GetModuleFileNameW(exe, path, MAX_PATH);
-        const wchar_t* name = wcsrchr(path, L'\\');
-        name = name ? name + 1 : path;
-        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-        const uintptr_t end = base + nt->OptionalHeader.SizeOfImage;
-        const auto code_ptr = [&](uintptr_t vtable) {
-            const uintptr_t fn = vtable < end ? mem::rdp(vtable) : 0;
-            return fn >= base && fn < end;
-        };
-        const bool good = _wcsicmp(name, L"RDR2.exe") == 0 && code_ptr(base + 0x3399308) && code_ptr(base + 0x3399c08);
-        log("rage: %ls %s", name, good ? "matches the known RDR2 build: camera offsets used"
-                                       : "is not the known RDR2 build: no camera hook (gyro as right stick)");
-        return good;
-    }();
-    return ok;
+    static std::atomic<int> state{0};  // 1 = known build, -1 = not (logged), 0 = not yet
+    static ULONGLONG first = 0, next = 0;
+    if (state != 0) return state > 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now < next) return false;
+    next = now + 500;
+    if (!first) first = now;
+    const HMODULE exe = GetModuleHandleW(nullptr);
+    const uintptr_t base = reinterpret_cast<uintptr_t>(exe);
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(exe, path, MAX_PATH);
+    const wchar_t* name = wcsrchr(path, L'\\');
+    name = name ? name + 1 : path;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    const uintptr_t end = base + nt->OptionalHeader.SizeOfImage;
+    const auto code_ptr = [&](uintptr_t vtable) {
+        // Any alignment: a function's address needn't be 8-aligned (the Steam copy's aim vtable starts with exe+0x41e88c).
+        const uintptr_t fn = vtable < end ? mem::rdp(vtable, 1) : 0;
+        return fn >= base && fn < end;
+    };
+    const bool rdr2 = _wcsicmp(name, L"RDR2.exe") == 0;
+    if (rdr2 && code_ptr(base + 0x3399308) && code_ptr(base + 0x3399c08)) {
+        log("rage: %ls matches the known RDR2 build after %.1f s: camera offsets used", name, double(now - first) / 1000);
+        state = 1;
+    } else if (!rdr2) {
+        log("rage: %ls is not the known RDR2 build: no camera hook (gyro as right stick)", name);
+        state = -1;
+    } else if (static bool warned = false; !warned && now - first >= 60000) {
+        log("rage: %ls doesn't match the known RDR2 build yet after 60 s: gyro as right stick, still checking", name);
+        warned = true;
+    }
+    return state > 0;
 }
 
 double vertical_fov() {

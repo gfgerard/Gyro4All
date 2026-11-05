@@ -974,6 +974,8 @@ bool frame(gl_context* ctx, gl_sdl* reader, const gl_output& out, bool suppress_
     // pressed and the game's XInputGetState calls per slot, to tell a game that never asks for our slot (it keeps its
     // own list of connected pads) from one that gets the controller and ignores it.
     if (show) {
+        constexpr int kQuietRange = 1000;  // a stick axis's range in 10 s that still counts as at rest
+        constexpr ULONGLONG kActiveEveryMs = 60000;  // a report while playing at most this often
         static SHORT lo[4] = {}, hi[4] = {};
         static float gyro_max = 0;
         static WORD buttons = 0;
@@ -989,11 +991,23 @@ bool frame(gl_context* ctx, gl_sdl* reader, const gl_output& out, bool suppress_
             uint32_t polls[4];
             for (int i = 0; i < 4; ++i) polls[i] = g_polls[i].exchange(0);
             const uint32_t ours = g_polls_ours.exchange(0);
-            if (next)
+            // The first report, the game starting or stopping to ask for our slot (at once), and otherwise at most one
+            // a minute, only when something happened: a stick out of rest, a button or the gyro's stick (a line every
+            // 10 s, quiet or in play, filled the log).
+            static bool logged = false, asked = false;
+            static ULONGLONG last = 0;
+            bool moved = buttons != 0 || gyro_max > 0;
+            for (int i = 0; i < 4; ++i) moved = moved || hi[i] - lo[i] > kQuietRange;
+            const bool asks = ours > 0;
+            if (next && (!logged || asks != asked || (moved && now - last >= kActiveEveryMs))) {
+                logged = true;
+                asked = asks;
+                last = now;
                 log("xinput: sticks in the last 10 s LX %d..%d LY %d..%d RX %d..%d RY %d..%d (now RX %d RY %d), gyro "
                     "stick up to %.2f, buttons 0x%04X; game polls per slot %u/%u/%u/%u (%u answered with controller %lu)",
                     lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], lo[3], hi[3], g.sThumbRX, g.sThumbRY, gyro_max, buttons,
                     polls[0], polls[1], polls[2], polls[3], ours, g_slot);
+            }
             next = now + 10000;
             for (int i = 0; i < 4; ++i) lo[i] = hi[i] = v[i];
             gyro_max = 0;

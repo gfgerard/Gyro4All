@@ -130,6 +130,7 @@ private:
     int log_wait_ = 0;
     std::string saved_;  // last saved (or restored) text
     StickModel saved_model_;
+    double saved_fit_ = 0;  // the fit of the model saved this session (0: none, or restored from the profile)
     bool has_saved_ = false;
     int save_wait_ = 0;
 };

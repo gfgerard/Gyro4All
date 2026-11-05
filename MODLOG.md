@@ -5,6 +5,58 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-05 **RDR2 (Steam): Gyro4All ran in the launcher `PlayRDR2.exe`, never in `RDR2.exe`; launchers now hand the
+  session over with any engine, also when the game starts through another program** (built, 853 checks pass; verified
+  with a fake launcher, `bash tools/launchertest/run.sh`; not yet tested with the real game). User log: only `Gyro4All
+  1.10.0 in ...\PlayRDR2.exe`, `engine: RAGE (detected)` (RAGE detection looks at the folder: `common_0.rpf`,
+  `shaders_x64.rpf`), `rage: PlayRDR2.exe is not the known RDR2 build`, no start from `RDR2.exe`. On Steam,
+  PlayRDR2.exe starts the Rockstar Games Launcher (another folder), which starts RDR2.exe later; a non-Steam RDR2.exe
+  does the same itself (starts the launcher, exits, the launcher starts RDR2.exe again). Causes in `dllmain.cpp`: (1)
+  engines with their own frame thread (`Engine::frame_source`, RAGE) returned before the session handle was kept and the
+  CreateProcess hook installed; (2) the CreateProcess handover only covers an exe of the same folder started by this
+  process, and only before the first gyro frame, which RAGE's frame thread runs from the start. Fix: the session and the
+  CreateProcess hook are set up before `frame_source`; the CreateProcess handover runs while this process has never
+  turned a camera; and a takeover window: the session owner keeps a shared-memory block (`Local\Gyro4All-session-<folder
+  hash>`: state, ack, owner pid, deadline) open for 180 s from its start (`kLauncherHandoverSeconds`, no setting, by the
+  user's choice). A later game exe of the folder (an engine detects it and it isn't a known launcher) that finds the
+  session taken claims it while the window is open; the owner stops at its next gyro frame (log and session handles
+  closed, ack; GyroLib stays loaded, no longer polled, because destroying it could leave the XInput hooks' pad pointers
+  dangling); the new process waits up to 3 s for the ack and starts. The window closes for good when the owner turns a
+  camera. Fake launcher test: without the fix the log is the user's; with it both runs (PlayRDR2.exe starting RDR2.exe
+  directly, and through `relay\Relay.exe` in another folder) end with `Gyro4All 1.10.1 in ...\RDR2.exe`, the second with
+  `session: taken over from the process that started Gyro4All first`. Risk: a tool of the game's folder that an engine
+  detects, started within 180 s while the game is still in its menus, takes the session.
+  - Then, on Steam (`RDR2.exe` 1.0.1491.50, game folder on another drive): `rage: RDR2.exe is not the known RDR2 build`
+    7 s after start. Read-only scan of the running game (on foot): director `[exe+0x3ea05e8]` (camera `+0x7a0`, vtable
+    `exe+0x339a6c0`, unit front `+0x7b0`), zoom vtables `exe+0x3399308` / `exe+0x3399c08` pointing into the image
+    (`exe+0x41e88c`, `exe+0x41e438`), projection `exe+0x3ec0aa4` readable: the same build as the Rockstar Games
+    Launcher copy (data offsets). First guess, the check ran before the anti-tamper unpacked the data: a failed check is
+    now retried every 500 ms for the whole session (a note in the log after 60 s; the stick fallback writes nothing
+    meanwhile). In game it still failed after 60 s, in gameplay. Real cause: `build_ok()` read the vtables' first entry
+    with `mem::rdp()`, which requires 8-byte alignment, and the Steam copy's aim vtable starts with `exe+0x41e88c`
+    (function addresses needn't be aligned): read as 0, so "not the known build". Fix: `mem::rdp(vtable, 1)`. So the
+    Steam copy's code is laid out differently from the Rockstar copy's (where that entry was aligned) while the data
+    offsets used here match. Tested in game (Steam copy): "matches the known RDR2 build after 0.0 s", gameplay camera
+    found, the gyro turns it (99% of camera updates turned), zoom compensation on aim and binoculars part of the time.
+  - Same session: the stick fallback started three times in 18 s ("the game undid the gyro's camera writes 8 frames in
+    a row", about 0.5-1 s each; cause not in the log, the next zoom camera line came 1 s after the last one, possibly
+    binoculars). Each run saved `StickFallbackLearned`, and the last one, from 0.5 s of data after a 97% model was
+    saved, was an 80% one (curve 3.00): the next session would start with it. Fix (`stick_fallback.cpp`, `take_save`):
+    a model is saved only if its fit is at least the fit of the one saved earlier this session minus 0.02 (a model
+    restored from the profile has no fit, so the first good one of a session still replaces it). Builds, 853 checks
+    pass; not yet tested in game. Open: why the game undoes the writes there.
+  - Log: the 10 s `xinput: sticks in the last 10 s ...` line (`xinput.cpp`) filled logs with idle copies. It is now
+    written the first time and at once when the game starts or stops asking for our slot; otherwise at most once a
+    minute and only when something happened in its 10 s: a stick axis range over 1000, a button or the gyro's stick
+    (the line still covers only its last 10 s). Builds; not yet checked in a game log.
+- 2026-11-05 **1.10.1 — Cyberpunk 2077 frame rate, RE4 remake crash with the DX12 panel** (built with MSVC 14.51, 853
+  checks pass; release zip `Gyro4All-v1.10.1.zip`). What changed since 1.10.0:
+  - REDengine (Cyberpunk 2077): the safe-read page check uses `QueryWorkingSetEx` instead of `VirtualQuery`, and the camera
+    system is kept between frames: Gyro4All's frame went from 9-12 ms (growing during play) to about 120 us. A camera
+    that matched last frame keeps matching within about 20 degrees, so fast turns no longer flip the view to "cinematic"
+    for a frame. Both tested in game by the user (entry "Poor frame rate with Gyro4All on" in the Cyberpunk section).
+  - DX12 panel: the captured swapchain gets a private vtable (the RE4 remake crash with REFramework and the Steam
+    overlay's DLL; entry below).
 - 2026-11-04 **RE4 remake: crash ~10 s after start with REFramework and the DX12 panel on; the captured swapchain now
   gets a private vtable** (built, 853 checks pass; checked against the real dxgi in a standalone D3D12 test; verified in
   game by the user). User report: re4.exe 1.5.9.0 access violation (`ntdll` +0x166447, Windows event) with REFramework

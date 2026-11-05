@@ -14,6 +14,7 @@ constexpr double kMinStep = 0.11;  // degrees: smaller writes don't count either
 constexpr int kLogFrames = 60;     // a changed model is logged at most this often
 constexpr int kSaveFrames = 600;   // and saved at most this often while the fallback runs (also when it stops)
 constexpr double kSaveFit = 0.7;     // saved only when it explains this much of the camera's motion
+constexpr double kSaveFitSlack = 0.02;  // and at most this much less than the model saved earlier this session
 constexpr double kSaveWindows = 300;  // from this many windows of clear deflection
 // Nor a model faster than this at full stick (degrees per second): no game's stick turns that fast, so it fitted
 // something else moving the camera (Zombie Army 4's scope: 1700+ deg/s learnt and saved over a good model).
@@ -242,13 +243,17 @@ std::string StickFallback::status() const {
 }
 
 bool StickFallback::take_save(std::string& text) {
-    // Only a model that explains the camera well, from enough data, is kept for the next session.
-    if (!learnt_ || save_wait_ > 0 || learner_.fit() < kSaveFit || learner_.windows() < kSaveWindows ||
+    // Only a model that explains the camera well, from enough data, is kept for the next session, and never one that
+    // explains it worse than the one already saved this session (a short stretch where the game's stick acts otherwise,
+    // e.g. a zoom camera, gave RDR2 an 80% model over a 97% one). A model restored from the profile has no fit: 0.
+    if (!learnt_ || save_wait_ > 0 || learner_.fit() < std::max(kSaveFit, saved_fit_ - kSaveFitSlack) ||
+        learner_.windows() < kSaveWindows ||
         std::abs(model_.yaw_speed) > kMaxSaveSpeed || std::abs(model_.pitch_speed) > kMaxSaveSpeed ||
         (has_saved_ && !differs(model_, saved_model_, 0.05)))
         return false;
     text = model_.serialize();
     saved_model_ = model_;
+    saved_fit_ = learner_.fit();
     has_saved_ = true;
     save_wait_ = kSaveFrames;
     return true;
