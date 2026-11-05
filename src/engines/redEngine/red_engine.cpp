@@ -40,6 +40,7 @@
 #include "mem.hpp"
 
 #include <windows.h>
+#include <psapi.h>
 
 #include <atomic>
 #include <cmath>
@@ -147,38 +148,54 @@ bool in_exe(uintptr_t p) { return p >= g_base && p < g_end; }
 
 // Reads that never fault. Cyberpunk installs a vectored exception handler (the exe imports AddVectoredExceptionHandler)
 // that sees an access violation before any __except does and ends the game with its crash report: the first scan's
-// guarded reads of stray pointers crashed it (MODLOG 2026-11-04). So every range is checked with VirtualQuery first
-// (committed, readable, not a guard page). The regions checked are cached for one frame only (clear_regions), since
-// the game can free memory between frames.
-struct Region {
-    uintptr_t begin, end;
+// guarded reads of stray pointers crashed it (MODLOG 2026-11-04). So every 4 KB page is checked first: resident, readable
+// (or writable, for stores), not a guard page. The check is QueryWorkingSetEx, not VirtualQuery: VirtualQuery walks the
+// whole region to report its size, which took 1.3 ms per call on a 1 GB region and 16 ms on 4 GB, and Cyberpunk's
+// memory pools are that big. Gyro4All's frames grew to 10 ms and the game's frame rate fell (MODLOG 2026-11-05).
+// QueryWorkingSetEx costs about 0.35 us at any region size. A committed page that is paged out reads as not readable.
+// The pages checked are cached for one frame only (clear_regions), since the game can free memory between frames.
+enum PageAccess : uint8_t { kNoAccess, kReadable, kWritable };
+struct PageEntry {
+    uintptr_t page;
+    uint32_t frame;
+    PageAccess access;
 };
-Region g_regions[64];
-unsigned g_region_count = 0, g_region_next = 0;
+constexpr unsigned kPageCache = 1024;  // direct-mapped by page number
+PageEntry g_pages[kPageCache] = {};
+uint32_t g_frame = 1;  // 0 never matches (the cache's initial entries)
 
-void clear_regions() { g_region_count = g_region_next = 0; }
+void clear_regions() {
+    if (++g_frame == 0) g_frame = 1;
+}
+
+PageAccess page_access(uintptr_t page) {
+    PageEntry& e = g_pages[(page >> 12) % kPageCache];
+    if (e.frame == g_frame && e.page == page) return e.access;
+    PSAPI_WORKING_SET_EX_INFORMATION w{};
+    w.VirtualAddress = reinterpret_cast<void*>(page);
+    PageAccess a = kNoAccess;
+    if (K32QueryWorkingSetEx(GetCurrentProcess(), &w, sizeof w) && w.VirtualAttributes.Valid) {
+        const DWORD prot = DWORD(w.VirtualAttributes.Win32Protection);
+        if (!(prot & (PAGE_GUARD | PAGE_NOACCESS))) {
+            if (prot & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) a = kWritable;
+            else if (prot & (PAGE_READONLY | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_WRITECOPY)) a = kReadable;
+        }
+    }
+    e = {page, g_frame, a};
+    return a;
+}
+
+bool pages_allow(uintptr_t p, size_t n, PageAccess need) {
+    if (!p || n == 0 || p + n < p) return false;
+    for (uintptr_t page = p & ~uintptr_t(0xFFF); page < p + n; page += 0x1000)
+        if (page_access(page) < need) return false;
+    return true;
+}
 
 bool readable(uintptr_t p, size_t n) {
-    if (!p || p + n < p) return false;
+    if (!p || n == 0 || p + n < p) return false;
     if (in_exe(p) && in_exe(p + n - 1)) return true;
-    for (unsigned i = 0; i < g_region_count; ++i)
-        if (p >= g_regions[i].begin && p + n <= g_regions[i].end) return true;
-    uintptr_t at = p;
-    while (at < p + n) {
-        MEMORY_BASIC_INFORMATION mbi{};
-        if (!VirtualQuery(reinterpret_cast<void*>(at), &mbi, sizeof mbi) || mbi.State != MEM_COMMIT) return false;
-        const DWORD prot = mbi.Protect;
-        if ((prot & (PAGE_GUARD | PAGE_NOACCESS)) || !(prot & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                                                              PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
-                                                              PAGE_EXECUTE_WRITECOPY)))
-            return false;
-        const uintptr_t begin = reinterpret_cast<uintptr_t>(mbi.BaseAddress), end = begin + mbi.RegionSize;
-        g_regions[g_region_next] = {begin, end};
-        g_region_next = (g_region_next + 1) % 64;
-        if (g_region_count < 64) ++g_region_count;
-        at = end;
-    }
-    return true;
+    return pages_allow(p, n, kReadable);
 }
 
 bool copy(void* dst, uintptr_t src, size_t n) { return readable(src, n) && mem::guarded_copy(dst, src, n); }
@@ -193,13 +210,9 @@ uintptr_t rdp(uintptr_t address) {
     return mem::plausible(address) && rd(address, v) && mem::plausible(v) ? v : 0;
 }
 
-// Writes go only to committed read-write pages (checked every time: two small writes a frame), for the same reason.
+// Writes go only to resident read-write pages, for the same reason.
 bool store(uintptr_t dst, const void* src, size_t n) {
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (!dst || !VirtualQuery(reinterpret_cast<void*>(dst), &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
-        (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) || !(mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) ||
-        dst + n > reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize)
-        return false;
+    if (!pages_allow(dst, n, kWritable)) return false;
     return mem::guarded_store(dst, src, n);
 }
 
@@ -401,9 +414,16 @@ void angles(const float (&q)[4], double& pitch, double& yaw) {
     yaw = atan2(fx, fy) * 180 / kPi;
 }
 
-bool same_orientation(const float (&a)[4], const float (&b)[4]) {
+// Quaternion dot products: cos(half the angle between them).
+constexpr double kSameDot = 0.9995;  // within about 3.6 degrees: the copy may be a frame older than the component
+// The camera that matched last frame keeps matching within about 20 degrees: in a fast turn (over 3.6 degrees a frame)
+// the one-frame lag failed the strict test, and the view flipped to "cinematic" and back for one frame, with the gyro
+// off, up to 32 times a second (MODLOG 2026-11-05). A real switch to another camera still fails it, or fails it soon.
+constexpr double kContinueDot = 0.985;
+
+bool same_orientation(const float (&a)[4], const float (&b)[4], double min_dot = kSameDot) {
     const double dot = double(a[0]) * b[0] + double(a[1]) * b[1] + double(a[2]) * b[2] + double(a[3]) * b[3];
-    return fabs(dot) > 0.9995;  // within about 3.6 degrees: the copy may be a frame older than the component
+    return fabs(dot) > min_dot;
 }
 
 enum class Kind { Unknown, OnFoot, Car, Motorcycle, Cinematic };
@@ -488,7 +508,7 @@ public:
         f.cursor = cursor_;
         f.in_game = true;
 
-        camera_system_ = game_system(h("gameCameraSystem"));
+        camera_system_ = camera_system();
         const bool active = read_active(camera_system_, active_);
         if (active != have_active_) {
             log("red: active camera data %s", active ? "found (camera system +0x500)" : "gone");
@@ -635,6 +655,17 @@ public:
     }
 
 private:
+    // The camera system, kept while the game instance stays the same and the object is still a gameCameraSystem;
+    // otherwise looked up again among the game's systems (a few hundred objects, too many to walk every frame).
+    uintptr_t camera_system() {
+        const uintptr_t gi = game_instance();
+        if (gi && gi == cached_gi_ && cached_camera_system_ && class_hash(cached_camera_system_) == h("gameCameraSystem"))
+            return cached_camera_system_;
+        cached_gi_ = gi;
+        cached_camera_system_ = gi ? game_system(h("gameCameraSystem")) : 0;
+        return cached_camera_system_;
+    }
+
     // Seated with a weapon out: two FPP camera values (not reflected) that are 10 / 50 while driving and 0 with a
     // weapon drawn in the seat (sound-cued sampling, confirmed in game; MODLOG 2026-11-04).
     bool seated_weapon_drawn() const {
@@ -779,10 +810,12 @@ private:
 
     // The offset where a component of this class stores the orientation the active camera data copies, learnt by
     // matching (16-byte aligned quaternions in the component); 0 = not found.
-    uintptr_t orientation_offset(const Candidate& c) {
+    uintptr_t orientation_offset(const Candidate& c, bool matched_last_frame = false) {
         if (const auto it = orientation_at_.find(c.cls); it != orientation_at_.end()) {
             float q[4];
-            if (it->second && rd(c.component + it->second, q) && same_orientation(q, active_.q)) return it->second;
+            if (it->second && rd(c.component + it->second, q) &&
+                same_orientation(q, active_.q, matched_last_frame ? kContinueDot : kSameDot))
+                return it->second;
             return 0;
         }
         for (uintptr_t off = 0x90; off + 16 <= kComponentSize; off += 0x10) {
@@ -832,7 +865,7 @@ private:
             // Unverified: a vehicle camera may also be listed while the player is on foot; the log will tell.
             if (c.owner && is_a(c.owner, h("vehicleBaseObject"))) vehicle_camera = true;
             // Cameras that look the same way all match: the first one wins, and the player's are listed first.
-            if (!hit && orientation_offset(c)) hit = &c;
+            if (!hit && orientation_offset(c, c.component == matched_)) hit = &c;
         }
         matched_ = hit ? hit->component : 0;
         const bool fpp = hit && hit->cls == h("gameFPPCameraComponent");
@@ -863,6 +896,7 @@ private:
     bool have_active_ = false;
     ActiveCamera active_{};
     uintptr_t camera_system_ = 0, player_ = 0, matched_ = 0;
+    uintptr_t cached_gi_ = 0, cached_camera_system_ = 0;
     std::vector<Candidate> candidates_;
     std::unordered_map<uint64_t, uintptr_t> orientation_at_;  // class hash -> offset of its world orientation
     Kind kind_ = Kind::Unknown;

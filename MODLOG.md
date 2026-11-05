@@ -5,6 +5,62 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-04 **RE4 remake: crash ~10 s after start with REFramework and the DX12 panel on; the captured swapchain now
+  gets a private vtable** (built, 853 checks pass; checked against the real dxgi in a standalone D3D12 test; verified in
+  game by the user). User report: re4.exe 1.5.9.0 access violation (`ntdll` +0x166447, Windows event) with REFramework
+  (the user's own and the official nightly 01215), the log ending after "DX12 panel ready". It runs without Gyro4All,
+  with the panel off (`ui.menu_key=` empty, `ui.gamepad_menu_shortcut=0`) and with OptiScaler installed as `dxgi.dll`.
+  User tests with the panel on: Steam overlay off + REFramework: crash; Steam overlay on + no REFramework: runs.
+  - Cause, from four crash dumps (WER minidumps, cdb): stack overflow on the game's present thread, reported as an
+    access violation in `nvwgf2umx` inside the Steam overlay's exception handling. Thousands of repeats of
+    `hk_present` -> Steam's Present hook (`gameoverlayrenderer64!OverlayHookD3D3+0x1440..0x1445f`) -> `hk_present`. Steam's
+    overlay DLL is loaded even with its overlay turned off for the game. It hooks the Present of every new swapchain,
+    keeping one saved original. REFramework hooks D3D12 about 10 s in ("Last chance encountered for hooking") with a
+    dummy device, factory and swapchain. That creation did not go through our factory hooks: no "set aside" line in the
+    log, so the 1.6.x set-aside during creations (Metro 2033 Redux) never ran. Steam read dxgi's shared swapchain
+    vtable, found our `hk_present` in slot 8, and took it as its original. From then on dxgi's Present (inline-hooked
+    by Steam) and our hook called each other.
+  - With OptiScaler as `dxgi.dll` the game's swapchain was OptiScaler's wrapper with its own vtable, so our hooks sat
+    there, never in the dxgi vtable Steam and REFramework read: no loop.
+  - Fix: `com::make_private` gives the captured DX12 swapchain its own copy of its vtable with our hooks
+    (`overlay::hook_dx12_swapchain`). The copy runs to the end of the run of code pointers: 357 entries for dxgi's
+    swapchain vtable on this machine, plus the RTTI entry before it. dxgi's shared vtable is no longer patched for
+    DX12. The hooks call what the shared slot holds at the time of the call, so another hooker's hook of that slot
+    still runs; if the shared slot holds our own hook too (the D3D10/11 path patched it), they call the saved original.
+    The D3D10/11 path (`on_other_swapchain`) still patches the shared vtable, with the creation set-aside. If no copy
+    can be made, the shared vtable is patched as before (logged). Standalone D3D12 test: Present x5, Present1,
+    ResizeBuffers, Present after it, QI to IDXGISwapChain4, GetFullscreenState and the last Release all succeed through
+    the copy. A second swapchain keeps the untouched shared vtable.
+  - Dead ends (both tested in game, both crashed the same way): (1) when our hook is called again from inside its own
+    original on the same thread, call the slot's first saved original instead (the loop was detected, but that
+    original led back into Steam's hook). (2) Instead, call dxgi's real Present: the slot's value read from
+    `dxgi.dll` on disk and relocated, which matched 25/25 slots in a test. Steam hooks the code of dxgi's Present
+    itself, and its saved original was our hook, so even the real function looped back. A minidump doesn't hold
+    code pages, so `u` on dxgi's Present in the dump showed the file's unhooked bytes.
+  - In game, first private-vtable build: no hook loop, but one start froze while REFramework was suspending threads
+    (no dump: killed), and the next crashed about 27 s in. REFramework's own crash handler caught it
+    (`reframework_crash.dmp`): RIP 0, called from `hk_set_color_space1` on the game's thread. Another module had pointed the
+    captured swapchain to its own copy of our private vtable, so `original_of` no longer recognised the object and
+    called the fallback `g_set_color_space1`, which was never set. Hook modules loaded: `RTSSHooks64` (RivaTuner),
+    `nvspcap64`, REFramework, Steam's overlay. The next run showed it was REFramework: the swap was logged 3 ms after its "Hooked DirectX 12". The copy is on the heap, and its Present slot is still our hook. The same swap made our Present
+    use its fallback (dxgi's Present), skipping REFramework's pointer hook on the shared slot. REFramework then saw no
+    frames and re-hooked D3D12 every 10 s ("Last chance encountered for hooking" a second time).
+    Fix: `com::private_objects` (object -> shared vtable): `original_of` finds the shared vtable by the object when its
+    vtable pointer is someone else's copy. `com::slot_hooks` says whether a shared slot holds our own hook. Every
+    fallback is set from the shared vtable, and a swap is logged once ("another module replaced the captured
+    swapchain's vtable"). Standalone test: a foreign copy swapped in plus a pointer hook on the shared slot.
+    SetColorSpace1 succeeds and Present runs foreign -> ours -> shared-slot hook -> dxgi, once each.
+  - In game (this build, panel on, REFramework, Steam overlay on): still responding 30 s after start, REFramework fully
+    initialised (its hooks, ImGui, SDK), the main menu reached, our panel drawn, no second "Last chance" re-hook. Its
+    first ImGui init logged "Failed to get back buffer for rtv", then initialised again 13 s later. The user then
+    confirmed gameplay, our panel (F10) and REFramework's menu all work together, no crash.
+  - Other DX12 games with this build: Cyberpunk 2077 (GOG, REDengine, frame generation on; DualSense, connection and
+    Steam Input state not reported): user reports no problem. Its log shows "hooked through a private vtable (dxgi.dll's
+    shared one left as it is)", 4K ResizeBuffers, HDR colour space 12, the DX12 panel ready, and no vtable-swap line.
+    Still to retest: a UE5 game with Streamline frame generation, 007 First Light, a game with ReShade.
+  - Debugging: our PDB is recorded as `%%%winmm.pdb%%%`; copy `winmm.pdb` under that name and use `.symopt+ 0x40;
+    .reload /f /i winmm.dll`. The WER minidumps include module data sections (our globals) but no heap.
+
 - 2026-11-03 **007 First Light: the gyro sometimes stops while aiming (L2); per-aim diagnostics added** (builds, 853
   checks pass; not yet tested in game). User log (1.9.0, DualSense USB, GyroLib trigger activation on L2): no gate
   problem (the only "gyro off" lines are pauses, loads and 25 ms cursor blips), motion at 1000 samples/s throughout,
@@ -7729,3 +7785,28 @@ heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 1
       reports it works well. Pad: DualSense, wired (64-byte 0x01 reports); Steam Input off. The log showed a recentring
       nudge about every 1.6 s while aiming. The on-foot view, the scope zoom compensation and the panel-close fix were
       not checked separately in this run.
+- 2026-11-05 **Poor frame rate with Gyro4All on (new game, not just modded saves).** The log's `perf:` lines showed
+  Gyro4All's own frame on the game thread at about 1.8 ms at first, growing to 9-12 ms average (p99 up to 23 ms) after a
+  few minutes, in menus and in play alike.
+  - Cause: the REDengine module's safe-read check called `VirtualQuery` for every new region each frame (and on each of
+    the two writes). `VirtualQuery` walks the whole region to report its size. A standalone test (committed, touched
+    regions): 11 us per call at 16 MB, 255 us at 256 MB, 1.3 ms at 1 GB, 16.5 ms at 4 GB. `QueryWorkingSetEx` costs
+    0.32-0.38 us and `ReadProcessMemory` 0.34-0.36 us at every size. Cyberpunk's memory pools are that large and grow
+    during play. **Any per-frame `VirtualQuery` on game heap memory is suspect in other engines too.**
+  - Fix (`red_engine.cpp`): each 4 KB page is checked with `QueryWorkingSetEx` (resident, readable or writable, no guard
+    page), cached per frame in a 1024-entry direct-mapped table. A committed page that is paged out now reads as not
+    readable. The camera system is also kept between frames while the game instance stays the same and its class still
+    matches, instead of walking all game systems every frame.
+  - Built (no warnings) and deployed over the user's 1.10.0 (same version). Tested in game by the user (new game, on foot):
+    the frame rate is fine again. `perf:` over 3.5 min: idle 111-213 us average, active 95-127 us, stable (no growth).
+    The on-foot write works (body yaw + look pitch).
+  - Seen in the same log: 303 one-frame flips "on foot -> cinematic -> on foot" in 3.5 min, in bursts while turning fast
+    (up to 32 per second). The classification matches the FPP component's stored orientation against the active camera
+    data within 0.9995 (about 3.6 degrees), and the copy lags a frame: a turn faster than that per frame fails the match,
+    and the gyro goes off for that frame.
+  - Fix: the component that matched last frame keeps matching within a quaternion dot of 0.985 (about 20 degrees, so
+    2000 deg/s at 100 fps); any other component still needs 0.9995. A cut to another camera still fails the wider test,
+    but a cinematic that starts looking almost the same way may now be detected a few frames late. Built (no warnings)
+    and deployed. Tested in game by the user (on foot, fast turns, a car, a scene): works well. Log over about 6 min:
+    8 "on foot -> cinematic" flips (single frames, seconds apart) instead of 303 in 3.5 min; scenes and the car camera
+    are still detected; `perf:` 114-122 us average.

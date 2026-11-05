@@ -294,7 +294,22 @@ void render(IDXGISwapChain* sc) {
     on_worker(&render_job);
 }
 
+// The captured swapchain got a private vtable (hook_dx12_swapchain), and another module pointed it to a vtable of its own,
+// a copy of ours (our hooks still run through it): logged once, with the module the copy's Present slot points to.
+std::atomic<bool> g_dx12_private{false};
+std::atomic<bool> g_vtable_swap_logged{false};
+std::string module_of(const void* address);
+
+void check_vtable(IDXGISwapChain* sc) {
+    if (!g_dx12_private || g_vtable_swap_logged || !is_captured(sc)) return;
+    void** const vtable = com::vtable_of(sc);
+    if (com::is_private_vtable(vtable) || g_vtable_swap_logged.exchange(true)) return;
+    log("overlay: another module replaced the captured swapchain's vtable (now at %s, its Present in %s); our hooks still "
+        "call through dxgi's shared vtable", module_of(vtable).c_str(), module_of(vtable[8]).c_str());
+}
+
 HRESULT STDMETHODCALLTYPE hk_present(IDXGISwapChain* sc, UINT sync, UINT flags) {
+    check_vtable(sc);
     if (!(flags & DXGI_PRESENT_TEST)) {
         note_present();
         const int64_t start = perf::now();
@@ -504,6 +519,41 @@ void* device_of(T* object) {
     return device;
 }
 
+// The captured DX12 swapchain gets a private vtable with our hooks (com::make_private): dxgi's shared swapchain vtable
+// stays as it is, so the swapchains other modules make (REFramework's dummy one, which our factory hooks don't see) show
+// Steam's overlay dxgi's functions, never ours. The shared vtable is patched only if the copy can't be made.
+void hook_dx12_swapchain(IDXGISwapChain3* sc) {
+    void** const shared = com::vtable_of(sc);
+    com::SlotHook hooks[] = {{8, reinterpret_cast<void*>(&hk_present)},
+                             {13, reinterpret_cast<void*>(&hk_resize)},
+                             {22, reinterpret_cast<void*>(&hk_present1)},
+                             {38, reinterpret_cast<void*>(&hk_set_color_space1)},
+                             {39, reinterpret_cast<void*>(&hk_resize1)},
+                             {2, reinterpret_cast<void*>(&hk_release)}};
+    const size_t count = g_release_with_game ? 6 : 5;
+    if (com::make_private(sc, hooks, count)) {
+        // Fallbacks of original_of, for an object it doesn't know (it knows this one, also under another module's vtable).
+        if (!g_present) g_present = reinterpret_cast<Present_t>(shared[8]);
+        if (!g_present1) g_present1 = reinterpret_cast<Present1_t>(shared[22]);
+        if (!g_resize) g_resize = reinterpret_cast<ResizeBuffers_t>(shared[13]);
+        if (!g_resize1) g_resize1 = reinterpret_cast<ResizeBuffers1_t>(shared[39]);
+        if (!g_set_color_space1) g_set_color_space1 = reinterpret_cast<SetColorSpace1_t>(shared[38]);
+        if (!g_release) g_release = reinterpret_cast<Release_t>(shared[2]);
+        g_dx12_private = true;
+        log("overlay: swapchain %s hooked through a private vtable (%s's shared one left as it is)", describe(sc).c_str(),
+            module_of(shared).c_str());
+        return;
+    }
+    log("overlay: no private vtable for swapchain %s: hooking %s's shared one", describe(sc).c_str(),
+        module_of(shared).c_str());
+    patch_swapchain_slot(shared, 8, reinterpret_cast<void*>(&hk_present), reinterpret_cast<void**>(&g_present));
+    patch_swapchain_slot(shared, 13, reinterpret_cast<void*>(&hk_resize), reinterpret_cast<void**>(&g_resize));
+    patch_swapchain_slot(shared, 22, reinterpret_cast<void*>(&hk_present1), reinterpret_cast<void**>(&g_present1));
+    patch_swapchain_slot(shared, 38, reinterpret_cast<void*>(&hk_set_color_space1), reinterpret_cast<void**>(&g_set_color_space1));
+    patch_swapchain_slot(shared, 39, reinterpret_cast<void*>(&hk_resize1), reinterpret_cast<void**>(&g_resize1));
+    if (g_release_with_game) patch_swapchain_slot(shared, 2, reinterpret_cast<void*>(&hk_release), reinterpret_cast<void**>(&g_release));
+}
+
 void on_swapchain(IUnknown* device, HWND hwnd, IUnknown* created) {
     ID3D12CommandQueue* queue = nullptr;
     if (!device || FAILED(device->QueryInterface(IID_PPV_ARGS(&queue)))) {
@@ -544,13 +594,7 @@ void on_swapchain(IUnknown* device, HWND hwnd, IUnknown* created) {
     }
     if (render_sc == sc3) sc3->AddRef();
     if (render_queue == queue) queue->AddRef();
-    void** vtable = *reinterpret_cast<void***>(sc3);
-    patch_swapchain_slot(vtable, 8, reinterpret_cast<void*>(&hk_present), reinterpret_cast<void**>(&g_present));
-    patch_swapchain_slot(vtable, 13, reinterpret_cast<void*>(&hk_resize), reinterpret_cast<void**>(&g_resize));
-    patch_swapchain_slot(vtable, 22, reinterpret_cast<void*>(&hk_present1), reinterpret_cast<void**>(&g_present1));
-    patch_swapchain_slot(vtable, 38, reinterpret_cast<void*>(&hk_set_color_space1), reinterpret_cast<void**>(&g_set_color_space1));
-    patch_swapchain_slot(vtable, 39, reinterpret_cast<void*>(&hk_resize1), reinterpret_cast<void**>(&g_resize1));
-    if (g_release_with_game) patch_swapchain_slot(vtable, 2, reinterpret_cast<void*>(&hk_release), reinterpret_cast<void**>(&g_release));
+    hook_dx12_swapchain(sc3);
     const ULONG held = render_sc == sc3 ? 2 : 1;
     {
         std::lock_guard lock(g_mutex);
