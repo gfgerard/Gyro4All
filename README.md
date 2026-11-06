@@ -45,31 +45,23 @@ More:
 **What you need**
 
 - Windows 10/11 64-bit.
-- A controller with a gyro. Tested with a **DualSense over USB/BT, Nintendo Switch Pro controller**.
+- A controller with a gyro supported by SDL3 preferably or Steam Input. Tested with a **DualSense over USB/BT, Nintendo Switch Pro controller**.
 - Close other controller tools while playing (**DS4Windows, DSX, reWASD**). You can use Steam Input 
   if you want but the mod should take care of input in any game automatically.
 
+**SteamOS / Linux Support** 
+- Not developed with Linux support in mind. Relies completely on Proton and Wine.
+- Some features are expected to not work. 
+- It may work in some games by starting with this Steam launch parameters: `WINEDLLOVERRIDES="winmm.dll =n,b" %command%`
 
 ## Installation / uninstall / update
 
 #### Install
 
 1. **Download** `Gyro4All-vX.Y.Z.zip` from the [Releases](https://github.com/gfgerard/Gyro4All/releases) page.
-2. **Find the game's real exe folder.**  Usually it's the one with a file ending in **`-Win64-Shipping.exe`**, at 
-   `<Game>\<Something>\Binaries\Win64`, **not** the game's main folder (that exe is only a launcher).
-   Tip: search the game folder for `Shipping.exe`. It's where other mods like Optiscaler or Reshade go.
-   **RE Engine games** (Capcom, e.g. Resident Evil 7) have no `Binaries` folder: their exe is in the game's main
-   folder, next to `re_chunk_000.pak`.
-   
-   Examples:
-
-   | Game | Folder |
-   |---|---|
-   | Pacific Drive | `Pacific Drive\PenDriverPro\Binaries\Win64` |
-   | Cronos: The New Dawn | `...\Cronos\Binaries\Win64` |
-   | Life is Strange Remastered | `...\LIS\Binaries\Win64` |
-   | Gears of War: E-Day (Game Pass) | `...\Content\FairlightConcept\Binaries\WinGDK` (rename `winmm.dll` to `version.dll`, see the note below) |
-   | Resident Evil 7 biohazard | `RESIDENT EVIL 7 biohazard` (next to `re7.exe`) |
+2. **Find the game's real exe folder.**  In Unreal Engine games usually it's the one with a file ending in **`-Win64-Shipping.exe`**, at 
+   `<Game>\<Something>\Binaries\Win64`.
+   Tip: It's where other mods like Optiscaler or Reshade go. 
 
 3. **Extract the zip into that folder.** You should end up with:
 
@@ -81,23 +73,18 @@ More:
    ```
 
 4. **Play.** Once you're in control of your character, move the controller: the camera turns. Press **`F10`**
-   for the settings panel.
+   for the settings panel or `Start + Select` in your controller.
 
 > [!NOTE]
 > **Nothing happens?** Another mod may already use a `winmm.dll`, or another program (e.g. RivaTuner) makes the
 > game load the Windows one first (.log and .ini files should appear inside the **Gyro4All** folder).
 > Rename Gyro4All's `winmm.dll` to **`version.dll`** (it works under both names) and try again.
+> It also works with an ASI loader like [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader/). Put the ASI loader in the same folder and rename to gyro4all.asi
 
 #### Update
 
 Extract the new zip over the old files and overwrite. Your settings (`gyrolib.ini`, `Gyro4All.ini`)
 are kept.
-
-**Coming from GyroUE** (this project's former name, up to 0.8.2)? Extract the zip into the same folder and overwrite
-`winmm.dll`. On the first start Gyro4All copies your GyroUE settings (`GyroUE.ini` becomes `Gyro4All.ini`,
-`gyrolib.ini`) and your own profiles into `Gyro4All\`, and renames the old folder to `GyroUE.migrated`; you can delete
-it once everything works. If you had renamed GyroUE's DLL to `version.dll`, delete it or rename Gyro4All's `winmm.dll`
-to `version.dll` too (only one of them runs).
 
 #### Uninstall
 
@@ -107,7 +94,7 @@ changed.
 ## Using it
 
 - **Gyro is on during gameplay** and pauses by itself in menus, the pause screen, the main menu and when you alt-tab.
-- **Settings panel: press `F10`** (some games only accept it from the pause menu). Change sensitivity,
+- **Settings panel: press `F10`** or `Start + Select`. Change sensitivity,
   how the gyro activates (always on, hold a button or trigger, toggle), invert axes, smoothing, acceleration
   curves and more. Games with several cameras (e.g. on foot / in car) get one tab each. Settings are saved
   automatically. GyroLib features that need hooks Gyro4All doesn't have yet: see [Current scope](#current-scope).
@@ -132,8 +119,7 @@ changed.
 - **First time: calibrate.** Leave the controller still on a table for a few seconds while in a menu or the pause
   screen. Gyro4All learns the sensor drift by itself and keeps it. The panel also has a **"Recalibrate gyro"**
   button.
-- **No panel?** DirectX 11, 10 and 9 games now get the same `F10` panel too (drawn by `Gyro4All\gyro4all.dll`; DX11
-  verified in Mortal Shell and Jedi: Fallen Order, DX10 and DX9 not yet). If it doesn't open, open `Gyro4All\gyrolib.ini` with Notepad while the game
+- **No panel?** DirectX 11, 10 and 9 games now get the same `F10` panel too (drawn by `Gyro4All\gyro4all.dll`). If it doesn't open, open `Gyro4All\gyrolib.ini` with Notepad while the game
   runs and save: changes apply within a second. Every setting is explained in GyroLib's
   [settings reference](https://github.com/lud-berthe/GyroLib).
 - No gyro-camera movement after installation? see [add support for a new game](docs/ADVANCED.md#finding-the-camera-of-a-new-game) or [ask for a profile for it](https://github.com/gfgerard/GyroUE/issues)
