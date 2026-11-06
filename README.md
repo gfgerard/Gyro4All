@@ -145,7 +145,7 @@ Gyro4All can **show your controller to the game as an Xbox controller**: buttons
   once and saves that instead.
 - About 2 seconds after the game starts, a notice says *"Controller shown to the game as an Xbox controller"*.
 - The game shows Xbox button icons.
-- Settings in `Gyro4All\Gyro4All.ini` (a game's profile can override them; restart the game after a change):
+- Settings in `Gyro4All\Gyro4All.ini` and Gyro4All panel settings (a game's profile can override them; restart the game after a change):
 
   | Controller input setting | Meaning |
   |---|---|
