@@ -4,6 +4,7 @@
 #include "host.hpp"
 #include "log.hpp"
 #include "notify.hpp"
+#include "probe_key.hpp"
 #include "settings.hpp"
 #include "ue.hpp"
 #include "ue_engine.hpp"
@@ -38,12 +39,7 @@ bool g_probe_automatic = false;     // ... by AutoProbe (it gives up after a whi
 bool g_auto_probe_setting = true;   // AutoProbe=
 int g_auto_probe_starts = 0;        // automatic starts this session (limited)
 ULONGLONG g_probe_started_at = 0, g_next_auto_probe = 0;
-struct Key {
-    int vk = 0;
-    bool ctrl = false, shift = false, alt = false;
-    std::string name;
-};
-Key g_probe_key;  // ProbeKey=
+ProbeKey g_probe_key;  // ProbeKey=
 bool g_probe_key_down = false;
 
 const char kProbeSettings[] =
@@ -646,8 +642,6 @@ void automatic(const Scene& s) {
     }
 }
 
-bool key_held(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
-
 void keys(const Scene& s) {
     // Plain F7/F8 only: with Ctrl, Shift or Alt they may be the probe key (Ctrl+F7 by default).
     const bool plain = host::game_has_focus() && !key_held(VK_CONTROL) && !key_held(VK_SHIFT) && !key_held(VK_MENU);
@@ -663,36 +657,6 @@ void keys(const Scene& s) {
     if (diff && !g_probe_diff_down && ue::probe_diff(true) > 0) notify_manual_diff();
     g_probe_snap_down = snap;
     g_probe_diff_down = diff;
-}
-
-// A key setting: F1..F24, optionally after Ctrl+, Shift+ and/or Alt+ (case-insensitive). Empty or unknown = no key.
-Key parse_key(std::string text) {
-    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return char(std::toupper(c)); });
-    Key k;
-    for (const std::string& part : split(text, '+')) {
-        if (part == "CTRL" || part == "CONTROL") k.ctrl = true;
-        else if (part == "SHIFT") k.shift = true;
-        else if (part == "ALT") k.alt = true;
-        else if (part.size() >= 2 && part[0] == 'F' && std::atoi(part.c_str() + 1) >= 1 && std::atoi(part.c_str() + 1) <= 24)
-            k.vk = VK_F1 + std::atoi(part.c_str() + 1) - 1;
-        else return {};
-    }
-    if (!k.vk) return {};
-    k.name = std::string(k.ctrl ? "Ctrl+" : "") + (k.shift ? "Shift+" : "") + (k.alt ? "Alt+" : "") + "F" +
-             std::to_string(k.vk - VK_F1 + 1);
-    return k;
-}
-
-// ProbeKey= as written: the game's profile wins over Gyro4All.ini, [Gyro4All] over [GyroUE]. Present but empty = no
-// key (settings::get_string can't tell that from missing); missing everywhere = Ctrl+F7.
-std::string probe_key_setting() {
-    for (const std::wstring* path : {&settings::profile_path(), &settings::settings_path()})
-        for (const wchar_t* section : {settings::kSection, settings::kLegacySection}) {
-            wchar_t value[64];
-            GetPrivateProfileStringW(section, L"ProbeKey", L"\x01", value, 64, path->c_str());
-            if (value[0] != L'\x01') return narrow(value);
-        }
-    return "Ctrl+F7";
 }
 
 // Gyro4All-probe.log, opened when the probe first runs this session (at start with Probe=1, or later from the probe
@@ -744,7 +708,7 @@ void probe_configure(bool profile_existed) {
     g_profile_existed = profile_existed;
     g_probe = settings::get(L"Probe", 0) != 0;
     g_auto_probe_setting = settings::get(L"AutoProbe", 1) != 0;
-    g_probe_key = parse_key(probe_key_setting());
+    g_probe_key = parse_probe_key(probe_key_setting());
     log("settings: Probe=%d AutoProbe=%d ProbeKey=%s (Gyro4All.ini, the game's profile overrides)", g_probe ? 1 : 0,
         g_auto_probe_setting ? 1 : 0, g_probe_key.name.empty() ? "(none)" : g_probe_key.name.c_str());
     if (g_probe) {
@@ -769,10 +733,7 @@ void probe_keys(const Scene& s) { keys(s); }
 void auto_probe(const Scene& s) { automatic(s); }
 
 void probe_hotkey(const Scene& s) {
-    const Key& k = g_probe_key;
-    const bool down = k.vk && host::game_has_focus() && key_held(k.vk) && k.ctrl == key_held(VK_CONTROL) &&
-                      k.shift == key_held(VK_SHIFT) && k.alt == key_held(VK_MENU);
-    if (down && !g_probe_key_down) {
+    if (probe_key_pressed(g_probe_key, host::game_has_focus(), g_probe_key_down)) {
         if (!g_probe) {
             probe_start(false);
         } else {
@@ -781,7 +742,6 @@ void probe_hotkey(const Scene& s) {
             notify::show(L"Gyro4All probe cancelled.", 5);
         }
     }
-    g_probe_key_down = down;
 }
 
 void auto_probe_watch() {
