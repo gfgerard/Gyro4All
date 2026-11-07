@@ -14,7 +14,12 @@ play.
   Works on monolithic and modular (one DLL per engine module) builds. RE Engine: the type database (TDB) is found
   by its header in the exe, and every class and field is looked up in it by name at runtime.
 - **Generic camera path:** adds the gyro delta to `PlayerController.ControlRotation` in real degrees (float
-  rotators on UE4, double rotators on UE5).
+  rotators on UE4, double rotators on UE5). Unity Mono/IL2CPP games use `Camera.main` and compose the turn into its world
+  `Transform.rotation` through the scripting runtime's exported API; `Time.timeScale`, `Cursor.visible` and vertical
+  `Camera.fieldOfView` provide pause, cursor and zoom state. If the game keeps rebuilding that Transform, the probe (below) looks for the value the
+  game builds it from, and until one is found the gyro goes to the game as right-stick input. A `[Unity]` profile, which
+  the probe writes, names that value. A camera that never answers look input (a fixed scene camera), or an orthographic
+  one, is left alone.
 - **Per-game profiles** for games with custom cameras: vehicle views, camera components, or non-reflected
   C++ camera state reached by raw offset.
 - **Xbox controller translation:** a controller the game can't read (DualSense, Switch Pro, DirectInput pads,
@@ -65,7 +70,7 @@ play.
   camera and the zoom-compensation FOV, edited live and saved to `Gyro4All.ini` (what needs a restart or a
   save says so). The same window appears in the panel of non-DX12 games (drawn by `gyro4all.dll`). Gyro4All declares `GL_HOST_MENU_STATE` to GyroLib, plus native right-stick
   suppression while it translates the controller to XInput or while the game reads a PlayStation controller itself
-  through a checked report layout (`NativeFlickStick`), and long-press blocking (`GL_HOST_LONG_PRESS_BLOCKING`)
+  through a checked HID or Raw Input report layout (`NativeFlickStick`), and long-press blocking (`GL_HOST_LONG_PRESS_BLOCKING`)
   wherever it can change the buttons the game reads (the controller shown as XInput, a real XInput controller, or
   the game's own PlayStation controller reports once their buttons were checked); no touchpad suppression (see
   [Current scope](../README.md#current-scope)). The recenter step callback (`gl_set_recenter_step_callback`) is
@@ -171,7 +176,20 @@ All diagnostics go to `Gyro4All\Gyro4All.log` (probe results, if enabled, to `Gy
 | `scene: the pawn is in a cutscene (IsInActiveCutscene): gyro paused` / `the pawn moves in MOVE_Flying (a scripted scene): gyro paused` / `scripted scene over` | Unreal: scripted moments count as a pause, so the gyro stops as the stick does: a pawn with a reflected `IsInActiveCutscene` set (Dead Island 2), or the pawn's `CharacterMovement` in flying mode (games move the character along a scripted path with it). |
 | `profile: the profile file changed, views read again` | The profile was edited, or the probe added a view: its views apply at once. |
 | The gyro stops mid-game, `gyro on` still logged | Look at the lines just before: `focus: lost to <program> (window class ...)` (another window is in front), `gyro: GyroLib suspends the gyro` (activation mode, focus, pause, menus or calibration), `gyro: motion data lost`, `gyro: GyroLib's sample count restarted` (the controller was reopened) or `gyro: the controller reads as lying still` while you hold it (no real gyro data). If `applied yaw` keeps changing, `camera: stopped following the gyro (...) - target ..., camera manager ..., CameraStyle ...` names the camera that took over. |
-| `glacier: aim <camera> for N ms ...` (007 First Light) | One line per L2 aim (the first 40 of a session), and for any camera whose view didn't follow the gyro (`NOT FOLLOWED`, up to 50): what became of the aim point (`point turned`, or skipped: `none`, `unreadable`, `near`, `far`), how often the game rewrote it (`rewritten by the game`), the turn asked against how far the view moved, and the game's own mouse/keyboard input meanwhile (`game mouse input`, `keyboard`, `cursor moved`). Mouse input during an aim that didn't follow: the game took the aim from the mouse (it switched to its keyboard-and-mouse controls); keep the mouse still while playing with the controller. |
+| `glacier: aim <camera> for N ms ...` (007 First Light) | One line per L2 aim (the first 40 of a session), and for any camera whose view didn't follow the gyro (`NOT FOLLOWED`, up to 200): what became of the aim point (`point turned`, or skipped: `none`, `unreadable`, `near`, `far`), how often the game rewrote it (`rewritten by the game`), the turn asked against how far the view moved, and the game's own mouse/keyboard input meanwhile (`game mouse input`, `keyboard`, `cursor moved`). Mouse input during an aim that didn't follow: the game took the aim from the mouse (it switched to its keyboard-and-mouse controls); keep the mouse still while playing with the controller. |
+| `glacier: gyro press for N ms ...` (007 First Light) | One gyro activation: degrees asked against degrees the view moved, how long after the first 0.5 degrees the view responded, and each camera it went through (`orbit`, `no state`, `old state`). The first 20, then only those with 250 ms or more before the view responded (up to 300). |
+| `glacier: transition camera <camera> ...` (007 First Light) | One stretch of gyro frames on a camera that blends others (L2's zoom): `on an old orbit state` when it took over an entity with an earlier camera's state, how many frames turned the cameras, whether the view followed, and the orbit update's list. The first 12, then those with something to report (up to 300). |
+| `glacier: camera <camera> has an orbit state the orbit update doesn't use` (007 First Light) | Once per entity: the active camera looks like an orbit camera but the game doesn't update it, so the gyro turns the list's cameras too. |
+| `glacier: orbit update's list, new set: ...` (007 First Light) | Each set of orbit cameras the game updates, the first time it appears. |
+| `unity: IL2CPP runtime attached (reflection exports found)` / `unity: API ready (...)` | The game's scripting runtime was found, and which optional signals it has (FOV, pause, cursor: a stripped build can lack them, which only loses that signal). `reflection exports missing`: no probe in this game. |
+| `unity: the managed call <method> threw an exception` | A Unity call failed, usually on an object the game just destroyed. The first 20 are logged. |
+| `unity: Cursor.visible=... lockState=...` / `unity: the cursor is hidden but not locked ...: the gyro stays off this camera` | Every change of the cursor's state (`lockState`: 0 None, 1 Locked, 2 Confined). Without a profile, a hidden cursor that isn't locked means the game has no mouse look here, so the gyro leaves that camera alone. `the cursor isn't locked, yet the camera turned with look input` means the rule may be wrong for this game; a profile (the probe) isn't subject to it. |
+| `unity: the camera doesn't answer look input (a fixed scene camera): the gyro stays off it` / `the camera answers look input again` | Three windows of 2 s with stick or mouse input and no camera motion; two windows with motion bring the gyro back. Then `gyro off: no gameplay view (target fixed scene camera)`. Menus, pause and the panel don't count. |
+| `unity: the gyro turned Camera.main by N degrees but it stayed M: the game rewrites its Transform; gyro as right stick` / `the camera keeps Transform writes again` | The game rebuilds the camera; the gyro goes to the stick and the probe starts by itself. A small test write every few seconds notices when writes stay again; a new camera starts over. |
+| `unity: learnt the game's pitch clamp: A..B deg` | The game pulled a pitch written past its clamp back to the same value 3 frames in a row: the gyro's turn stops there from now on. |
+| `unity: the gyro turned the profile's values by N degrees but its camera moved only M` | With `CameraField=`: the profile's values don't turn the camera. The profile may be outdated. |
+| `unity: profile path: field <name> not found on <class>` / `unity: profile: ...` | A `[Unity]` path doesn't fit the game: wrong name, a static field, or a value of the wrong type. Logged once each. |
+| `probe: the camera that turns with the stick or mouse: <hierarchy>` / `probe: camera VERIFIED: pitch <class>.<path>, yaw <class>.<path> -> <file>` / `probe: no camera: ...` | The Unity probe's steps. Details in `Gyro4All-probe.log`. |
 | Camera drifts slowly | Rest the pad in a menu for a few seconds (`bias=` in the status line should become non-zero) or use "Recalibrate gyro". |
 | Panel doesn't open | Look for `overlay:` lines (DX11/DX10/DX9 games: also `panel:` lines, e.g. `panel: captured D3D11 swapchain ...`, `panel: D3D11 renderer ready ...`, `panel: no frame presented for N ms: panel closed`). Try from the game's pause menu. As a fallback, edit `gyrolib.ini` directly. |
 | Double motion | Steam Input or another tool is also converting the gyro to mouse. In the F10 panel, set "Steam Input mouse" to Block (or Convert movement). |
@@ -193,7 +211,7 @@ All diagnostics go to `Gyro4All\Gyro4All.log` (probe results, if enabled, to `Gy
 | `hooks: the import of ... was written back by something else (now <module>)` | Another module (an overlay such as Epic Online Services' `EOSOVH-Win64-Shipping.dll`) rewrote a game import Gyro4All had patched. XInput imports are `patched again` so the translated controller keeps reaching the game; others are `left to it`. |
 | `gyro: Steam Input reader started (the game's steam_api64.dll)` | The game uses Steam: GyroLib also reads the controller's gyro through the game's own Steam Input (it borrows the game's Steam service and changes nothing in it). This is how the gyro works when Steam Input hides the controller and the game reads Steam Input itself (Monster Hunter Wilds). `Steam Input reader: unavailable` is normal while Steam Input has no controller. |
 | `stick fallback: the game undid the gyro's camera writes 8 frames in a row: gyro as right-stick input; game's stick: ...` (or `forced on (StickFallbackTest)`) / `stick fallback off: <why>` | The game kept putting the camera back after each gyro write (a scripted aim, or a camera rebuilt from other state), so the gyro went to the game as right-stick input until `<why>`: the game keeps the writes again, another camera, or no readable view. `the stick turns nothing` means the game doesn't read the controller through a path Gyro4All can change (Steam Input, its own SDL): no fallback for that camera. `game's stick: radial dead zone 0.20, curve 1.50, yaw 160 and pitch 110 deg/s at full stick, 2 frames late (default, to learn)` is the model of the game's stick it starts with (`(saved)`: from `StickFallbackLearned=`, `(learnt)`: this session). `stick fallback: the game's stick, learnt: ... (the model explains N% of the camera's motion)`: the model learnt from the camera (again when it changes); `(inverted)` after an axis the game turns the other way. `stick fallback: StickFallbackLearned=... saved to <profile>`: kept for the next session. While it runs, a `status: stick fallback: stick (x, y), game's stick: ... (learnt, explains N% / saved for this game, learning / default, learning)` line follows the status line. With `MotionTrace=1`, `K,x,y,yaw,pitch,used` lines in `motion-trace.csv` give each frame's deflection, the camera's turn and which axes the learner took (with `StickFallbackTest=1` the trace starts with the fallback). `stick fallback test: forced on / detection only for a minute`: `StickFallbackTest=1`. `settings: StickFallback=0`: the fallback is off (never starts); with an engine that has no camera hook, `stick fallback: off (StickFallback=0), and the engine has no hook for this game's camera` follows, and the gyro turns nothing. |
-| `settings: SensorPacing=1 (...): motion played back in sensor time, delay automatic` (or `delay N ms`, `SensorPacing=0`) | Sensor-time pacing's settings, at start and when `Gyro4All.ini` or the profile is saved with a change. Every 30 s while the gyro turns: `status: sensor pacing: delay D ms (automatic), N frames paced, P% past the last report (extrapolated), B left to GyroLib's burst delivery, S stalls`: D is how far behind each frame the motion is played; P the frames whose time came after the last report read (its rate carried forward); B frames turned as GyroLib gave them while it spreads a Bluetooth pad's bursts itself; S game stalls (a frame over 100 ms), whose turn goes out at once. In `motion-trace.csv` (`MotionTrace=1`) the F lines' raw yaw/pitch are GyroLib's, the last two the paced turn. |
+| `settings: SensorPacing=1 (...): motion played back in sensor time, delay automatic` (or `delay N ms`, `SensorPacing=0`) | Sensor-time pacing's settings, at start and when `Gyro4All.ini` or the profile is saved with a change. Every 30 s while the gyro turns: `status: sensor pacing: delay D ms (automatic), N frames paced, P% past the last report (extrapolated), B left to GyroLib's burst delivery, S stalls`: D is how far behind each frame the motion is played; P the frames whose time came after the last report read (its rate carried forward); B frames turned as GyroLib gave them while it spreads a Bluetooth pad's bursts itself; S game stalls (a frame over 100 ms), whose turn goes out at once. In `motion-trace.csv` (`MotionTrace=1`) the F lines' raw yaw/pitch are GyroLib's, the last two the paced turn. `B` lines hold GyroLib's bias 10 times a second, `M` lines mark each press of F9 (a notice confirms it). For a drift report, set `MotionTrace=` to a long session in seconds (about 170 MB per hour), press F9 when the view slides, then run `tools/motion_trace_drift.py` on the file. |
 | `settings: StickCamera=1 (...): yaw ... deg/s, pitch ...` | The stick camera's settings, at start and each time `Gyro4All.ini` or the profile is saved. |
 | `settings: ZoomStrength=100 ZoomSource=Auto \| manual zoom on: aim LT (Hold), cycle R3, levels 55,30 against 90 horizontal, remember off, 1 reset button(s), ramp 150 ms (...)` | Zoom compensation's settings, at start and when a save changes them. `manual zoom off (needs ZoomAimButton= and ZoomLevelsFOV=)`: no manual zoom. |
 | `zoom: level 2 of 2 (30 degrees)` / `zoom: not aiming` | Manual zoom's level changed (aim button, cycle button, reset button, end of gameplay). |
@@ -428,6 +446,79 @@ RotatorSize=24
 
 In Unreal games the profile's views are read again whenever the file changes, so edits (and views the probe adds)
 apply without a restart. Its `[Gyro4All]` settings still apply from the next start.
+
+### Unity camera profiles
+
+Use these when the game rebuilds `Camera.main`'s Transform from its own aiming state, or `Camera.main` isn't the camera
+you see. **You usually don't write one by hand:** the Unity probe finds the values, tests them live and writes the
+section (below).
+
+```ini
+[Unity]
+; Two floats. Risk of Rain 2's kind, one value type holding both, is PitchYawPath= instead (below).
+ObjectType=Game.PlayerLook
+PitchPath=_pitch
+YawPath=_state.yaw
+```
+
+| Key | Meaning |
+|---|---|
+| `ObjectType` | The class (`Namespace.Class`) of the active object the paths start from. |
+| `YawObjectType` | `YawPath`'s class, when yaw lives in another object than pitch. |
+| `PitchPath`, `YawPath` | Paths to two float fields. |
+| `PitchYawPath` | Instead of those: a path to a value type with float `pitch` and `yaw` fields (`_cameraMode.DebugGetInstanceData(@).pitchYaw`). |
+| `PitchPerDegree`, `YawPerDegree` | The value's units for one degree up and right. Default `-1` and `1`: degrees, with pitch counting down. Radians are `0.0174533`; a negative number runs the other way. |
+| `CameraField` | Optional path to the `Camera` (its FOV, and whether it follows the gyro). Default `Camera.main`. |
+| `PitchLimit` | Optional limit up and down, in degrees. Without it the generic view learns the game's clamp from how the game pulls the camera back, and a profile's value stops at 89. |
+| `YawParent` | Instead of `YawPath`: yaw turns the Transform this many levels above the camera (the player's body). Alone, without `ObjectType`, pitch stays on the camera's own Transform. |
+| `PitchTransform` | `1`: the gyro turns the camera's own Transform along with `PitchPath`. For games that copy their pitch float to the camera only when you look around yourself (The Planet Crafter): without it the gyro's pitch shows only after the next stick or mouse turn, and with `PitchPath` missing the next stick turn puts the camera back where the stick left it. |
+| `Source` | `auto`: found with no player input. The first real stick or mouse turn confirms it, or takes it out of the profile and looks again. |
+| `Rejected` | What the player's turns showed isn't the look state (`Class path;parent N`), not to be found again. |
+
+A path walks instance fields, through objects and value types, and base classes' fields count. A `method(@)` part calls a
+one-argument method on the object reached so far, passing the starting object. A `name[Class]` part goes through an array,
+`List<>` or `Dictionary<,>` field to the first object of that class in it (`modes[LookState].pitch`). The value's type is checked: a path
+ending at anything else is refused and logged. The section is read again whenever the file changes.
+
+### Finding a Unity game's camera (the probe)
+
+Normally you do nothing. Unity has no common look state like Unreal's `ControlRotation`, so with `AutoProbe=1` a game with
+no `[Unity]` section gets its own found the first time it has a perspective camera in gameplay with the mouse captured. A UI
+element with the pad's or keyboard's focus counts as a menu: no search and no gyro there, for up to a minute per camera. The
+search waits for a camera nobody is turning, since a cutscene pans (20 s at most). A menu stops a search, which starts over 3 s
+after the menu closes. A search that finds nothing costs little and comes back: on each new camera, once more 30 s later or after
+a menu, and when you turn the camera yourself. The gyro waits until the camera has had its search, usually a few seconds and 15 s
+at most for the search itself. The search shows no notice; a camera found does:
+
+- The floats whose names look like a view angle, in the game's scripts, get a tiny change for a moment, a batch at a time. What
+  turns a camera goes through the live test below, and a verified pitch and yaw go into the profile with `Source=auto`.
+- A yaw with no float: the nearest ancestor of the camera with a `CharacterController` or `Rigidbody` is tested instead
+  (`YawParent=`). With no pitch float either, pitch stays on the camera. Then, while you play, the floats of the scripts on
+  the camera and its body are compared with the camera's pitch after your own stick or mouse turns. One that always matches
+  (in degrees or radians, either way) is the game's pitch: it goes into the profile with `PitchTransform=1`, so a game that
+  copies it to the camera only when you look around (The Planet Crafter) no longer undoes the gyro's pitch on your next
+  stick turn. It needs a few turns up and down over at least 10 degrees, and stops for that camera once found or once no
+  float can match.
+- Nothing found: Gyro4All keeps writing `Camera.main`'s rotation and watches your stick or mouse turns in the background, with no
+  notices, for up to 5 minutes per camera.
+
+Writing `Camera.main` directly is only the last resort: it leaves the game's own state behind, so the game's stick or
+mouse and the direction you walk in can stop matching the view.
+
+To run it by hand, press **Ctrl+F7** (`ProbeKey`) or set `Probe=1` in `Gyro4All.ini`. It also starts when the game rewrites
+the camera, and says so on screen. Play windowed or borderless: the on-screen messages don't show in exclusive fullscreen.
+
+1. In gameplay, turn the camera with the **right stick or the mouse**, more than 30 degrees and also up and down, then
+   stop. Do it 3 times. The gyro is paused meanwhile, unless the probe started by itself.
+2. When told, **don't touch the controller or the mouse** for a few seconds: the best candidates get a 3-degree turn
+   written. A value passes if the camera turns that much, the game keeps it, and the camera comes back when it is undone.
+3. A verified pitch and yaw go into `[Unity]` in the game's profile and apply at once, and `Probe=` goes back to 0. A game
+   that already has a `[Unity]` section gets `profiles\<exe>.suggested.ini` instead.
+
+If no camera turns with the stick or mouse, the probe says so: that is a fixed scene camera. If cameras turn but no value
+or body passes, the game turns the camera from native state or a Transform with no body, which profiles don't cover yet.
+`F7` alone writes the scene's cameras and look-named values to `Gyro4All-probe.log`, without changing anything. That log
+also lists every candidate with its correlation and each live test's result.
 
 ### Zoom compensation
 

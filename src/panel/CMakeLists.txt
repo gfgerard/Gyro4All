@@ -35,4 +35,4 @@ target_compile_options(gyro4all_panel PRIVATE /W3 /permissive- /utf-8 /Zi)
 target_link_libraries(gyro4all_panel PRIVATE GyroLib::gyrolib_panel d3dcompiler d3d12 dxgi dxguid delayimp)
 # gyrolib.dll is already loaded by winmm.dll (from the Gyro4All folder) whenever this DLL is. The shader compiler
 # (System32, used by the DX10/DX11 backends and the HDR composition) loads only when one of those renderers starts.
-target_link_options(gyro4all_panel PRIVATE /DEBUG /PDBALTPATH:%_PDB% /OPT:REF /OPT:ICF /DELAYLOAD:d3dcompiler_47.dll)
+target_link_options(gyro4all_panel PRIVATE /DEBUG /PDBALTPATH:$<TARGET_PDB_FILE_NAME:gyro4all_panel> /OPT:REF /OPT:ICF /DELAYLOAD:d3dcompiler_47.dll)

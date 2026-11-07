@@ -70,6 +70,8 @@ public:
     // DllMain: the engine's games are protected exes whose imports the protector resolves itself, in tables the
     // import scan doesn't recognize (e.g. Frostbite with Denuvo/EA's OOA): hook system DLL exports inline instead.
     virtual bool inline_hooks() const { return false; }
+    // The engine's games call controller APIs from managed code, resolved at run time: no import table shows those calls.
+    virtual bool managed_input() const { return false; }
     // Window class of the game's windows, which get WM_DEVICECHANGE when the virtual Xbox controller comes or goes
     // (nullptr = every top-level window of the game thread).
     virtual const wchar_t* window_class() const { return nullptr; }

@@ -15,9 +15,9 @@ struct SDL_Gamepad;
 
 namespace gyro4all::nativepad {
 
-// DllMain (after hooks::init): CreateFileW in the game modules and a separate libScePad*.dll; with suppression also
-// ReadFile, GetOverlappedResult(Ex) and CloseHandle. Protected exes (inline-hook mode): inline hooks on those system
-// exports, following the game's opens (not GyroLib's), without the DualShock 4 identity.
+// DllMain (after hooks::init): function hooks on CreateFileW/A, ReadFile/Ex, GetOverlappedResult(Ex), CloseHandle and
+// Raw Input cover import-table, P/Invoke and runtime-resolved calls. Only the game's opens are followed, not GyroLib's.
+// Protected exes don't get the DualShock 4 identity.
 // dualsense_as_ds4: a DualSense (USB or Bluetooth) is shown to the game's own PlayStation support as a USB DualShock 4
 // (identity, caps, feature reports, input and output reports converted), for games whose Sony library predates the
 // DualSense.

@@ -24,7 +24,10 @@ cp "$DLL" "$STAGE/winmm.dll"
 cp "$SDK/bin/gyrolib.dll" "$STAGE/Gyro4All/gyrolib.dll"
 # The settings panel of D3D11/D3D10/D3D9 games (loaded by winmm.dll only there). Its ImGui is under GyroLib's ImGui.txt.
 cp "$ROOT/build/Gyro4All/panel/Release/gyro4all.dll" "$STAGE/Gyro4All/gyro4all.dll"
-cp "$ROOT/profiles/"*.ini "$STAGE/Gyro4All/profiles/"
+# Empty profiles are left out: they set nothing.
+for f in "$ROOT/profiles/"*.ini; do
+    if [ -s "$f" ]; then cp "$f" "$STAGE/Gyro4All/profiles/"; else echo "skipped empty profile: $(basename "$f")"; fi
+done
 # License notices that must ship with gyrolib.dll (GyroLib THIRD_PARTY.md), plus Gyro4All's own license.
 cp "$SDK/share/doc/GyroLib/licenses/"* "$STAGE/Gyro4All/licenses/"
 cp "$SDK/share/doc/GyroLib/sdl-changes/README-GyroLib.md" "$STAGE/Gyro4All/licenses/SDL-CHANGES.md"

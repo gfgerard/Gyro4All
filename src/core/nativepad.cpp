@@ -602,14 +602,14 @@ bool opened_by_us(HMODULE module) {
     return ours;
 }
 
+thread_local bool t_ansi_open = false;
+
 // Cheap prefix test first: this runs for every file the game opens.
 HANDLE WINAPI hk_create_file(LPCWSTR path, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES sa, DWORD disposition,
                              DWORD flags, HANDLE templ) {
-    // Inline hooks (protected exe) see every caller in the process. Opens by Gyro4All, gyrolib.dll and its SDL3.dll
-    // (GyroLib's controller reader) pass untouched; the game's, and those of the system
-    // DLLs it reads controllers through, are followed (RE2 reads the DualSense through DirectInput: DINPUT8.dll opens
-    // and reads it).
-    if (hooks::inline_mode() && is_hid_path(path)) {
+    // Function hooks see every caller in the process. Opens by Gyro4All, gyrolib.dll and its SDL3.dll pass untouched;
+    // the game's, and those of the system DLLs it reads controllers through, are followed.
+    if (!t_ansi_open && is_hid_path(path)) {
         HMODULE caller = nullptr;
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                            static_cast<LPCWSTR>(_ReturnAddress()), &caller);
@@ -679,7 +679,10 @@ HANDLE WINAPI hk_create_file_a(LPCSTR path, DWORD access, DWORD share, LPSECURIT
         if (MultiByteToWideChar(CP_ACP, 0, path, -1, wide, 1024)) {
             static std::atomic<bool> logged{false};
             if (!logged.exchange(true)) log("nativepad: the game opens HID devices through CreateFileA too; followed");
-            return hk_create_file(wide, access, share, sa, disposition, flags, templ);
+            t_ansi_open = true;
+            HANDLE h = hk_create_file(wide, access, share, sa, disposition, flags, templ);
+            t_ansi_open = false;
+            return h;
         }
     }
     CreateFileA_t real = original(g_create_file_a, "CreateFileA", "kernel32.dll");
@@ -1062,19 +1065,72 @@ BOOL WINAPI hk_write_file(HANDLE h, LPCVOID buffer, DWORD size, LPDWORD written,
     return TRUE;
 }
 
-// Protected exes, diagnostics only: other ways the game could read a followed controller, logged once each.
+// ReadFileEx delivers its report to a completion routine: edit it before that routine runs.
 using ReadFileEx_t = BOOL(WINAPI*)(HANDLE, LPVOID, DWORD, LPOVERLAPPED, LPOVERLAPPED_COMPLETION_ROUTINE);
 using DeviceIoControl_t = BOOL(WINAPI*)(HANDLE, DWORD, LPVOID, DWORD, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 ReadFileEx_t g_read_file_ex = nullptr;
 DeviceIoControl_t g_device_io = nullptr;
-std::atomic<bool> g_read_ex_logged{false};
 std::atomic<int> g_device_io_logged{0};
 DWORD g_device_io_codes[8] = {};
 
+struct Completion {
+    OVERLAPPED* ol = nullptr;
+    HANDLE handle = nullptr;
+    uint8_t* buffer = nullptr;
+    DWORD size = 0;
+    LPOVERLAPPED_COMPLETION_ROUTINE done = nullptr;
+};
+Completion g_completions[kMaxPending];
+std::mutex g_completion_mutex;
+
+void WINAPI hk_read_complete(DWORD error, DWORD transferred, LPOVERLAPPED ol) {
+    Completion c;
+    {
+        std::lock_guard lock(g_completion_mutex);
+        for (Completion& q : g_completions)
+            if (q.ol == ol) {
+                c = q;
+                q = {};
+                break;
+            }
+    }
+    if (!c.done) return;
+    if (!error)
+        if (const int i = find_device(c.handle); i >= 0)
+            on_report(i, c.buffer, std::min(transferred, c.size), "ReadFileEx completion");
+    c.done(error, transferred, ol);
+}
+
 BOOL WINAPI hk_read_file_ex(HANDLE h, LPVOID buffer, DWORD size, LPOVERLAPPED ol, LPOVERLAPPED_COMPLETION_ROUTINE done) {
-    if (g_device_count.load(std::memory_order_relaxed) && find_device(h) >= 0 && !g_read_ex_logged.exchange(true))
-        log("nativepad: the game reads its controller with ReadFileEx (completion routines; its reports aren't followed)");
-    return g_read_file_ex(h, buffer, size, ol, done);
+    const int i = buffer && ol && done && g_device_count.load(std::memory_order_relaxed) ? find_device(h) : -1;
+    if (i < 0) return g_read_file_ex(h, buffer, size, ol, done);
+    {
+        std::lock_guard lock(g_completion_mutex);
+        Completion* free = nullptr;
+        for (Completion& q : g_completions) {
+            if (q.ol == ol) {
+                free = &q;
+                break;
+            }
+            if (!q.ol && !free) free = &q;
+        }
+        if (!free) {
+            static bool warned = false;
+            if (!warned) log("nativepad: more than %d ReadFileEx reads in flight; some reports left alone", kMaxPending);
+            warned = true;
+            return g_read_file_ex(h, buffer, size, ol, done);
+        }
+        *free = {ol, h, static_cast<uint8_t*>(buffer), size, done};
+    }
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) log("nativepad: the game reads its controller with ReadFileEx; completion reports followed");
+    const BOOL ok = g_read_file_ex(h, buffer, size, ol, &hk_read_complete);
+    if (!ok) {
+        std::lock_guard lock(g_completion_mutex);
+        for (Completion& q : g_completions)
+            if (q.ol == ol) q = {};
+    }
+    return ok;
 }
 
 BOOL WINAPI hk_device_io(HANDLE h, DWORD code, LPVOID in, DWORD in_size, LPVOID out, DWORD out_size, LPDWORD n,
@@ -1092,10 +1148,10 @@ BOOL WINAPI hk_device_io(HANDLE h, DWORD code, LPVOID in, DWORD in_size, LPVOID 
     return g_device_io(h, code, in, in_size, out, out_size, n, ol);
 }
 
-// Protected exes: the game may get its controller's reports through Raw Input (WM_INPUT) instead of reading the
-// handles it opens (RE2: the exe only identifies the DualSense with HID IOCTLs, nothing reads it with ReadFile). While
-// GyroLib's panel has the controller, Sony HID reports handed out by GetRawInputData/GetRawInputBuffer are made idle.
-// GyroLib reads the controller over HID, not Raw Input, so the panel still gets it.
+// The game may also get its controller's reports through Raw Input (WM_INPUT), instead of or alongside reading the
+// handles it opens (RE2 only identifies the DualSense with HID IOCTLs; Risk of Rain 2's Unity input reads both). While
+// GyroLib's panel has the controller, Sony HID reports handed out by GetRawInputData/GetRawInputBuffer are made idle;
+// flick stick centres the selected controller's right stick there too. GyroLib reads over HID, so the panel still gets it.
 using RegisterRawInputDevices_t = BOOL(WINAPI*)(PCRAWINPUTDEVICE, UINT, UINT);
 using GetRawInputData_t = UINT(WINAPI*)(HRAWINPUT, UINT, LPVOID, PUINT, UINT);
 using GetRawInputBuffer_t = UINT(WINAPI*)(PRAWINPUT, PUINT, UINT);
@@ -1147,9 +1203,12 @@ void on_raw_input(RAWINPUT* input) {
     if (!pad->d.logged.exchange(true))
         log("nativepad: Raw Input reports of %04X:%04X: %lu x %lu bytes, %s", pad->d.vendor, pad->d.product, hid.dwCount,
             hid.dwSizeHid, hid.dwSizeHid ? layout_of(hid.bRawData, hid.dwSizeHid).name : "empty");
-    if (!g_neutral.load(std::memory_order_relaxed) || !hid.dwSizeHid) return;
+    if (!hid.dwSizeHid) return;
+    const bool selected = (uint32_t(pad->d.vendor) << 16 | pad->d.product) == g_pad_ids.load();
     Edit edit;
-    edit.idle = true;
+    edit.idle = g_neutral.load(std::memory_order_relaxed);
+    edit.centre_stick = selected && g_suppress.load(std::memory_order_relaxed);
+    if (!edit.idle && !edit.centre_stick) return;
     auto* r = const_cast<BYTE*>(hid.bRawData);
     for (DWORD k = 0; k < hid.dwCount; ++k) {
         int32_t buttons = -1;
@@ -1194,56 +1253,49 @@ BOOL WINAPI hk_close_handle(HANDLE h) {
 }  // namespace
 
 void install(bool suppression, bool dualsense_as_ds4, bool learned) {
+    g_suppression = suppression;
+    g_as_ds4 = dualsense_as_ds4 && !hooks::inline_mode();
+    g_as_ds4_learned = g_as_ds4 && learned;
+    g_follow = true;
+    // Function hooks cover P/Invoke and GetProcAddress as well as import-table calls. Only handles opened by the game
+    // are followed; hk_create_file skips Gyro4All, GyroLib and SDL. Kernel32 forwards its reads to KernelBase.
+    auto add = [](const char* dll, const char* function, void* hook, void** slot) {
+        if (hooks::inline_mode()) {
+            hooks::add(dll, function, hook, slot);
+            return;
+        }
+        HMODULE module = GetModuleHandleA(dll);
+        void* target = module ? reinterpret_cast<void*>(GetProcAddress(module, function)) : nullptr;
+        if (!hooks::hook_function(target, hook, slot)) log("nativepad: %s!%s function hook failed", dll, function);
+    };
+    add("kernel32.dll", "CreateFileW", reinterpret_cast<void*>(&hk_create_file), reinterpret_cast<void**>(&g_create_file));
+    add("kernel32.dll", "CreateFileA", reinterpret_cast<void*>(&hk_create_file_a), reinterpret_cast<void**>(&g_create_file_a));
+    add("kernel32.dll", "CloseHandle", reinterpret_cast<void*>(&hk_close_handle), reinterpret_cast<void**>(&g_close_handle));
+    add("kernelbase.dll", "ReadFile", reinterpret_cast<void*>(&hk_read_file), reinterpret_cast<void**>(&g_read_file));
+    add("kernelbase.dll", "GetOverlappedResult", reinterpret_cast<void*>(&hk_get_overlapped), reinterpret_cast<void**>(&g_get_overlapped));
+    add("kernelbase.dll", "GetOverlappedResultEx", reinterpret_cast<void*>(&hk_get_overlapped_ex), reinterpret_cast<void**>(&g_get_overlapped_ex));
+    add("kernelbase.dll", "ReadFileEx", reinterpret_cast<void*>(&hk_read_file_ex), reinterpret_cast<void**>(&g_read_file_ex));
+    add("kernelbase.dll", "DeviceIoControl", reinterpret_cast<void*>(&hk_device_io), reinterpret_cast<void**>(&g_device_io));
+    add("user32.dll", "RegisterRawInputDevices", reinterpret_cast<void*>(&hk_register_raw), reinterpret_cast<void**>(&g_register_raw));
+    add("user32.dll", "GetRawInputData", reinterpret_cast<void*>(&hk_get_raw_data), reinterpret_cast<void**>(&g_get_raw_data));
+    add("user32.dll", "GetRawInputBuffer", reinterpret_cast<void*>(&hk_get_raw_buffer), reinterpret_cast<void**>(&g_get_raw_buffer));
     if (hooks::inline_mode()) {
-        // Protected exe: no import slots, so inline hooks on the system exports, acting only on controllers the game
-        // opens, itself or through a system DLL (hk_create_file skips GyroLib's opens; the other hooks only touch
-        // handles it followed). Enough to follow the
-        // game's Sony controller reads, so GyroLib's panel can idle them and NativeFlickStick can edit them. The
-        // DualShock 4 identity (HID metadata and output reports) is left out here.
-        g_suppression = suppression;
-        g_follow = true;
-        // Reads on KernelBase's exports: RE2's exe doesn't read through kernel32's (kernel32's stubs jump to these, so
-        // both kinds of callers pass once). Opens on kernel32's, whose hook sees the caller's return address.
-        auto add = [](const char* dll, const char* function, void* hook, void** slot) { hooks::add(dll, function, hook, slot); };
-        add("kernel32.dll", "CreateFileW", reinterpret_cast<void*>(&hk_create_file), reinterpret_cast<void**>(&g_create_file));
-        add("kernel32.dll", "CloseHandle", reinterpret_cast<void*>(&hk_close_handle), reinterpret_cast<void**>(&g_close_handle));
-        add("kernelbase.dll", "ReadFile", reinterpret_cast<void*>(&hk_read_file), reinterpret_cast<void**>(&g_read_file));
-        add("kernelbase.dll", "GetOverlappedResult", reinterpret_cast<void*>(&hk_get_overlapped), reinterpret_cast<void**>(&g_get_overlapped));
-        add("kernelbase.dll", "GetOverlappedResultEx", reinterpret_cast<void*>(&hk_get_overlapped_ex), reinterpret_cast<void**>(&g_get_overlapped_ex));
-        add("kernelbase.dll", "ReadFileEx", reinterpret_cast<void*>(&hk_read_file_ex), reinterpret_cast<void**>(&g_read_file_ex));
-        add("kernelbase.dll", "DeviceIoControl", reinterpret_cast<void*>(&hk_device_io), reinterpret_cast<void**>(&g_device_io));
-        add("user32.dll", "RegisterRawInputDevices", reinterpret_cast<void*>(&hk_register_raw), reinterpret_cast<void**>(&g_register_raw));
-        add("user32.dll", "GetRawInputData", reinterpret_cast<void*>(&hk_get_raw_data), reinterpret_cast<void**>(&g_get_raw_data));
-        add("user32.dll", "GetRawInputBuffer", reinterpret_cast<void*>(&hk_get_raw_buffer), reinterpret_cast<void**>(&g_get_raw_buffer));
-        log("nativepad: protected exe: the game's own controller reads followed through inline hooks (no DualShock 4 "
-            "identity)%s", dualsense_as_ds4 ? "; DualSenseAsDualShock4=1 ignored" : "");
+        log("nativepad: protected exe: controller reads followed through function hooks (no DualShock 4 identity)%s",
+            dualsense_as_ds4 ? "; DualSenseAsDualShock4=1 ignored" : "");
         return;
     }
-    g_suppression = suppression;
-    g_as_ds4 = dualsense_as_ds4;
-    g_as_ds4_learned = dualsense_as_ds4 && learned;
-    g_follow = true;  // DualSense handles are always followed: does the game read the one it opens?
-    hooks::add_with_pad_library(nullptr, "CreateFileW", reinterpret_cast<void*>(&hk_create_file), reinterpret_cast<void**>(&g_create_file));
-    hooks::add_with_pad_library(nullptr, "CreateFileA", reinterpret_cast<void*>(&hk_create_file_a), reinterpret_cast<void**>(&g_create_file_a));
+    log("nativepad: controller reads followed through function hooks (including P/Invoke and runtime resolution)");
     if (dualsense_as_ds4) {
-        auto add = [](const char* function, void* hook, void** slot) { hooks::add_with_pad_library(nullptr, function, hook, slot); };
-        add("HidD_GetAttributes", reinterpret_cast<void*>(&hk_get_attributes), reinterpret_cast<void**>(&g_get_attributes));
-        add("HidD_GetProductString", reinterpret_cast<void*>(&hk_get_product), reinterpret_cast<void**>(&g_get_product));
-        add("HidD_GetFeature", reinterpret_cast<void*>(&hk_get_feature), reinterpret_cast<void**>(&g_get_feature));
-        add("HidD_SetFeature", reinterpret_cast<void*>(&hk_set_feature), reinterpret_cast<void**>(&g_set_feature));
-        add("HidD_GetPreparsedData", reinterpret_cast<void*>(&hk_get_preparsed), reinterpret_cast<void**>(&g_get_preparsed));
-        add("HidD_FreePreparsedData", reinterpret_cast<void*>(&hk_free_preparsed), reinterpret_cast<void**>(&g_free_preparsed));
-        add("HidP_GetCaps", reinterpret_cast<void*>(&hk_get_caps), reinterpret_cast<void**>(&g_get_caps));
-        add("HidP_GetValueCaps", reinterpret_cast<void*>(&hk_get_value_caps), reinterpret_cast<void**>(&g_get_value_caps));
-        add("WriteFile", reinterpret_cast<void*>(&hk_write_file), reinterpret_cast<void**>(&g_write_file));
-    }
-    if (g_follow) {
-        hooks::add_with_pad_library(nullptr, "ReadFile", reinterpret_cast<void*>(&hk_read_file), reinterpret_cast<void**>(&g_read_file));
-        hooks::add_with_pad_library(nullptr, "GetOverlappedResult", reinterpret_cast<void*>(&hk_get_overlapped),
-                                    reinterpret_cast<void**>(&g_get_overlapped));
-        hooks::add_with_pad_library(nullptr, "GetOverlappedResultEx", reinterpret_cast<void*>(&hk_get_overlapped_ex),
-                                    reinterpret_cast<void**>(&g_get_overlapped_ex));
-        hooks::add_with_pad_library(nullptr, "CloseHandle", reinterpret_cast<void*>(&hk_close_handle), reinterpret_cast<void**>(&g_close_handle));
+        auto add_import = [](const char* function, void* hook, void** slot) { hooks::add_with_pad_library(nullptr, function, hook, slot); };
+        add_import("HidD_GetAttributes", reinterpret_cast<void*>(&hk_get_attributes), reinterpret_cast<void**>(&g_get_attributes));
+        add_import("HidD_GetProductString", reinterpret_cast<void*>(&hk_get_product), reinterpret_cast<void**>(&g_get_product));
+        add_import("HidD_GetFeature", reinterpret_cast<void*>(&hk_get_feature), reinterpret_cast<void**>(&g_get_feature));
+        add_import("HidD_SetFeature", reinterpret_cast<void*>(&hk_set_feature), reinterpret_cast<void**>(&g_set_feature));
+        add_import("HidD_GetPreparsedData", reinterpret_cast<void*>(&hk_get_preparsed), reinterpret_cast<void**>(&g_get_preparsed));
+        add_import("HidD_FreePreparsedData", reinterpret_cast<void*>(&hk_free_preparsed), reinterpret_cast<void**>(&g_free_preparsed));
+        add_import("HidP_GetCaps", reinterpret_cast<void*>(&hk_get_caps), reinterpret_cast<void**>(&g_get_caps));
+        add_import("HidP_GetValueCaps", reinterpret_cast<void*>(&hk_get_value_caps), reinterpret_cast<void**>(&g_get_value_caps));
+        add_import("WriteFile", reinterpret_cast<void*>(&hk_write_file), reinterpret_cast<void**>(&g_write_file));
     }
     log("settings: NativeFlickStick=%d (%s)", suppression ? 1 : 0,
         suppression ? "flick stick also with the game's own PlayStation controller support, once its reports are checked"

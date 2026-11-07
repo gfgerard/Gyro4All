@@ -17,12 +17,13 @@
 | Alan Wake Remastered | ✅ Works (tested on the Epic version) | Northlight | Install next to `Game_f_x64_EOS.exe` in the game's main folder. |
 | Battlefield 4 | ✅ Works (tested on the EA app version, Game Pass) | Frostbite 3 | Install next to `bf4.exe` in the game's main folder. Turn off the EA app's in-game overlay for the game (it freezes on start otherwise). Move the right stick once in game to start the gyro. On foot only so far (vehicles not tested). Campaign only: never play multiplayer with it (PunkBuster). |
 | Battlefield Hardline | ✅ Works (tested on the EA app version, Game Pass) | Frostbite 3 | Install next to `bfh.exe` in the game's main folder. Move the right stick once in game to start the gyro (again after cutscenes). Off in vehicles. Campaign only: never play multiplayer with it (PunkBuster). |
+| Borderlands 4 | ✅ Works | Unreal Engine 5 | Install in `OakGame\Binaries\Win64`, next to `Borderlands4.exe`. Single-player only: never play online co-op with it. |
 | Control (2019, Ultimate Edition) | ✅ Works (tested on the Steam version, DX12) | Northlight | Install next to `Control_DX12.exe` in the game's main folder. DX11 (`Control_DX11.exe`) not tested. |
 | Cronos: The New Dawn | ✅ Works | Unreal Engine 5.5.4 | |
 | Crysis (2007) | ✅ Works (tested on the EA app version, 1.2.1, 64-bit) | CryEngine 2 | Install in `Bin64`, next to `Crysis64.exe`. 64-bit only. |
-| Cyberpunk 2077 | ✅ Works (tested on the GOG version, patch 2.50) | REDengine 4 | Install in `bin\x64`, next to `Cyberpunk2077.exe`. With RED4ext installed (it uses `winmm.dll`), install Gyro4All **as `version.dll`** (rename `winmm.dll`). Gyro on foot and when aiming from a car seat with a weapon drawn; off while driving. Single-player only. |
-| Crysis Remastered | ✅ Works | CryEngine | Install in `Bin64`, next to `CrysisRemastered.exe`. Rename `MSVCP140.dll`.|
 | Crysis 2 Remastered | ✅ Works | CryEngine | Install in `Bin64`, next to `Crysis2Remastered.exe`. Rename `MSVCP140.dll`.|
+| Crysis Remastered | ✅ Works | CryEngine | Install in `Bin64`, next to `CrysisRemastered.exe`. Rename `MSVCP140.dll`.|
+| Cyberpunk 2077 | ✅ Works (tested on the GOG version, patch 2.50) | REDengine 4 | Install in `bin\x64`, next to `Cyberpunk2077.exe`. With RED4ext installed (it uses `winmm.dll`), install Gyro4All **as `version.dll`** (rename `winmm.dll`). Gyro on foot and when aiming from a car seat with a weapon drawn; off while driving. Single-player only. |
 | Days Gone | ✅ Works (tested on the Steam version) | Unreal Engine 4 | Install in `BendGame\Binaries\Win64`, next to `DaysGone.exe`. Aim has its own view in settings. Bike has its own `Vehicle` view in the `F10` panel: set its Activation to Off to keep the gyro off on the bike. |
 | Dead Island 2 | ✅ Works (tested on the Epic version) | Unreal Engine 4 | Install in `DeadIsland\Binaries\Win64`. Single-player only: never play online co-op with it. |
 | Dead Space (2023) | ✅ Works (tested on the Steam version) | Frostbite | Install next to `Dead Space.exe` in the game's main folder.|
@@ -30,6 +31,8 @@
 | DOOM (2016) | ✅ Works (tested on the Steam version, Vulkan and OpenGL) | id Tech 6 | Install in the game's main folder, next to `DOOMx64vk.exe` and `DOOMx64.exe`. Gyro turns off in the pause menu, the map and during glory kills. Campaign only: never play multiplayer or SnapMap online with it. |
 | DOOM Eternal | ✅ Works (tested on the Steam version) | id Tech 7 | Install next to `DOOMEternalx64vk.exe` in the game's main folder. Turn Steam Input off for the game. Campaign only: never play BattleMode online with it. |
 | DOOM: The Dark Ages | ✅ Works (tested on the Steam version) | id Tech 8 | Install next to `DOOMTheDarkAges.exe` in the game's main folder. Turn Steam Input off for the game. |
+| DUSK | ✅ Works (tested on the Steam version) | Unity | Install next to `DUSK.exe` in the game's main folder. For the controller, set `controllermode = ds4` in the game's `mappings\*.ini` files (they ship as `xbox360`: with a PlayStation pad the camera looks up and spins). |
+| The Forest | ✅ Works | Unity (Mono) | Install next to `TheForest.exe` in the game's main folder. Single-player only: never play multiplayer with it. |
 | Gears of War: E-Day (Game Pass) | ⚠️ Campaign only, **with EasyAntiCheat disabled**. Only usable with "snap" aim assist | Unreal Engine 5.6.1 | Install in `Binaries\WinGDK`. The gyro starts a few seconds after the main menu appears. Never play online with it. |
 | Ghostrunner | ✅ Works | Unreal Engine 4.26.2 | |
 | Ghostrunner II | ✅ Works | Unreal Engine 4.27.2 | |
@@ -46,21 +49,22 @@
 | Mass Effect 2 (Legendary Edition) | ✅ Works (tested on the Steam version) | Unreal Engine 3 | Install in `Game\ME2\Binaries\Win64`. |
 | Mass Effect 3 (Legendary Edition) | ✅ Works (tested on the Steam version) | Unreal Engine 3 | Install in `Game\ME3\Binaries\Win64`. |
 | Mass Effect: Andromeda | ✅ Works | Frostbite 3 | |
+| Metal: Hellsinger | ✅ Works | Unity | Install next to `Metal.exe` in the game's main folder. |
 | Metro 2033 Redux | ✅ Works (tested on the Steam version) | 4A Engine | Install next to `metro.exe` in the game's main folder. |
-| Metro: Last Light Redux | ✅ Works (tested on the Epic Games Store version) | 4A Engine | Install next to `metro.exe` in the game's main folder. |
 | Metro Exodus Enhanced Edition | ✅ Works (tested on the Steam version) | 4A Engine | Install next to `MetroExodus.exe` in the game's main folder. |
+| Metro: Last Light Redux | ✅ Works (tested on the Epic Games Store version) | 4A Engine | Install next to `metro.exe` in the game's main folder. |
 | Monster Hunter Wilds | ⚠️ Partially tested | RE Engine | Game seems to implement only Steam Input for controller support. Functionality should be already covered by Steam. |
 | Mortal Shell | ✅ Works | Unreal Engine 4.25.0 | `F10` panel works (DX11). The game's own PlayStation support only knows the DualShock 4: its profile makes Gyro4All show your DualSense (USB or Bluetooth) to it as one, with PlayStation icons, rumble and light bar. |
-| Out of sight | ✅ Works | Unreal Engine 5.5.4 | |
-| Robocop: Rogue city | ✅ Works | Unreal Engine 5.2.0 | |
-| The Outer Worlds: Spacer's Choice Edition | ✅ Works | Unreal Engine 4.27.2 | Native DualSense support: Gyro4All leaves the controller to the game. |
 | Onimusha: Way of the Sword | ✅ Works (tested on the demo) | RE Engine | Install next to the game's exe in its main folder. The gyro turns off during lock-on. Needs REFramework installed.|
+| Out of sight | ✅ Works | Unreal Engine 5.5.4 | |
+| The Outer Worlds: Spacer's Choice Edition | ✅ Works | Unreal Engine 4.27.2 | Native DualSense support: Gyro4All leaves the controller to the game. |
 | Pacific Drive | ✅ Works | Unreal Engine 4.27 | Gyro on foot **and** in the car. |
 | PAYDAY 3 | ✅ Works | Unreal Engine 5.5.4 | ✅⚠️ **Always-online co-op game: use at your own risk**, in private or solo lobbies only. Its profile lets the gyro follow the camera during actions that take it over. |
+| The Planet Crafter | ✅ Works (tested on the demo) | Unity (Mono) | Install next to `Planet Crafter.exe` in the game's main folder. |
 | Pragmata | ✅ Works, **with [REFramework](https://github.com/praydog/REFramework)** | RE Engine | Install next to `PRAGMATA.exe` in the game's main folder, **together with a recent REFramework**: the game has Capcom's anti-tamper, which crashes the game about 30 s after start without it (an older REFramework build crashed it too). **Turn off the game's own gyro option** (it works while aiming with L2): Gyro4All's gyro also works while aiming, and the two would add up. |
 | Red Dead Redemption 2 | ✅ Works (tested on the Rockstar launcher version) | RAGE | Install next to `RDR2.exe` in the game's main folder. Story mode only: never play Red Dead Online with it. Binoculars turn through the right stick (less precise). |
-| Remnant: From the Ashes | ✅ Works (tested on the Steam version) | Unreal Engine 4 | Needs the profile provided |
 | Remnant 2 | ✅ Works | Unreal Engine 5 | Needs the profile provided |
+| Remnant: From the Ashes | ✅ Works (tested on the Steam version) | Unreal Engine 4 | Needs the profile provided |
 | Resident Evil 2 (remake) | ✅ Works (tested on the Game Pass & Steam versions) | RE Engine | Install next to `re2.exe` in the game's main folder **as `version.dll`** (rename `winmm.dll`): this version never loads a `winmm.dll` from its folder. Gyro in free look and while aiming; off in the inventory, the pause menu, cutscenes and fixed or puzzle cameras. REFramework is not needed. The game reads the DualSense through DirectInput; Gyro4All can't show a controller as an Xbox one in this version. |
 | Resident Evil 3 (remake) | ✅ Works (tested on the Game Pass version) | RE Engine | Install next to `re3.exe` in the game's main folder **as `version.dll`** (rename `winmm.dll`), as for RE2. Gyro in free look and while aiming; off in the inventory, the pause menu, cutscenes and fixed cameras. REFramework is not needed. The game reads the DualSense through DirectInput; Gyro4All can't show a controller as an Xbox one in this version. |
 | Resident Evil 4 (remake) | ✅ Works | RE Engine | Install next to `re4.exe` in the game's main folder. Gyro with the player's own camera (on foot and the boat); other cameras (inventory, merchant, cutscenes) are left to the game. Tested with REFramework installed (not known to be needed). |
@@ -68,16 +72,20 @@
 | Resident Evil Requiem (RE 9) | ✅ Works, **with [REFramework](https://github.com/praydog/REFramework)** | RE Engine | Install next to `re9.exe` in the game's main folder, **together with REFramework**: the game has Capcom's anti-tamper, which crashes the game when a mod changes it, and REFramework switches it off. Only tested with REFramework installed. Gyro in first and third person. |
 | Resident Evil Village (RE 8) | ✅ Works | RE Engine | Install next to `re8.exe` in the game's main folder. Gyro in free look; off in the pause menu, the inventory, cutscenes and scripted camera moments. The game doesn't read the DualSense: Gyro4All shows it as an Xbox controller (Xbox icons). Tested with REFramework installed (not known to be needed). The third-person mode (Gold Edition) is not supported yet. |
 | Returnal | ✅ Works | Unreal Engine 4.25.1 | Tip: in the settings panel, set the gyro to work only while L2/R2 is held. |
+| Risk of Rain 2 | ✅ Works | Unity (Mono) | Install next to `Risk of Rain 2.exe`. |
+| Robocop: Rogue city | ✅ Works | Unreal Engine 5.2.0 | |
 | Severed Steel | ✅ Works (tested on the demo) | Unreal Engine 4 | DX11: the `F10` panel isn't verified in this game yet. Rename `MSVCP140.dll` and `MSVCP140_2.dll` in its `Binaries\Win64` folder (e.g. to `.bak`): it ships an old VC++ runtime that GyroLib can't use. Until you do, Gyro4All leaves the gyro off and tells you so on screen. |
 | Silent Hill 2 (remake) | ✅ Works (tested on the Steam version) | Unreal Engine 5 | Install in `SHProto\Binaries\Win64`. Needs the custom profile in `Gyro4All\profiles` dir |
 | Star Wars Jedi: Fallen Order | ✅ Works | Unreal Engine 4 | |
+| Subnautica | ✅ Works | Unity (Mono) | Install next to `Subnautica.exe` in the game's main folder. |
 | Terminator: resistance | ✅ Works | Unreal Engine 4 | DX11: the `F10` panel isn't verified in this game yet |
 | Titanfall 2 | ✅ Works (tested on the EA app version) | Source (Respawn) | Install in `bin\x64_retail`, **not** next to `Titanfall2.exe` (it never loads a `winmm.dll` from the main folder). Campaign only: never play multiplayer with it. |
 | Valor Mortis | ✅ Works | Unreal Engine 5.7.3 | |
+| Viewfinder | ✅ Works (tested on the Epic version) | Unity (IL2CPP) | Install next to `Viewfinder.exe` in the game's main folder. |
 | Visage | ✅ Works | Unreal Engine 4.24.3 | DX11: the `F10` panel isn't verified in this game yet (or change settings in `gyrolib.ini`). |
 | Warhammer 40,000: Space Marine 2 | ✅⚠️ Solo / private lobbies only, **with EasyAntiCheat disabled** (tested on the Steam version) | Swarm Engine | Install in `client_pc\root\bin\pc`, next to `Warhammer 40000 Space Marine 2 - Retail.exe`. Rename `msvcp140.dll` in that folder (e.g. to `.bak` incompatible VC++ old runtime shipped). |
-| Wolfenstein: The New Order | ✅ Works (tested on the Game Pass / Microsoft Store and GOG versions) | id Tech 5 | Install next to `WolfNewOrder_x64.exe` in the game's main folder |
 | Wolfenstein II: The New Colossus | ✅ Works (tested on the Game Pass / Microsoft Store version) | id Tech 6.5 | Install next to `NewColossus_x64vk.exe`  | 
+| Wolfenstein: The New Order | ✅ Works (tested on the Game Pass / Microsoft Store and GOG versions) | id Tech 5 | Install next to `WolfNewOrder_x64.exe` in the game's main folder |
 | Zombie Army 4: Dead War | ✅ Works (tested on the Epic version) | Asura | Install in `bin`, next to `ZA4_vulkan.exe` and `ZA4_dx12.exe`. Denuvo: if the game shows error `88500006` after installing or updating Gyro4All, wait 24 hours. Single-player only: never play online co-op with it. |
 
 ## Games and engines to be tested next
@@ -88,7 +96,6 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 |---|---|---|---|
 | Halo: Campaign Evolved | Unreal Engine 5 | 2026 |
 | Borderlands 3 | Unreal Engine 4 | 2019 |
-| Borderlands 4	| Unreal Engine 5 | 2025 |
 | Crysis 2| CryEngine 3 | 2011 |
 | Crysis 3 | CryEngine 3 | 2013 |
 | Kingdom come deliverance II | CryEngine V | 2025 |
@@ -102,7 +109,6 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 | BioShock | Unreal Engine 2.5 (modified) | 2007 | 32bit |
 | BioShock 2 | Unreal Engine 2.5 (modified) | 2010 | 32bit |
 | BioShock Infinite | Unreal Engine 3 | 2013 | 32bit |
-| Subnautica | Unity | 2018 | |
 | Death Stranding | Decima | 2019 | |
 | Death Stranding 2 | Decima | 2025 | |
 | Horizon Zero Dawn | Decima | 2017 | |

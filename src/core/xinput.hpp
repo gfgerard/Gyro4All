@@ -19,6 +19,7 @@ struct Settings {
     bool nintendo_labels = false;  // swap face buttons A<->B and X<->Y (Nintendo A = Xbox A) instead of by position
     bool touchpad_back = true;     // touchpad click also presses View (Back), like the Create/Share button
     bool trace = false;            // XInputTrace: log every module that calls XInput (inline hooks on the system DLLs)
+    bool export_hooks = false;     // Engine::managed_input: also hook the XInput DLLs' exports (no import table to patch)
     const wchar_t* window_class = nullptr;  // the game's windows (Engine::window_class), nullptr = every top-level one
     void (*controllers_changed)() = nullptr;  // Engine::controllers_changed, after the WM_DEVICECHANGE (game thread)
 };
@@ -40,6 +41,10 @@ void listed_as_xinput(uint16_t vendor, uint16_t product, bool wait = true);
 // The controller shown as XInput has its right stick pushed past a quarter (the player's own stick, as last given to
 // the game, before the stick fallback's deflection). Any thread; false when no controller is shown.
 bool right_stick_pushed();
+
+// The buttons of the controller shown as XInput, as the game reads them (XINPUT_GAMEPAD_*: idle while GyroLib's panel
+// has the controller). Any thread; false when no controller is shown.
+bool shown_buttons(uint16_t& buttons);
 
 // Game thread: posts WM_DEVICECHANGE (DBT_DEVNODES_CHANGED) to the game's windows (Settings::window_class), as Windows
 // does when a controller is plugged in or out: the engine (and Sony's pad libraries linked into it) then look for

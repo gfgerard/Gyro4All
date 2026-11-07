@@ -234,8 +234,8 @@ void open_session_window(const std::wstring& folder, int seconds) {
     g_shared->acked = 0;
     InterlockedExchange(&g_shared->state, seconds > 0 ? 0 : -1);
     if (seconds > 0)
-        gyro4all::log("session: for %d s, a game exe of this folder started later (by a launcher) takes Gyro4All over "
-                      "unless a camera turns here first", seconds);
+        gyro4all::log("session: for the next %d s, a game exe of this folder started later (by a launcher) would take "
+                      "Gyro4All over, unless a camera turns here first", seconds);
 }
 
 void session_turned() {
@@ -269,6 +269,18 @@ void hand_session_to(std::wstring app, const std::wstring& cmd) {
     if (app.empty() || !GetFullPathNameW(app.c_str(), MAX_PATH, full, nullptr)) return;
     std::wstring path = lower(full);
     if (path.substr(0, path.find_last_of(L"\\/")) != g_install_dir) return;
+    // Only a real exe of this folder takes the session: a bare argument (Unity passes its PID first, with no
+    // application name) resolves into the game folder too. CreateProcess adds ".exe" to a name without extension.
+    std::wstring exe_path = full;
+    const size_t name_at = path.find_last_of(L"\\/") + 1;
+    if (path.find(L'.', name_at) == std::wstring::npos) exe_path += L".exe";
+    const DWORD attrs = GetFileAttributesW(exe_path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) || exe_path.size() < 4 ||
+        lower(exe_path.substr(exe_path.size() - 4)) != L".exe") {
+        gyro4all::log("session: kept (the started process '%s' is not an exe of this folder)",
+                      gyro4all::narrow(full).c_str());
+        return;
+    }
     // A helper the engine knows (Cyberpunk starts REDEngineErrorReporter.exe at launch): the game keeps the session.
     if (g_session_engine && g_session_engine->is_launcher(full)) {
         gyro4all::log("session: kept (%s, started by this process, is a helper)", gyro4all::narrow(full).c_str());

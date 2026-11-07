@@ -121,6 +121,8 @@ std::atomic<ULONGLONG> g_mouse_moved_at{0};
 // which also hides the setting in the panel. GyroLib calls the step callback inside gl_update; the fractions are
 // combined and applied after the gyro delta. Custom cameras are best effort (their level may not be 0).
 bool g_recenter_supported = false;
+bool g_panel_busy = false;    // Gyro4All's or GyroLib's panel is open (host::panel_open)
+bool g_stick_hidden = false;  // the game doesn't see the right stick now (host::stick_hidden)
 bool g_recenter_final = false;   // the engine said No for g_recenter_view: not asked again until the view changes
 uint32_t g_recenter_view = 0;    // view the support was last decided for
 double g_recenter_fraction = 0;  // fraction of the remaining pitch to remove this frame
@@ -281,11 +283,14 @@ struct Delivery {
 //   S,sensor_ns,arrival_ns,gyro_x,gyro_y,gyro_z         every accepted sample (GyroLib sample observer)
 //   F,now_ns,new_samples,raw_yaw,raw_pitch,yaw,pitch     every frame while the gyro may turn the camera (raw = GyroLib
 //                                                        output, yaw/pitch = applied: after SensorPacing)
+//   B,now_ns,bias_x,bias_y,bias_z,calibration_state,stationary,camera   10 times a second, gate open or closed
+//   M,now_ns                                             F9 pressed: the player saw drift (tools/motion_trace_drift.py)
 struct Trace {
     bool wanted = false, done = false;
     int seconds = 30;
     FILE* file = nullptr;
-    uint64_t start_ns = 0;
+    uint64_t start_ns = 0, next_bias_ns = 0;
+    bool mark_down = false;
 } g_trace;
 
 void GL_CALL on_sample(void*, uint64_t, const gl_sample* sample) {
@@ -312,6 +317,20 @@ void trace_frame(uint64_t now_ns, bool camera, uint32_t new_samples, const gl_ou
         g_trace.start_ns = now_ns;
         log("trace: recording %d s of motion timing to %s", g_trace.seconds, narrow(path).c_str());
     }
+    if (now_ns >= g_trace.next_bias_ns) {
+        g_trace.next_bias_ns = now_ns + 100000000;
+        gl_diagnostics d{};
+        gl_get_diagnostics(g_gyro->get(), &d);
+        std::fprintf(g_trace.file, "B,%llu,%.3f,%.3f,%.3f,%u,%u,%d\n", (unsigned long long)now_ns, d.bias.x, d.bias.y, d.bias.z,
+                     d.calibration_state, d.stationary, camera ? 1 : 0);
+    }
+    const bool mark = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+    if (mark && !g_trace.mark_down) {
+        std::fprintf(g_trace.file, "M,%llu\n", (unsigned long long)now_ns);
+        log("trace: drift mark");
+        notify::show(L"Gyro4All: drift mark saved", 2);
+    }
+    g_trace.mark_down = mark;
     if (camera)
         std::fprintf(g_trace.file, "F,%llu,%u,%.5f,%.5f,%.5f,%.5f\n", (unsigned long long)now_ns, new_samples,
                      out.yaw_degrees, out.pitch_degrees, yaw, pitch);
@@ -893,6 +912,7 @@ void frame() {
     // The Gyro4All window expanded alone: GyroLib's panel is closed, so its own gate is off; the gyro stays off here.
     const bool settings_open = overlay::settings_open();
     if (!overlay::available() && gl_panel_open(g_gyro->get())) gl_set_panel_open(g_gyro->get(), 0);
+    g_panel_busy = settings_open || gl_panel_open(g_gyro->get());
 
     const EngineFrame f = g_engine->read_frame();
     if (g_engine->views_changed()) {
@@ -1024,6 +1044,7 @@ void frame() {
     unlearn_dualsense();
     // The stick camera turns only where the game reads the centred stick (otherwise both would turn the camera).
     const bool stick_active = stick_want && (xinput_shown || native);
+    g_stick_hidden = stick_active || out.suppress_native_right_stick != 0;
     double stick_pitch = 0, stick_yaw = 0;
     if (stick_active)
         g_stick_camera.turn(SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX) / 32767.0f,
@@ -1175,6 +1196,12 @@ bool right_stick_moving(bool* available) {
 
 bool mouse_moving() { return GetTickCount64() - g_mouse_moved_at.load() < 150; }
 
+bool panel_open() { return g_panel_busy; }
+
+bool stick_hidden() { return g_stick_hidden; }
+
+bool stick_fallback_active() { return g_stick_fallback.active(); }
+
 }  // namespace host
 
 void host_raw_input(void* raw_input_handle) {
@@ -1230,6 +1257,7 @@ void host_configure(Engine& engine) {
     xs.nintendo_labels = settings::get(L"XInputNintendoLabels", 0) != 0;
     xs.touchpad_back = settings::get(L"XInputTouchpadBack", 1) != 0;
     xs.trace = settings::get(L"XInputTrace", 0) != 0;
+    xs.export_hooks = engine.managed_input();
     xs.window_class = engine.window_class();
     xs.controllers_changed = [] { g_engine->controllers_changed(); };
     xinput::install(xs);

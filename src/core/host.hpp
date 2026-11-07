@@ -24,6 +24,12 @@ bool game_has_focus();
 bool right_stick_moving(bool* available = nullptr);
 // Relative mouse motion (Raw Input reaching the game's main thread) in the last 150 ms.
 bool mouse_moving();
+// Gyro4All's or GyroLib's panel is open: its stick and mouse aren't the player's look input.
+bool panel_open();
+// The game doesn't see the right stick now (the stick camera or flick stick has it): moving it can't turn the game's camera.
+bool stick_hidden();
+// The core's stick fallback gives the gyro's turn to the game as right-stick input.
+bool stick_fallback_active();
 
 }  // namespace host
 }  // namespace gyro4all

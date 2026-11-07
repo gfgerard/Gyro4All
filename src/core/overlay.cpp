@@ -643,11 +643,13 @@ bool lazy_native_factory(const void* factory) {
 
 // A presenting thread: the static panel's swapchain stopped presenting (kAdoptIdleMs) and the game presents to another
 // D3D10/D3D11 one, made where the factory hooks didn't see it: the panel moves to it (and its input to its window).
+// Also before the panel DLL is in: attach() waits for a target that presents, so a swapchain made after the game's and
+// never presented (a throwaway one on a hidden window) would otherwise keep the panel out for good.
 constexpr ULONGLONG kAdoptIdleMs = 500;
 std::atomic<IDXGISwapChain*> g_not_adopted{nullptr};  // the last one found not to be D3D10/D3D11 or windowless
 
 bool adopt_presented(IDXGISwapChain* sc) {
-    if (g_overlay.load() || !panel_host::api() || sc == g_not_adopted.load()) return false;
+    if (g_overlay.load() || (!panel_host::api() && !panel_host::target()) || sc == g_not_adopted.load()) return false;
     const ULONGLONG idle = panel_host::target_idle_ms();
     if (idle < kAdoptIdleMs) return false;
     DXGI_SWAP_CHAIN_DESC desc{};

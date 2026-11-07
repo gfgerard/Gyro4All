@@ -15,8 +15,15 @@ WIN64="${1:?usage: deploy-gyro4all.sh <Win64 dir> [remove]}"
 source "$ROOT/tools/gyrolib-sdk.sh"; SDK="$GYROLIB_SDK"
 PROXY="${PROXY:-winmm.dll}"
 case "${PROXY,,}" in version.dll|winmm.dll) ;; *) echo "PROXY must be winmm.dll or version.dll"; exit 1;; esac
-# The game exe: $EXE, else <Project>-Win64-Shipping.exe, else the largest exe (renamed builds, e.g. Xbox/GDK GoWEDay.exe).
+# The game exe: $EXE, else <Project>-Win64-Shipping.exe, the Unity exe with its _Data folder, else the largest exe
+# (renamed builds, e.g. Xbox/GDK GoWEDay.exe).
 [ -n "${EXE:-}" ] || EXE="$(ls "$WIN64" | grep -i -E -- '-Win64-(Shipping|Test)\.exe$' | head -1 || true)"
+if [ -z "$EXE" ] && [ -f "$WIN64/UnityPlayer.dll" ]; then
+  for candidate in "$WIN64"/*.exe; do
+    name="${candidate##*/}"
+    if [ -d "$WIN64/${name%.exe}_Data" ]; then EXE="$name"; break; fi
+  done
+fi
 [ -n "$EXE" ] || EXE="$(ls -S "$WIN64" | grep -i -E '\.exe$' | head -1 || true)"
 [ -n "$EXE" ] || { echo "no game exe in $WIN64"; exit 1; }
 STEM="${EXE%.exe}"

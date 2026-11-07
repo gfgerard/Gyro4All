@@ -117,6 +117,14 @@ Key rules:
     PlayStation pad access (Sony's pad library), for `XInput=2` and native flick stick.
   - `overlay.cpp`: GyroLib's DX12 settings panel. `notify.cpp`: on-screen notices (GDI). `deps.cpp`:
     Visual C++ runtime check before loading GyroLib. `log.cpp`, `perf.cpp`.
+- `src/engines/unity/`: Unity Mono/IL2CPP through their exported runtime APIs (object library `gyro_unity`), resolved on
+  the game thread, never in `DllMain`.
+  - `unity_engine.cpp`: `UnityEngine`. The generic view is `Camera.main`'s world `Transform.rotation`; `[Unity]` profiles
+    turn managed floats instead. Follow check, fixed-camera verdict, notices.
+  - `unity_probe.cpp`: the camera probe (scan of the scripts' floats, correlation with the camera, live test, profile
+    writing; F7 dump, `Probe=1`, `ProbeKey`, `AutoProbe`).
+  - `unity_runtime.cpp`: the Mono and IL2CPP exports. `unity_path.cpp`: a profile's path to a value, type-checked.
+  - `unity_profile.cpp`, `unity_aim.hpp`, `unity_candidates.hpp`, `unity_quat.hpp`: no game access, unit-tested.
 - `src/engines/unrealEngine/`: the Unreal Engine module (object library `gyro_unreal`).
   - `ue_engine.cpp`: `UnrealEngine` (detection, scene, profile views, applying the turn, follow check).
   - `ue_probe.cpp`: the camera probe (automatic captures, F7/F8, probe key and AutoProbe during play, live test,
@@ -133,7 +141,7 @@ Key rules:
 - `third_party/`: the GyroLib SDK and MinHook (git-ignored; versions in MODLOG).
 - `tools/`: build, package, deploy, benchmark and test tools (see Tooling). Engine-specific debug and camera-finding
   tools go in `tools/<engine>/` (same names as `src/engines/`), each with a `README.md` of step-by-step instructions:
-  `tools/reEngine/` (`tdbdump.py`, `camera_finder.lua`), `tools/unrealEngine/` (the built-in camera probe),
+  `tools/reEngine/` (`tdbdump.py`, `camera_finder.lua`), `tools/unrealEngine/` and `tools/unity/` (the built-in camera probes),
   `tools/unrealEngine3/` (`ue3tool.py`: UE3 reflection, scene, snapshot diff and camera write test on a running game).
   Engine-neutral: `tools/camtrace/` (`guided.py`: sound-cued read-only search for the view's copies and sources, the
   first step; `camtrace.py`: copies of the view at fixed addresses, write tests, one-hit

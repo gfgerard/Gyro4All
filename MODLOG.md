@@ -5,6 +5,395 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-07 **DUSK (Steam, Unity Mono x64): controller fixed with the game's own `controllermode = ds4`; no code change.**
+  Symptom (DualSense, Steam Input not in use): menu buttons mixed up, and in game the view looked up and spun. Not
+  Gyro4All's XInput: the log has `DualSense ... not shown: it imports the HID library` (UnityPlayer.dll imports hid.dll
+  and opens 054C:0CE6), so the game read the pad itself. Decompiled `Assembly-CSharp.dll`: input is only Unity's Input
+  Manager (`Input.GetAxis("joystickaxisN")`, `Input.GetButton("joystickbuttonN")`); `XInputDotNetPure` is used only for
+  rumble (`VibrationController`). `MyInputManager.LoadControllerBindings` reads `mappings/<preset>.ini`
+  `[SETTINGS] controllermode` -> `Gamepad.Ds4` (`Ds4Gamepad`: right stick axes 3/6, South = button 1, triggers buttons
+  6/7, d-pad axes 7/8) or `Gamepad.X360` (right stick axes 4/5, South = button 0, triggers axes 9/10). All four shipped
+  presets say `xbox360`; with a PlayStation pad axes 4/5 are L2/R2 resting at -1, hence the view pinned up and turning.
+  The user set `controllermode = ds4` in the mappings: controller fixed (with the DualSense shown to the game as a
+  DualShock 4, `DualSenseAsDualShock4=1` learned). Gyro view: `MyMouseLook` `xRotation`/`yRotation` (probe profile,
+  now shipped as `profiles/DUSK.ini`). Gyro4All's XInput can't serve this game as is: Unity's legacy joystick input
+  doesn't see an XInput-only pad, and the Input Manager axes (`GetAxis`/`GetButton`) aren't hooked (The Forest only
+  covers `JoystickButton` keys). `docs/GAMES.md` row added.
+
+- 2026-11-07 **1.11.0 — Unity engine module** (built with MSVC 14.51, 1022 checks pass; release zip
+  `Gyro4All-v1.11.0.zip`). What changed since 1.10.1:
+  - New Unity module (Mono and IL2CPP, `src/engines/unity/`): `Camera.main`'s rotation as the generic view, `[Unity]`
+    profiles for script floats or a body's Transform, the camera probe (with the input-free search `probe_discover`)
+    and new profiles (Metal, Risk of Rain 2, Subnautica, TheForest, Viewfinder; plus Borderlands4 for Unreal). Entries
+    below from 2026-11-06 on.
+  - Unity probe crash in its body test (The Planet Crafter Demo, entry below).
+  - Mostly build and unit tests: see each entry below for what was run in game.
+- 2026-11-07 **The Planet Crafter Demo (Unity 6000.0.59, Mono): the automatic probe crashed the game. Fixed, built, not
+  retested in game.**
+  - The automatic probe (discovery) scanned 572 scripts (2110 floats) and nudged 244 look-named floats: none turned the
+    camera (0 yaw, 0 pitch candidates). It fell back to the body test: the camera's body is 1 level above it
+    (CharacterController/Rigidbody), and `yaw on parent 1` passed (asked 3.0, the camera moved 3.0). The game then crashed.
+  - Unity's `Player.log` stack: `UnityEngine.Transform:get_rotation_Injected` <- `Transform:get_rotation` <-
+    `mono_runtime_invoke` <- winmm (Gyro4All). Cause (`unity_probe.cpp`): the body test's pitch stage turned `g.camera`,
+    the **Camera component**, as if it were a Transform. The yaw stage was fine (it walks up from the camera's
+    Transform). Same mistake in the undo on the probe key and on lost gameplay. Only games where no float turns either
+    axis and the body's yaw test passes get there; no earlier Unity game did (no profile has `YawParent`).
+  - Fix: `body_target()` (the camera's own Transform for pitch, the parent for yaw) and `body_undo()`, used in all three
+    places. Built, 1022 unit checks pass.
+  - Seen in the dump: `SpaceCraft.PlayerLookable._pitch` (with `MaxPitch=80`, `PitchSpeed=50`) looks like the look pitch,
+    yet no nudge turned the camera (the log doesn't say whether it was among the 244). To check on the retest.
+  - Retest with 1.11.0 (DualSense, connection not recorded, Steam Input not in use): no crash in the body test any more.
+    Both stages passed (`yaw on parent 1` and `pitch on the camera's Transform`: asked 3.0, moved 3.0, kept), and the
+    profile was written (`[Unity] YawParent=1`, `Source=auto`, no float). **Then the game crashed again**, in
+    `end()` -> `release_scene()` -> `mono_gchandle_free` (Unity crash dump, symbolized with cdb against the build's PDB).
+    Cause: this Mono (`mono-2.0-bdwgc.dll`, Unity 6) has pointer-sized GC handles; the classic
+    `mono_gchandle_new`/`_get_target`/`_free` take and return 32 bits, so the handle was truncated (0x2D6A3401600 became
+    0xA3401600) and Mono read freed memory at the truncated address. Fix (`unity_runtime.cpp`): the `_v2` exports
+    (`mono_gchandle_new_v2`, `_new_weakref_v2`, `_get_target_v2`, `_free_v2`, pointer handles) when the runtime exports
+    all four, else the classic ones typed as 32-bit. IL2CPP unchanged. Built, 1022 checks pass; not yet run in game.
+    Older Mono games whose handles happened to sit below 4 GB never showed it.
+  - Debugging note: the DLLs' PDB name was stored as a literal `%%%winmm.pdb%%%` (`/PDBALTPATH:%_PDB%` through the VS
+    generator), so debuggers never found the PDB. Now `/PDBALTPATH:$<TARGET_PDB_FILE_NAME:...>` (both DLLs store
+    `winmm.pdb` / `gyro4all.pdb`). Older builds: copy the PDB under that literal name next to the DLL to symbolize.
+  - Run of the fixed build (no crash; the probe wrote `[Unity] YawParent=1 Source=auto`): the gyro turns yaw and pitch,
+    but after looking up with the stick and down with the gyro, the next stick touch puts the camera back up. Cause, from
+    the game's code (decompiled locally, not kept): `SpaceCraft.PlayerLookable` is disabled in `Start`, so its `Update`
+    never runs; `InputOnLookDirection` (look input only) calls `UpdateRotation`, which clamps `_pitch` to `+-MaxPitch` (80)
+    and sets `m_Camera.transform.localEulerAngles = (_pitch, 0, 0)`, and rotates the body by `transform.Rotate(up, ...)`.
+    So the camera's pitch is rebuilt from `_pitch` on input, and a write to `_pitch` alone only shows on the next input:
+    that is also why the nudges never saw `_pitch` turn the camera.
+  - New `[Unity]` key `PitchTransform=1` (`unity_profile.cpp`, `unity_engine.cpp` `turn_pitch_transform`): with a pitch
+    float, the gyro also turns the camera's own Transform (after the body's yaw), in turns and recentering.
+    `profiles/Planet Crafter.ini`: `ObjectType=SpaceCraft.PlayerLookable`, `PitchPath=_pitch`, `YawParent=1`,
+    `PitchTransform=1`, `PitchLimit=80`. Built, 1024 checks pass; not yet run in game. Open: the probe can't find this by
+    itself (it needs a look input to see `_pitch` reach the camera).
+  - Found by itself now (`probe_pitch_state`, `unity_probe.cpp`; matching in `PitchStateMatch`, `unity_candidates.hpp`):
+    with a view whose pitch is on the camera's Transform (`YawParent=`, no pitch float), the floats of the MonoBehaviours
+    on the camera and its ancestors are scanned once per camera (deep, as the probe's camera scripts; rejected ones left
+    out). After each of the player's own turns (look input this frame and the last, so the game set the camera itself,
+    whatever the gyro wrote; one sample per 0.5 degree of pitch), each float is compared with the camera's pitch in four
+    units (-1, 1, +-radians, wrapped to +-180 for 0..360 angles; 0.05 degree tolerance). A float that matched at least 5
+    times over 10 degrees or more, missing at most a quarter as often, is written with `PitchTransform=1` and
+    `Source=auto` (several: one named "pitch" first); the engine's Source=auto check then confirms it on the next turns.
+    A float out after more than 3 misses and more misses than a quarter of its matches; none left: the watch stops for
+    that camera. Nothing runs while the probe does. `reject_auto_view` also clears `PitchTransform`. Builds, 1034 checks
+    pass (`test_unity_pitch_state`); not run in game. `profiles/Planet Crafter.ini` still ships the manual profile (with
+    `PitchLimit=80`), so the watch only runs there without it.
+- 2026-11-07 **The Forest (Steam, Unity 5 Mono x64, Rewired): no controller in game even with `XInput=2`. One fix built, not run in game; the controller is still open.** Log of a DualSense run, connection not recorded, Steam Input not in use (`steam mouse: passes through`).
+  - `unity=failed`: this `mono.dll` exports 782 names but not `mono_array_length` (the string is in the file, the export isn't), and that was a required export, so the whole Unity module was off: `no Unity runtime`, stick fallback, no `Camera.main`. The export is now optional; `Runtime::array_length` reads `MonoArray.max_length` at +24 (32 bits). `mono_array_addr_with_size` here is `array + 0x20 + size * index`, which confirms the layout. No other export the module asks for is missing. `bash tools/test-gyro4all.sh`: 1013 checks, 0 failed.
+  - Controller: `xinput: DualSense ... shown as XInput controller 0` and the sticks are read, but `game polls per slot 0/0/0/0`, and no `the game polls XInputGetState` line. The game's option is on (`UseXInputV2` = 1 in the registry; `MenuOptions`/`PlayerPreferences.UseXInput` -> `RewiredSpawner` -> `userData.ConfigVars.useXInput`), so the option isn't the cause. `xinput` hooks patch import tables of the `unity` game modules; Rewired is managed, so anything it P/Invokes is resolved by `mono.dll`, which isn't one. Whether it calls XInput at all is not known yet: next step `XInputTrace=1`.
+  - `XInputTrace=1` run (game running, same pad): `unity: Mono runtime attached`, `camera=true`, target `Camera.main (Mono)`, so the Mono fix works up to there (a turn not confirmed yet: the gyro stayed off in the menu). The trace answers the controller question: `xinput1_4.dll!XInputGetState called from (no module: generated code)`, a Mono P/Invoke stub calling the export directly; no game module imports it, so the import hooks never saw it and the game got "not connected". New `Engine::managed_input()` (Unity: true) -> `Settings::export_hooks`: the watcher hooks the exports of xinput1_4, xinput1_3 and xinput9_1_0 inline as they appear, GyroLib and the watcher passing through. Builds, not run in game yet. `XInputTrace` can't hook those exports any more on these games (MinHook refuses a second hook; it logs `could not be hooked`); `the game polls XInputGetState` and the per-slot counters show the calls instead.
+  - Export hooks in game: `the game polls XInputGetState`, slot 0 answered with controller 0 (1343 polls in 10 s), and the menu moves with the stick and shows the (A) icon, but A does nothing. The stick goes through Rewired (`UICamera.GetAxis = TheForest.Utils.Input.GetAxis`), confirm doesn't: NGUI's `UICamera.submitKey1 = KeyCode.JoystickButton0`, read with `UnityEngine.Input.GetKeyDown`. Unity's own joystick input is its Raw Input + HID code in `TheForest.exe` (`<RI.Hid>`: buttons from HID reports; a path with `IG_` adds XInput for the triggers only, `+0x9C1B30`, `+0x9BE6C0`), so it never sees the XInput-only controller. Giving it a device would mean faking a HID path and reports. Instead `hook_legacy_keys` (`unity_engine.cpp`) hooks the native `Input.GetKeyInt/GetKeyDownInt/GetKeyUpInt` (found with `mono_lookup_internal_call`, Mono only) and answers `JoystickButton0..9` / `Joystick1Button0..9` from `xinput::shown_buttons`, in Unity's Xbox order (`unity_legacy_keys.hpp`), with edges per frame. `Input.GetButton`/`GetAxis` of Unity's Input Manager are not covered. 1022 checks, 0 failed; not run in game yet.
+  - Still open: the first gameplay run's `TheForest.exe` was gone within about 30 s of the last log line (04:18:35), `ReShade.log` without its exit lines, shortly after the probe started nudging 600 floats among 56212 scripts. Not known yet whether the user closed it.
+  - Rewired here (2016, `Rewired_Core.dll`) keeps its Windows code in `Rewired_Windows_Lib.dll` as a DES-encrypted resource (`Rewired_Windows`, loaded with `Assembly.Load`), so the plain decompile shows nothing of it. Not decrypted. The only non-mouse Raw Input call in the log is usage 4 and 5 with flags 0x1 (`RIDEV_REMOVE`) at exit, with no matching registration seen.
+
+- 2026-11-07 **Risk of Rain 2, first run with UI focus and the still-camera wait (DualSense, connection not recorded, Steam Input not in
+  use): focus works, no search reached the stage, and the gyro was on `Camera.main`.** Focus named real menus and HUD no longer counted:
+  `GenericMenuButton (Singleplayer)`, `SettingsEntryButton, Bool (EGS)`, `GenericMenuButton (Infinite Tower)`, `SurvivorIconPrefab(Clone)`, with
+  `MPEventSystem` (pad). No `a minute of UI focus`. Between one menu and the next, focus is gone for about a second, and for 2.6 s before the stage loads.
+  - The search still started in the intro: `Scene Camera < Main Camera` is `Camera.main` and stands still at (-9, 145.6) while another
+    camera, `Scene Camera < Menu Main Camera`, follows the pan. So the still-camera wait can't see this intro; it ended with `the camera changed` after 4.5 s.
+  - **Why the stage got no search:** the gyro only waited for the first search of the session. On the stage's camera it was on (`70/s, 99% turned`,
+    `applied yaw=-3.4`), so a pad in the hands kept the camera from settling, and the 20 s of patience didn't run out in the 10 s played. No
+    profile was written: the bad camera was the `Camera.main` last resort. Same in the gaps between menus.
+  - Changed, builds and unit tests only: until a camera has had its search the gyro waits (`probe_discovery_pending`), also over a quiet watch. A
+    menu ends a search without counting it and pauses watches and tests; 3 s after focus goes the search starts over, and a camera already searched gets its second
+    look then. The search's start notice is gone: it showed over the intro and said nothing useful.
+  - Still open: the intro search. A first-input signal (no gameplay before the player has pressed something) could filter it, but the core has no
+    button state for engine modules yet.
+
+- 2026-11-07 **Risk of Rain 2, run of the build that still counted `Selectable`s (DualSense, connection not recorded, Steam Input not in
+  use): the search started in the intro and the user had to press the probe key.** Log: `Cursor.visible=0 lockState=1` from the first
+  seconds, so the mouse rule allows the intro; search at 1.5 s on `Scene Camera < Main Camera`, with `cutscene intro` in the scene; it
+  rescanned twice as cameras went away and ended with nothing on the title's camera. The stage's new camera
+  (`Scene Camera < Main Camera(Clone)`) was never searched: its HUD counted as a menu (`6 interactive UI elements`), the very false
+  positive the user predicted, for the whole minute of patience. Meanwhile the quiet watch had captured 2 turns on its own. By hand the probe
+  verified what was expected: `RoR2.CameraRigController`, `CameraField=sceneCam`,
+  `_cameraMode.camToRawInstanceData[InstanceData].pitchYaw.pitch/.yaw`, -1 and 1; gyro on it (`applied yaw=31.1`, `99% turned`).
+  The focus build wasn't installed for this run: it is still untested. Focus alone wouldn't have stopped the intro search either: no menu there.
+  - **Nothing can say for sure that a scene is gameplay, so the search no longer relies on one try.** Added, builds and unit tests only:
+    it waits for a still camera (`ViewStillness`: within 0.5 degrees for 1.5 s; the intro pans at about 0.85 degrees a second; 20 s of patience for
+    a camera that sways); it belongs to one camera, and a new camera or a menu ends it instead of rescanning; it comes back on each new camera
+    with no wait, once 30 s later on the same one (a stage loaded before the player can look), and when the quiet watch sees the player turn
+    that camera, which is the one real proof of gameplay. Up to 12 searches per session.
+  - Not looked into: a search that finds a menu's own script would write a profile whose object may go away with the menu. Nothing has done it so far.
+
+- 2026-11-07 **Unity: the camera is found with no profile and no player input (`probe_discover`). Builds and unit tests only, not run
+  in game.** The user: in none of the Unity games tried was the default camera right, and a profile per game isn't the goal.
+  - Why the default fails: Unreal has one look state for everyone (`ControlRotation`); Unity has none. `Camera.main`'s Transform is
+    usually the game's output, not its state, so writing it either gets undone or, as in Viewfinder, sticks and leaves the game's state
+    behind. Names in the metadata (`global-metadata.dat`): Viewfinder `PlayerHeadRotation` (`pitch`, `yaw`), `PlayerCameraController`,
+    `KinematicCharacterController`; Deliver `CameraController`, `DynamicCameraController`, `PitchCamera`, `ManualCameraRotation`,
+    `m_defaultCameraRotation`. All per game, so a catalogue of class names wouldn't reach "most games".
+  - **Search with no input:** in gameplay, a perspective camera, the mouse captured (the cursor rule above), 1.5 s on the same camera.
+    The gyro waits. Floats scored by name words and by being on a camera's rig (`discovery_score`, unit-tested: settings, limits, old
+    values and effects on top are skipped) get +0.25 for 100 ms, 16 at a time, split in half when a camera moves. One value left: the
+    camera's turn gives its axis and its units per degree (`nudge_per_degree`), and it must be kept by the game. Then the existing
+    3-degree live test decides, and the profile gets `Source=auto`. Budget 15 s, up to 4 searches per session, one per camera.
+  - **Yaw with no float** (the classic script's `body.Rotate`, noted as open in an earlier entry): the nearest ancestor with a
+    `CharacterController` or `Rigidbody` gets the live test, `YawParent=N`. No pitch float either: pitch stays on the camera's Transform,
+    also tested. This also serves the manual probe, which used to need a yaw float. Risk: a car's Rigidbody under its camera would
+    take the yaw; only the check below catches it, and only once the player turns.
+  - **The first real turn is the proof:** nudging can't tell the look state from an effect added on top of it, which also moves the
+    camera and is kept. `LookStateCheck`: with the stick or mouse and no gyro in the frame, 20 degrees of camera turn with under 25%
+    of that in the state, twice in a row, removes the `[Unity]` keys, adds it to `Rejected=` and searches again.
+  - **Nothing found:** the old Scan, Pick, Capture and Test run quietly for up to 5 minutes per camera, with the gyro on, no notices and the
+    fixed-camera and follow verdicts still running. A new camera ends a watch that has seen no turn and gets its own search (a cutscene
+    camera first, then gameplay). Ctrl+F7 over any of that starts the normal probe instead of "cancelling" it.
+  - A float profile with no `PitchLimit=` now stops at 89 degrees: many games clamp only what their input adds.
+  - **Viewfinder's probe ran by hand on the array fix (DualSense, Steam Input not in use, connection not recorded):** it verified the metadata's
+    guess, `ObjectType=PlayerHeadRotation`, `PitchPath=pitch`, `YawPath=yaw`; camera `Player World Camera < ScreenShaker < Head < Player Body <
+    Level Player Variant < ...`; the stick and gyro mix not yet judged. Its copy `MoveScreenTexturesWithLook.previousHeadRotation` failed as
+    `rewritten by the game`, as it should. **A bug it showed:** `PitchPerDegree=-1.0638`, `YawPerDegree=0.7811`, from the correlation, with a camera that
+    lags; the yaw test wrote 2.34 and the camera moved 2.3, so the value is in degrees and yaw came out 22% short while passing the 1-degree
+    tolerance. The live test's own measure now replaces the correlation's and snaps to -1 and 1.
+  - **Deliver's cursor, from its last log:** `Cursor.visible=0 lockState=2` (Confined), so the cursor rule keeps the gyro off with `camera without
+    mouse look`, and this search doesn't run there. Which screen that was isn't recorded.
+  - **In game, profiles deleted first (user's test; pad details not recorded):**
+    - **Viewfinder: found, with no input.** `PlayerHeadRotation.pitch` and `.yaw`, per degree exactly -1 and 1, 13 s after the camera
+      appeared; `the stick or mouse turns the yaw that was found: confirmed`, the same for the pitch. The user confirms it is the right
+      camera. The two right values came first, 1.5 s in, but the search went on for a second candidate per axis, and the nudges found
+      `PlayerMovement._lookInputVector` (the player spun 22 to 49 degrees: an input the game keeps adding) and
+      `KinematicCharacterMotor._transientRotation`. Now it stops at one per axis (a failed test comes back for more), a turn over 16
+      degrees or one still going is no angle, and Quaternion and Matrix4x4 fields aren't scanned as floats.
+    - **Risk of Rain 2: not found, and it searched while loading and in the menu.** It keeps `lockState=1` there and draws its own cursor,
+      so the cursor rule says nothing. The search ran on `Menu Main Camera`, the cutscene's and the stage's, used up its 4 tries before
+      gameplay and repeated the same camera, since a restart had moved it on to one it hadn't marked. Now: an active GameObject in any
+      `EventSystem.currentSelectedGameObject` = a menu: no search and no generic view there, for up to a minute per camera (a game that
+      keeps something focused would otherwise block itself for ever). 8 tries. **Dead end, never run in game:** first version counted 3 or
+      more active `Selectable`s; the user pointed out that a HUD can easily have that many, and being wrong costs the gyro in gameplay for a
+      minute, while focus being wrong only costs a search or a turn in a menu. Open: a mouse-driven menu has no focus, so with a
+      hidden locked cursor it isn't seen; `RoR2.MPEventSystem` (one per player) is why every event system is read, not yet seen working.
+    - **Why it wasn't found:** the state is `rig._cameraMode.camToRawInstanceData` (a `Dictionary`) -> `InstanceData.pitchYaw` (the shipped
+      profile gets there with a method). The scan stopped at one reference and at `kTypeClass`, so it never saw generic-typed fields
+      or containers. Scripts named like a camera or on its rig now go 3 references deep, through arrays, `List<>` and `Dictionary<,>`
+      values, the first of each class; paths gained `name[Class]` to get back there. Expected `ObjectType=RoR2.CameraRigController`,
+      `CameraField=sceneCam`, `PitchPath=_cameraMode.camToRawInstanceData[InstanceData].pitchYaw.pitch`, not yet run. `RoR2.CameraModes`
+      has a `prevGyroAngle` field (the game's own gyro code?), not looked into.
+  - **To verify in game, in this order:** Viewfinder expects `PlayerHeadRotation`; then whether the stick and gyro mix, what the gyro's wait
+    feels like, and Deliver's result, unknown (its cursor values aren't known yet). Other Unity games will say how far the name words reach.
+    `bash tools/test-gyro4all.sh`.
+
+- 2026-11-07 **Viewfinder (Epic, IL2CPP): the probe never gave its instructions, and the stick breaks the view after gyro use.** Fixes built,
+  not yet run in game.
+  - **Probe, a bug of ours on every IL2CPP build without `il2cpp_array_addr_with_size`:** the log has `probe: started` and nothing else.
+    `Runtime::array_element`'s fallback put the elements at offset 24, which is `max_length`: `Il2CppArray` is object 16 + `bounds` 8 +
+    `max_length` 8, elements at 32. So element 0 read the length as a pointer (`alive` rejected it), the rest shifted by one and the last
+    was lost: with one camera the list was empty, and `scan_step` retried silently for ever. The same fallback serves `ObjectType=` lookups.
+    Fixed, with a check that the length is where the layout says. Also fixed the silence: a notice at start, a log line with the
+    camera count, and after 5 empty tries a notice and the probe's end.
+  - **Stick + gyro, a hypothesis from the metadata, not measured:** `global-metadata.dat` (v31, plain) has `PlayerHeadRotation` with
+    float fields `pitch` and `yaw`, and `ProcessLookInput`, `UpdateHeadTransform`, `SetPitchYawFromGlobalQuaternion`,
+    `GetLocalHeadRotationFromPitchAndYaw`. The generic view writes the camera's world rotation and leaves those floats behind, which
+    would fit the gyro looking right alone and going wrong once the stick drives them. Expected profile, to be verified by the probe's live
+    test: `ObjectType=PlayerHeadRotation`, `PitchPath=pitch`, `YawPath=yaw`; sign and units unknown. Viewfinder's `FindObjectsOfType(Type)`
+    is in the metadata.
+  - **Cursor rule, seen in this log:** `lockState=1` in gameplay and the gyro on without touching the stick; pause gives `lockState=0` and
+    `no gameplay view (camera without mouse look)`. The status line's `applied pitch=-91` is the gyro's running sum, not the view's pitch.
+  - `bash tools/test-gyro4all.sh`: 942 checks, 0 failed (none reach the array code, which needs a game).
+
+- 2026-11-07 **Deliver At All Costs, first run of the new Unity build (Epic, IL2CPP, DualSense, Steam Input not in use; connection not recorded):
+  no F10 panel, and the gyro turned the opening cutscene.**
+  - **Panel, a core bug, not Unity's:** `Gyro4All.log` has `panel: captured D3D11 swapchain` twice: the game's window, then 0.5 s later
+    a second window that no longer exists when the game is running, never presented. It came right after `gyrolib.dll` started and
+    just before `EOSOVH-Win64-Shipping.dll` (Epic's overlay) hooked the game's imports; which module made it isn't established. It
+    replaced the target. `overlay::attach` won't load `gyro4all.dll` for a target that doesn't present (the Alan Wake 2 guard,
+    2026-10-30), and `adopt_presented` required the DLL to be loaded already: neither could ever go first. So no `gyro4all.dll loaded`
+    line, `poll_menu_key` returned before reading the key (no `F10 pressed` line), and the pad shortcut's open panel was closed at
+    once by `!available()`. Fixed: adoption no longer needs the DLL, only a target that went idle for 500 ms (a D3D12 swapchain still
+    can't be adopted). Applies to any D3D10/D3D11 game. Viewfinder (also Epic) may have had the same.
+    Second run: `the panel moves to it`, then `panel: gyro4all.dll loaded`, so the bridge works; the panel itself not confirmed by the
+    user yet.
+  - **Cutscene:** nothing marked that camera as not the player's. Its metadata has Rewired, `Slate` (a cutscene sequencer: `Cutscene`,
+    `CutsceneTrack`, `CutsceneGroup`), `DAAC.UI.CinematicManager`, `IsPlayingCinematic`, `CinematicCamera`, `IsGameplayInputEnabled`,
+    `DisableMouse`, `GameplayCamera`, `TopDown`, `CursorLockMode`; `PlayableDirector` exists in it and in Viewfinder.
+  - **Dead end, removed at the user's request: "gyro off on each new camera until the stick or mouse turns it".** Their second run
+    showed it also fails on its own terms: `the camera answers look input (19.2 degrees in 688 ms, 0.0 deg/s without it)` switched the
+    gyro on, and the fixed-camera verdict parked it 28 s later. Most likely a shot cut while the stick moved; not confirmed.
+  - **New rule for the generic view, the user's idea: the game's own flag.** A hidden cursor with `Cursor.lockState` other than Locked
+    means no mouse look, so `view_id` 0, as a parked camera. It is a hypothesis: Deliver's values aren't known yet, and neither is
+    how many aim games hide the cursor without locking it. Hence `unity: Cursor.visible=... lockState=...` on every change, and a
+    log line when such a camera turns with look input. Profiles aren't subject to it. Kept from the same round: the fixed-camera
+    windows split the residual motion into with and without look input, and a camera turning less than twice as fast with it
+    doesn't count (a pan under a moved stick). If Deliver locks the cursor too, the next candidates are Rewired's mouse state and
+    the game's own `IsGameplayInputEnabled`.
+
+- 2026-11-07 **Unity module: review against the plan and Unreal, fixes, and a new probe (build and unit tests only, nothing run in game yet).**
+  `bash tools/test-gyro4all.sh`: 937 checks, 0 failures. Replaces what the entries below say about the managed probe and the pitch clamp.
+  - Facts checked in the games' own binaries: x64 `mono_string_chars` is `rcx+0x14` and `mono_string_length` `rcx+0x10` in Risk of
+    Rain 2's `mono-2.0-bdwgc.dll` (the old offset 12 read the monitor pointer as the length, so every name read empty or wrong).
+    `System.Type.GetFields(BindingFlags)`, `Type.get_FullName`, `MemberInfo.get_Name` and `FieldInfo.get_FieldType` are abstract in its
+    `mscorlib`, and `mono_runtime_invoke` doesn't dispatch virtually, so the first managed probe couldn't have worked (it never ran:
+    no `unity: probe:` line in any game log). Viewfinder's and Deliver At All Costs' `GameAssembly.dll` export the native
+    reflection the plan avoided: `il2cpp_class_get_fields`, `il2cpp_field_get_offset`/`_flags`/`_type`, `il2cpp_type_get_type`,
+    `il2cpp_class_from_type`, `il2cpp_gchandle_*`, `il2cpp_object_get_virtual_method`, `il2cpp_resolve_icall`; only
+    `il2cpp_array_addr_with_size` is missing. RoR2's Mono has the `mono_` equivalents the module uses. In `RoR2.dll`, `PitchYawPair` is a
+    value type (`pitch`, `yaw`, static `zero`) and `InstanceData` a class, so the shipped profile's path writes reach the game.
+  - Fixed in the engine: `g_follow.ignored` never ended and skipped pause and cursor (the gyro went to the stick in menus, and the
+    probe keys didn't work); the check compared yaw plus pitch applied against yaw moved, unlike Unreal's yaw-only one, so looking up
+    and down alone counted as ignored; the pitch clamp read back in the same frame as the write, before any game code ran, so it could
+    never learn (now on the next frame, 3 frames in a row, with `limit_turn`); `PitchLimit=` didn't apply to profiles; a profile's value
+    was copied into 8 bytes with no type check (a `Vector3` overwrote the stack); a destroyed object's wrapper still read as valid
+    (now `m_CachedPtr`, and a weak GC handle for the cached object); `Cursor.visible` ignored `lockState`; `resolve_api` was all or
+    nothing and permanent (now only Camera and Transform are required, retried for 30 s); one log line per frame on an exception.
+    `EngineFrame::no_aim_camera` is gone: a camera that can't be aimed is `view_id` 0, which the core already handles.
+  - Fixed-camera verdict: it now measures the motion between the end of the mod's write and the next frame, so the gyro's own writes
+    no longer count as the camera answering (before: anything under about 37 deg/s at 75 FPS did). The whole window is dropped if
+    pause, cursor, focus or the panel closed it. Look input needs 300 ms in the window and pitch counts as motion. **Open:** it still
+    needs stick or mouse input, which a pad player has no reason to give in Deliver At All Costs, so there the gyro goes on turning
+    the scene camera until they touch either. An active test with `stick_nudge_x` could fix that but only where the game reads the
+    pad through a path Gyro4All can edit; Deliver's log shows Raw Input and HID opens, and its route isn't known yet.
+  - New probe (`unity_probe.cpp`): floats of all active scripts outside Unity's own (value types, one object reference deep) through
+    native reflection; picks the camera that turns with the stick or mouse; correlates each float with yaw and pitch over 100 ms
+    samples (which also gives its units per degree); live test of the best 12 per axis; writes `[Unity]` and applies at once. New
+    profile keys `PitchPath`, `YawPath`, `YawObjectType`, `PitchPerDegree`, `YawPerDegree`; `CameraField` is now optional. `Probe=` and
+    `ProbeKey` now work as in Unreal (`core/probe_key.hpp`, shared), `AutoProbe` when the camera ignores writes or the core's stick
+    fallback lasts over 3 s. Notices: runtime or camera methods unusable, no camera or profile object for 90 s, fixed camera, camera
+    rewritten, profile not followed.
+  - Not done, the next steps toward working without a profile: known candidates before `Camera.main` (Cinemachine, Starter Assets,
+    Standard Assets), choosing among cameras when `Camera.main` is the wrong one, yaw around the rig's up axis (the likely cause of
+    Viewfinder's turned world), turning a parent Transform for the yaw (the classic first-person script has no yaw float, so the
+    probe reports pitch only there), and an automatic zoom reference FOV. Viewfinder's profile waits for the probe's first real run.
+  - To verify in game: RoR2 still turns with its profile, including after leaving a run and starting another (the cached object);
+    the probe in Viewfinder; the clamp (aim past where the mouse stops); F10 panel use doesn't park the camera; Deliver with a mouse
+    moved, then parked and back.
+
+- 2026-11-06 **Unity Mono/IL2CPP module, first implementation (build and unit tests only).** Detects `UnityPlayer.dll` and
+  resolves the already-loaded Mono (`mono-2.0-bdwgc.dll`, `mono-2.0-sgen.dll`, `mono.dll`) or IL2CPP (`GameAssembly.dll`)
+  runtime exports on the game thread. Both backends enumerate loaded assemblies and invoke `UnityEngine.Camera.get_main`,
+  `Component.get_transform`, `Transform.get_rotation`/`set_rotation`, `Camera.get_fieldOfView`/`get_orthographic`,
+  `Time.get_timeScale` and `Cursor.get_visible`. The generic turn is world-Y yaw times the current quaternion times local-X
+  pitch (negative X for pitch up), preserving roll; view readback, recenter and horizontal-reference-to-vertical FOV
+  conversion are wired. Missing exports/API methods and a camera that repeatedly ignores Transform writes use right-stick
+  fallback. The managed probe is still pending. `bash tools/test-gyro4all.sh`: 866 checks, 0 failures.
+  - First live run (Risk of Rain 2, Unity 2021.3.45f2 Mono, no anti-cheat found): two integration failures fixed before
+    runtime access. `UnityCrashHandler*` is a helper (`is_launcher`) and must not take the session; Unity's message pump is
+    in `UnityPlayer.dll`, so `module_prefix` is `Unity`. Then the log confirms `unity: Mono runtime attached`, GyroLib starts,
+    and the default view reads `Camera.main (Mono)`. IL2CPP remains untested in game.
+  - The user's gameplay test found that `Camera.main` moves a UI/crosshair camera, not the character's aim. In
+    `RoR2.dll`, `CameraRigController.sceneCam` is the displayed gameplay camera and `LateUpdate` rebuilds its Transform.
+    The actual look input is `CameraModes.CameraModePlayerBasic.InstanceData.pitchYaw`, reached without offsets through
+    `_cameraMode.DebugGetInstanceData(@).pitchYaw`; pitch down is positive and yaw right is positive. Added `[Unity]`
+    ObjectType/CameraField/PitchYawPath profiles, managed object/field access and a shipped Risk of Rain 2 profile.
+    Runtime method lookup walks base classes because `_cameraMode` holds a derived mode. Mono/IL2CPP field getters copy a
+    value type into caller storage; they do not box it. The profile therefore copies the two-float PitchYawPair directly.
+    The live log reaches `gyro on (target RoR2.CameraRigController (Mono))`, and the user confirms that gyro aiming now
+    works. Zoom compensation reads the real `sceneCam` vertical FOV. Enabled NativeFlickStick for this native-pad game:
+    GyroLib's flick turns use the same pitchYaw path while the game's physical right stick is centred; restart required.
+  - The deploy script now recognizes the Unity exe by its `_Data` folder instead of selecting `unins000.exe` by size.
+  - The first Raw Input-only change did not fix either input bug. Decompiling Rewired found direct P/Invoke calls to
+    `CreateFileW`, `ReadFile` and `ReadFileEx` in `Rewired_Windows.dll`: they bypass UnityPlayer's import table. Native-pad
+    tracking now uses function hooks in normal games too, excluding GyroLib/SDL by their callers, and wraps ReadFileEx's
+    completion routine so its report is edited before managed code sees it. Raw Input gets the same panel/flick edits.
+    This targets the reported panel input leak and native vertical look; both still need the in-game retest.
+    `bash tools/test-gyro4all.sh`: 866 checks, 0 failures.
+  - First IL2CPP game (Viewfinder, Epic, x64, Unity 2021-era build): `unity=failed camera=false` at startup because
+    `GameAssembly.dll` does not export `il2cpp_array_addr_with_size` (all other 16 required exports are present; the
+    build trims it). The export is now optional and `Runtime::array_element` falls back to the x64 `Il2CppArray` layout
+    (later found wrong, see the 2026-11-07 Viewfinder entry: the elements start at 32, not 24). Awaiting the in-game test: expect
+    `unity: IL2CPP runtime attached` and `Camera.main (IL2CPP)` in the target, or the follow-check's
+    "rewrites Transform" right-stick fallback if the game rewrites the camera. Deliver At All Costs (same folder)
+    is also IL2CPP with the same export set.
+  - Viewfinder live test: the gyro turns the camera, but pitch had no limit (the mouse/stick path clamps in the
+    game's controller, which the direct Transform write bypasses). The generic Unity view now learns the clamp:
+    a pitch write that comes back pulled toward zero teaches the limit (starts at ±89, one log line per game,
+    `unity: learnt the game's pitch clamp`), and `PitchLimit=` in `[Unity]` can pin it manually. To re-verify
+    in game: aim up/down past where the mouse stops; the view should stop at the same pitch as the mouse.
+
+- 2026-11-06 **RDR2 "drift", reporter's update and a long-session trace.** The reporter now says it is rare and random, usually
+  after sudden movements, "as if the gyro occasionally leaks a little"; "menus only" didn't help and after switching back to
+  "any time" it almost disappeared. So the slide measured in the entry below may not be the event they mean, and a bias
+  knocked off by a sudden movement is open again (that trace had no such event). Note that on RAGE a saved "menus only" turns
+  into "any time" at the next start (`host.cpp`), so that setting only lasts until a restart.
+  - Added to the trace: `B` lines (GyroLib's bias, calibration state, still flag, gate, 10 Hz, gate closed too) and `M` lines
+    (F9, with a notice). `tools/motion_trace_drift.py` lists bias changes, slides labelled `bias off` or `pad reads`, the time
+    since the last fast motion, and the marks. Checked only on the reporter's older trace and with the unit tests: the new
+    lines have not been run in game.
+- 2026-11-06 **RDR2 "drift" on L2 hold: the reporter's `MotionTrace=60` shows the turn comes from the pad's own motion, cut by
+  the Hold gate; the learned bias, GyroLib and sensor pacing are not adding it.** Same setup as the entry below (1.10.1,
+  DualSense 1000 samples/s, no Steam Input). 8 presses in 60 s: the first was deliberate aiming and is left out; 3 had a jerk
+  before the gate opened, 4 had none (grouped by the S lines, the reporter's own labels aren't in the trace). No code changed.
+  - **Nothing added downstream:** applied against raw gyro over 500 ms windows fits r > 0.998, pitch gain 2.0 and yaw gain 2.5,
+    zero points x 0.534 and y -0.141, matching the logged bias (about 0.54, -0.15). The pad at rest reads that value, so
+    candidate 3 below is out for this trace. Applied and raw totals agree to 0.002 deg. Gain at low rates is the same (2.06), so
+    no tightening is active.
+  - **The jerk:** peak 12-15 deg/s, about 2 deg of pad pitch in the 400 ms before the gate on two presses (0.7 on the third),
+    gate opening at the end of it. Much slower and smaller than the simulation below assumed. No jerk: under 0.15 deg, peak
+    about 1.5 deg/s.
+  - **Edge bump (first 150 ms, camera deg):** with a jerk pitch up to 0.62, yaw up to 1.41; without one, at most 0.07.
+  - **Slide while held (from 0.3 s after the gate to 1 s before release, camera deg/s):** with a jerk pitch +0.18 to +0.54, yaw
+    -0.15 to -0.19, 0.6-2.0 deg per press; without one pitch +0.05 to +0.12, yaw +0.01 to -0.08. Always the same sign in pitch, the
+    opposite of the jerk, and it fades over seconds: this is the part the reporter most likely calls drift.
+  - **Reading:** the pad tilts during the pull while the gate is closed, then creeps back while it is open, so only the return
+    reaches the camera. Whether that creep is the hand settling or a sensor effect of the jerk can't be told from this trace (no
+    accelerometer lines). A ramp on the gate (candidate 1's fix) would only remove the bump, not the slide. Lock-on isn't excluded
+    for the bump, but isn't needed to explain the slide. The trace shows what was asked of the camera, not where it went.
+  - Next: reporter tests with the pad on a table, and `gyro.tightening_dps` (needs smoothing on) about 0.5-1 deg/s; a lower
+    trigger threshold should open the gate before the tilt. Their `gyrolib.ini` is still missing.
+- 2026-11-05 **RDR2: "drift" while aiming with the gyro on L2 hold, worse on a quick pull (reporter); not reproduced by the
+  user, cause not confirmed.** Reporter's log (1.10.1, Steam copy, DualSense at 1000 samples/s, not under Steam Input, 60
+  FPS, 0 stalls, 0 bursts): no stick fallback, every camera update turned. The status lines can't show a single press
+  (`gyro: GyroLib enables` is held back 1 s, so short presses aren't logged). No code changed.
+  - **Sensor pacing ruled out:** the real `sensor_pacer.cpp` run over a simulated jerk out and back (peak 40-300 deg/s, 30 ms
+    each way, 1 kHz, 60 FPS, tremor 0 or 3 deg/s, all frame phases): at most 0.05 deg against GyroLib's turn.
+  - **Candidate 1, the activation edge (fits quick against slow; unproven):** Hold opens the gate at the trigger threshold,
+    in the middle of the jerk, so only part of a motion that nets zero gets through, in the same direction each press. Same
+    simulation, gate opening 15-45 ms into the jerk: 0.2-0.75 deg of net pad turn at peak 40 deg/s, 1.6-5.6 deg at 300, before
+    sensitivity; 0 with the gate already open. The jerk's size and timing are assumed, not measured. Possible fix if a trace
+    confirms it: a short ramp on the turn after the gate opens (costs the start of a deliberate turn).
+  - **Candidate 2, the game's lock-on:** a pull can snap the aim to a target (Lock-On Mode setting). Not separated from the
+    gyro yet; test with Lock-On Mode = Free Aim.
+  - **Candidate 3, bias learned from the hand-held pad (would not depend on pull speed):** `sees_menus()` is false on RAGE,
+    so "menus only" automatic calibration becomes "any time". The log has GyroLib reading the pad as still during a hold
+    (23:47:17) and bias x going 0.55 -> 0.43 deg/s between two status lines. GyroLib's docs: 0.15 deg/s and an 8 s constant
+    in active use, 2 s otherwise; whether a suspended Hold counts as "not active" isn't documented. The host never calls
+    `gl_set_auto_calibration_allowed`.
+  - Next: `MotionTrace=60` from the reporter. S lines keep the pad's motion before each press, F lines exist only while the
+    gate is open, so each press can be split into motion before and after the gate. Also their `gyrolib.ini`. The trace has
+    what Gyro4All asked, not where the camera went: a view moving with applied turns near zero points at the game (or at
+    writes lost across the aim camera switch, not checked).
+
+- 2026-11-05 **007 First Light: the L2 stall after a long session is a transition camera on a recycled entity, not the
+  camera list; list check and more logs added** (builds, 853 checks pass; **not yet tested in game**, the user will test a
+  long session). Reporter's log (1.10.0, about 90 min, DualSense read as USB or basic Bluetooth, no Steam Input): gyro
+  dead at the start of each L2 aim from 23:36 on, fine on L1, and the same aim works until L2 is released.
+  - The 2026-11-03 hypothesis (camera list longer than the 64-entry buffer) is **refuted**: all 12 logged transitions
+    had `4 cameras in the list` and every frame turned the cameras, and no failed transition came in the whole session.
+    The list did not grow in that log.
+  - What the log shows: for the first hour the transition camera is entity 0xD5 (no orbit state, `turn_all` runs). From
+    23:36 the same camera comes up as `orbit camera 13070112`: entity 0x112 (generation 07 to 28, a new one on nearly
+    every press; also 0x114), about 500 ms per press, as a transition lasts. Those stretches asked 371.7 deg (sum of
+    |yaw| + |pitch|) and the view moved 17.7; 15 of 17 lines `NOT FOLLOWED`. The aim camera 1304006B right after them
+    follows (178.8 asked, 202 moved, all session). Earlier one-offs of the same look: 1305010F (1266 ms, view moved 0.00)
+    and 13150111 (1000 ms, view moved about 0.1). Entity 0x105 was a transition camera in an earlier session's log and is
+    an orbit camera in this one, so entities do get reused both ways.
+  - Cause (inferred from the log; nothing reads the slot's history directly): `orbit_of` only checks that the entity's
+    state and limits look valid. The rig with limits -85..85 appears at 23:12 (0x103, 0x105, 0x10F, 0x111, 0x112, 0x114).
+    The component arrays appear to keep their values when an entity is freed, so a transition camera that gets one of those
+    entities finds a valid-looking state, the write lands in a slot nothing reads ("100% turned" in the status), and
+    `turn_all` never runs. That explains "after a while": it depends on which entity the camera gets.
+  - Also ruled out: mouse or keyboard mode (mouse input 0 and cursor moved 0 on all 27 `NOT FOLLOWED` lines).
+  - Fix (`glacier_look.cpp`): an active camera with a state but missing from the orbit update's list is treated as a
+    transition camera: `turn_all` runs, and its own state and point are still turned. The second part is a hedge: the
+    list held 4 entries while 5 different cameras had already been active, so it is not proven that every active orbit
+    camera is listed; if an aim camera is not, it keeps turning and the list's cameras turn along (which transitions
+    already do). An empty or unreadable list says nothing: the old behaviour. Static check on a local build that differs
+    slightly from the reporter's (update at exe+0x52DEC0, reporter's exe+0x52DDE0): one thunk, a virtual method, so the
+    list belongs to one system object; the log line below checks that at run time.
+  - New log lines: `glacier: gyro press for N ms ...` (first 20 presses and any with 250 ms or more before the view
+    responded, up to 300: the symptom itself, with each camera's handle, kind and time; the reporter says 1-2 s, the log
+    showed about 0.5 s per press, so this settles it); `glacier: camera <handle> has an orbit state the orbit update doesn't use`
+    (once per entity, with the state's values and the list's entities); `glacier: orbit update's list, new set: ...`;
+    `glacier: the orbit update's list object changed` (up to 20; a count in the status). The transition line gains `on an old
+    orbit state`, `(ended N ms ago)`, the duration between its first and last gyro frame (it used to run to the next
+    orbit turn: the 7141 ms line in that log), the follow check and the list's entities; it comes for the first 12 and any
+    with unturned frames, an old state or a view that didn't follow (up to 300). `orbit camera` line: `in the list` or
+    `list unknown`, 256 entities kept. `NOT FOLLOWED` lines: up to 200. The status line now adds, per 30 s, gyro frames by
+    kind, degrees asked against degrees the view moved, presses and slow presses, and the list's length, because
+    "100% turned" only says the write landed.
+  - What to check in the test log: `old state` frames in the status and in press lines, whether those stretches now say
+    `followed`, whether any long stretch with an aim camera shows as `on an old orbit state` (then the list doesn't hold
+    every aim camera), and any `gyro press` still slow on plain `orbit` cameras (then there's a further cause).
 - 2026-11-05 **RDR2 (Steam): Gyro4All ran in the launcher `PlayRDR2.exe`, never in `RDR2.exe`; launchers now hand the
   session over with any engine, also when the game starts through another program** (built, 853 checks pass; verified
   with a fake launcher, `bash tools/launchertest/run.sh`; not yet tested with the real game). User log: only `Gyro4All
@@ -145,7 +534,7 @@ or gyro to stick.
     checks; not yet tested in game): up to 65536 entries (every 16-bit entity, so no limit the game can reach; a static buffer, game thread), and the transition line now also
     comes for every transition whose frames didn't all turn the cameras (up to 50), with the list's length (`N cameras in
     the list` / `camera list unreadable`); its frames and asked turn are counted even when nothing could be turned.
-    Unconfirmed until the reporter's log shows the list's length.
+    Unconfirmed until the reporter's log shows the list's length. **Refuted by that log, see 2026-11-05.**
   - Next: the reporter's log with this build after it happens; if `NOT FOLLOWED` comes with game mouse input, idle the
     game's DirectInput mouse during controller gameplay (the panel's idling in `dinputpad.cpp` already does it).
 - 2026-11-03 **Halo: The Master Chief Collection (Xbox app, package 1.3528.0.0)**: plan in

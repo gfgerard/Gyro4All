@@ -575,6 +575,60 @@ void trace_pass() {
         }
 }
 
+// ------------------------------------------------------------------ calls no import table sees (Settings::export_hooks)
+
+// Managed code reaches XInput through a P/Invoke stub in generated code (The Forest's Rewired), so no import slot sees
+// it: inline hooks on the exports of every XInput DLL, as they appear. GyroLib, the watcher and calls already translated
+// pass straight through (passes_through).
+template <int Dll>
+struct ExportHooks {
+    static inline GetState_t real_get = nullptr;
+    static inline SetState_t real_set = nullptr;
+    static inline GetCaps_t real_caps = nullptr;
+    static inline Enable_t real_enable = nullptr;
+
+    static DWORD WINAPI on_get_state(DWORD user, XINPUT_STATE* state) {
+        return passes_through(_ReturnAddress()) ? real_get(user, state) : get_state(real_get, user, state);
+    }
+    static DWORD WINAPI on_set_state(DWORD user, XINPUT_VIBRATION* vibration) {
+        return passes_through(_ReturnAddress()) ? real_set(user, vibration) : set_state(real_set, user, vibration);
+    }
+    static DWORD WINAPI on_get_caps(DWORD user, DWORD flags, XINPUT_CAPABILITIES* caps) {
+        return passes_through(_ReturnAddress()) ? real_caps(user, flags, caps) : get_caps(real_caps, user, flags, caps);
+    }
+    static void WINAPI on_enable(BOOL enable) {
+        if (!passes_through(_ReturnAddress())) g_enabled = enable != FALSE;
+        real_enable(enable);
+    }
+    static bool install(HMODULE m) {
+        auto target = [m](const char* name) { return reinterpret_cast<void*>(GetProcAddress(m, name)); };
+        const bool ok = hooks::hook_function(target("XInputGetState"), reinterpret_cast<void*>(&on_get_state),
+                                             reinterpret_cast<void**>(&real_get));
+        // A DLL without one of the others just doesn't get that hook; a call can only arrive through its export.
+        hooks::hook_function(target("XInputSetState"), reinterpret_cast<void*>(&on_set_state), reinterpret_cast<void**>(&real_set));
+        hooks::hook_function(target("XInputGetCapabilities"), reinterpret_cast<void*>(&on_get_caps), reinterpret_cast<void**>(&real_caps));
+        hooks::hook_function(target("XInputEnable"), reinterpret_cast<void*>(&on_enable), reinterpret_cast<void**>(&real_enable));
+        return ok;
+    }
+};
+
+// Watcher thread.
+void export_hooks_pass() {
+    static bool done[3] = {};
+    static const struct {
+        const char* dll;
+        bool (*install)(HMODULE);
+    } dlls[] = {{"xinput1_4.dll", &ExportHooks<0>::install},
+                {"xinput1_3.dll", &ExportHooks<1>::install},
+                {"xinput9_1_0.dll", &ExportHooks<2>::install}};
+    for (int i = 0; i < 3; ++i) {
+        HMODULE m = done[i] ? nullptr : GetModuleHandleA(dlls[i].dll);
+        if (!m) continue;
+        done[i] = true;
+        log("xinput: %s exports %s (for calls from managed code)", dlls[i].dll, dlls[i].install(m) ? "hooked" : "could not be hooked");
+    }
+}
+
 void watch() {
     t_watcher = true;
     GetState_t real = original(g_get_state, "XInputGetState", "xinput1_4.dll");
@@ -593,6 +647,7 @@ void watch() {
         }
         if (g_real_mask.exchange(mask) != mask) log("xinput: real XInput controllers in slots 0x%X (bit per slot)", mask);
         if (g_settings.mode == Auto) scan_modules();
+        if (g_settings.export_hooks && !hooks::inline_mode()) export_hooks_pass();
         if (g_settings.trace) trace_pass();
         hooks::verify();  // an overlay may rewrite the game's XInput imports after Gyro4All patched them (Mortal Shell: EOS)
         g_watch_ready = true;
@@ -722,6 +777,13 @@ bool right_stick_pushed() {
     std::lock_guard lock(g_mutex);
     const int quarter = 32767 / 4;
     return g_exposed && (std::abs(g_state.Gamepad.sThumbRX) > quarter || std::abs(g_state.Gamepad.sThumbRY) > quarter);
+}
+
+bool shown_buttons(uint16_t& buttons) {
+    std::lock_guard lock(g_mutex);
+    if (!g_exposed || !g_enabled) return false;
+    buttons = g_state.Gamepad.wButtons;
+    return true;
 }
 
 void listed_as_xinput(uint16_t vendor, uint16_t product, bool wait) {
