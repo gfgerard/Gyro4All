@@ -5,6 +5,19 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-08 **RDR2 (`kSettingAPI_Vulkan` in `system.xml`): GyroLib's panel shows but not the "Gyro4All settings" window; fix
+  built, in-game test pending.** The log has no `captured Vulkan swapchain` line: the panel goes through the DXGI path
+  (`captured D3D12 swapchain`, `gyro4all.dll loaded (DX12: the Gyro4All window)`; why a Vulkan setting ends on a D3D12
+  swapchain is not established, a driver present layered on DXGI is only a guess). The game captures a swapchain for
+  window `...090E6C`, then 2.5 s later another for `...0A0E6C` (same handle slot, new uniquifier: the first window was
+  destroyed). GyroLib's overlay moves to the new swapchain. gyro4all.dll stayed on the dead HWND: `follow_window` only saw
+  `g_window`, which the DX12 path never set, and `api_set_window` refused DX12 mode. So `ImGui_ImplWin32_NewFrame`'s
+  `GetClientRect` failed, `io.DisplaySize` was 0x0 and `ImGui_ImplDX12_RenderDrawData` returned at once (no error, the
+  renderer reads as ready). The window messages stayed subclassed on the dead window too. Fix: `overlay::attach` passes
+  the captured DX12 window to `panel_host::follow_window(dx12_window)` (a D3D10/D3D11 swapchain the game also makes does
+  not move a DX12 panel), and `api_set_window` accepts DX12 mode. Expect `the panel's input moves from window ... to
+  window ...` in the log.
+
 - 2026-11-07 **DUSK (Steam, Unity Mono x64): controller fixed with the game's own `controllermode = ds4`; no code change.**
   Symptom (DualSense, Steam Input not in use): menu buttons mixed up, and in game the view looked up and spun. Not
   Gyro4All's XInput: the log has `DualSense ... not shown: it imports the HID library` (UnityPlayer.dll imports hid.dll

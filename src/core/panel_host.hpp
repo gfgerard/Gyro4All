@@ -41,8 +41,9 @@ bool attach(gl_context* ctx);
 // the captured DX12 swapchain's). The panel draws through dx12_present, after GyroLib's DX12 overlay.
 bool attach_dx12(gl_context* ctx, HWND window);
 // Game thread, after attach: the window the game presents to now when it isn't the panel's any more (the panel's input
-// moved there), else nullptr.
-HWND follow_window();
+// moved there), else nullptr. dx12_window: the captured DX12 swapchain's window when the panel is in its DX12 mode (a
+// D3D10/D3D11 swapchain the game also makes doesn't move it), else nullptr.
+HWND follow_window(HWND dx12_window);
 const g4a_api* api();
 HWND window();
 

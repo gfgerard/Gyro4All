@@ -402,9 +402,9 @@ bool attach_dx12(gl_context* ctx, HWND window) {
     return true;
 }
 
-HWND follow_window() {
+HWND follow_window(HWND dx12_window) {
     const g4a_api* a = g_api.load();
-    const HWND window = g_window.load();
+    const HWND window = dx12_window ? dx12_window : g_window.load();
     if (!a || !window || window == g_panel_window || !IsWindow(window)) return nullptr;
     if (a->set_window(window) != G4A_OK) {
         g_panel_window = window;  // tried once: the panel stays where it was

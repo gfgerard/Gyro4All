@@ -261,7 +261,7 @@ int32_t api_create(gl_context* ctx, void* hwnd, g4a_log_fn log_fn, const g4a_set
 }
 
 int32_t api_set_window(void* hwnd) {
-    if (!g_panel || !hwnd) return G4A_UNAVAILABLE;
+    if ((!g_panel && !g_dx12) || !hwnd) return G4A_UNAVAILABLE;
     if (hwnd == g_hwnd) return G4A_OK;
     Lock lock;
     ImGui_ImplWin32_Shutdown();

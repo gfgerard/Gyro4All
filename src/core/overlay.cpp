@@ -1435,7 +1435,14 @@ void attach_bridge(gl_context* ctx) {
 bool attach(gl_context* ctx) {
     if (!g_enabled) return false;
     if (panel_host::api()) {  // the panel DLL is in (the static panel came first, or the DX12 window below)
-        if (HWND moved = panel_host::follow_window()) {
+        // A DX12 panel follows the captured swapchain's window: the game can destroy the first one and make another
+        // (RDR2), and a panel left on the dead window has a client area of 0x0 and draws nothing.
+        HWND dx12_window = nullptr;
+        if (g_overlay.load()) {
+            std::lock_guard lock(g_mutex);
+            dx12_window = g_hwnd;
+        }
+        if (HWND moved = panel_host::follow_window(dx12_window)) {
             unsubclass();
             subclass(moved);
         }
