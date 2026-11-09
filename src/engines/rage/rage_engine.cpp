@@ -36,13 +36,18 @@ bool exists(const std::wstring& path) { return GetFileAttributesW(path.c_str()) 
 
 Engine::FrameFn g_frame = nullptr;
 
-bool camera_forward(float (&row)[3]);
+// What a camera update changes in the active camera's frame.
+struct CameraPose {
+    float forward[3], position[3];
+};
+bool camera_pose(CameraPose& pose);
 
 // One gyro frame right after each game camera update, so every update takes exactly one turn: on a free-running 4 ms
 // timer, 4 or 5 turns reached each 60 FPS update and the gyro's per-frame steps varied about 20% (the stick's 2%), seen
-// as flicker on slow pans (MODLOG 2026-11-03). The update shows as a change of the active camera's frame forward row,
-// which the gyro's own writes leave alone (it writes the front); polled every 1 ms. A second change within 6 ms is the
-// same update; without one for 20 ms (still view, loading) the frame runs anyway.
+// as flicker on slow pans (MODLOG 2026-11-03). The update shows as a change of the active camera's frame forward row or
+// position, polled every 1 ms: the first-person camera keeps the gyro's turn in that row, so an update can leave the row
+// as it was and only move the position (MODLOG 2026-11-10). A second change within 6 ms is the same update; without one
+// for 20 ms (still view, loading) the frame runs anyway.
 DWORD WINAPI frame_thread(void*) {
     HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
     log("rage: gyro frame thread %lu, after each camera update (%s timer)", GetCurrentThreadId(),
@@ -50,24 +55,24 @@ DWORD WINAPI frame_thread(void*) {
     LARGE_INTEGER freq, now, last_update{}, last_frame{};
     QueryPerformanceFrequency(&freq);
     const auto ms = [&](const LARGE_INTEGER& t) { return double(now.QuadPart - t.QuadPart) * 1000 / double(freq.QuadPart); };
-    float seen[3]{};
+    CameraPose seen{};
     for (;;) {
         LARGE_INTEGER due{};
         due.QuadPart = -10000;  // 1 ms, in 100 ns units
         if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, INFINITE);
         else Sleep(1);
         QueryPerformanceCounter(&now);
-        float row[3];
+        CameraPose pose;
         bool run = false;
-        if (camera_forward(row) && memcmp(row, seen, sizeof row) != 0) {
-            memcpy(seen, row, sizeof row);
+        if (camera_pose(pose) && memcmp(&pose, &seen, sizeof pose) != 0) {
+            seen = pose;
             if (ms(last_update) >= 6) run = true;
             last_update = now;
         }
         if (!run && ms(last_frame) < 20) continue;
         last_frame = now;
         g_frame();
-        if (camera_forward(row)) memcpy(seen, row, sizeof row);  // the binoculars' frame write isn't an update
+        if (camera_pose(pose)) seen = pose;  // the gyro's own write to a frame (first person, binoculars) isn't an update
     }
 }
 
@@ -152,10 +157,10 @@ uintptr_t active_camera() {
     return d ? mem::rdp(d + kActiveCamera) : 0;
 }
 
-// The active camera's frame forward row, which the game writes once per camera update.
-bool camera_forward(float (&row)[3]) {
+// The active camera's frame forward row and position, which the game writes once per camera update.
+bool camera_pose(CameraPose& pose) {
     const uintptr_t cam = active_camera();
-    return cam && mem::rd(cam + kFrame + 0x10, row);
+    return cam && mem::rd(cam + kFrame + 0x10, pose.forward) && mem::rd(cam + kFrame + 0x30, pose.position);
 }
 
 // The camera's front as heading (radians, grows to the left) and pitch (radians, up); false without a camera.
