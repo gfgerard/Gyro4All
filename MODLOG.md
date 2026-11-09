@@ -8264,3 +8264,21 @@ heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 1
     and deployed. Tested in game by the user (on foot, fast turns, a car, a scene): works well. Log over about 6 min:
     8 "on foot -> cinematic" flips (single frames, seconds apart) instead of 303 in 3.5 min; scenes and the car camera
     are still detected; `perf:` 114-122 us average.
+
+## 2026-11-09 S.T.A.L.K.E.R. 2 (Steam, Unreal): false "DualSense ignored" at start
+
+- DualSense USB, no Steam Input, `XInput=1` (user: the game supports the DualSense natively and it works). Gyro: generic
+  `ControlRotation`, `camera: confirmed` in the view `Exploration`, about 9 min in game.
+- The game imports `HID.DLL` but no `libScePad`; it opens and closes the DualSense during startup (partly through
+  `dinput8.dll`), registers Raw Input usage 4/5 at about +6 s and keeps a handle and reads report 0x01 at +7 to +11 s from
+  the first open. It then opens and closes another handle every 0.5 s for as long as it runs.
+- Bug: `dualsense_closed_unread()` gave up after 5 s, so auto mode showed the DualSense as XInput for 2 to 6 s
+  (`not shown` -> `shown as XInput controller 0` -> `not shown: it registers Raw Input`), with two `WM_DEVICECHANGE` and two
+  notices, and with no profile value `learn_dualsense` wrote `DualSenseAsDualShock4=1`, `Learned=1`. An existing `=0` in the
+  profile stops that write.
+- Fix: the wait is 30 s when `hid.dll` among the imports is the only Sony sign (`xinput::sony_hid_import_only()`), still 5 s
+  with `libScePad` or with no Sony sign (Titanfall 2). Requiring `libScePad` for learning would not work: Mortal Shell and
+  others link Sony's library into the exe and only show as `hid.dll`. Cost: those games get the translated controller or
+  the learned DualShock 4 identity up to 25 s later. Also: the HID sign's text says "maybe Sony's pad library"; only the
+  first 60 controller open/close lines are logged (they were 85% of this game's log).
+- Built, 1034 unit checks pass. Not tested in game yet; no version bump.

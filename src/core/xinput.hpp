@@ -27,6 +27,10 @@ struct Settings {
 // The game links Sony's pad library (auto mode's check: libScePad or hid.dll among its imports, or libScePad loaded).
 bool sony_library();
 
+// That sign is only hid.dll among the imports, no libScePad seen: Unreal's RawInput plugin looks the same, and it
+// enumerates controllers well before it reads one (S.T.A.L.K.E.R. 2).
+bool sony_hid_import_only();
+
 // Whether the controller is shown to the game as XInput at all (XInput= not 0, and the hooks could be installed).
 bool translates();
 

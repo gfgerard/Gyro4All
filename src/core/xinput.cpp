@@ -476,7 +476,7 @@ void check_imports() {
         // Mortal Shell, Jedi: Fallen Order: the same HidD_* set as libScePad.dll). UE's RawInput plugin imports it too,
         // but it also registers Raw Input for game controllers, a sign for any controller.
         if (name == "hid.dll")
-            native_sign("it imports the HID library (" + dll.name + how + ", Sony's pad library)", Sony);
+            native_sign("it imports the HID library (" + dll.name + how + ", maybe Sony's pad library)", Sony);
     }
 }
 
@@ -770,6 +770,8 @@ void stop_rumble(SDL_Gamepad* pad) {
 }  // namespace
 
 bool sony_library() { return g_native[Sony]; }
+
+bool sony_hid_import_only() { return g_native[Sony] && !g_sony_library; }
 
 bool translates() { return g_settings.mode != Off; }
 

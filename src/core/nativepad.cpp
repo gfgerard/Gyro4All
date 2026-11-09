@@ -3,6 +3,7 @@
 #include "hooks.hpp"
 #include "log.hpp"
 #include "settings.hpp"
+#include "xinput.hpp"
 
 #include <windows.h>
 #include <hidsdi.h>
@@ -211,6 +212,19 @@ bool is_dualsense(uint16_t vendor, uint16_t product) {
     return vendor == kSony && (product == 0x0CE6 || product == 0x0DF2);  // DualSense, DualSense Edge
 }
 
+// The first opens and closes of controller handles are logged; some games reopen the controller for as long as they
+// run (S.T.A.L.K.E.R. 2: every 0.5 s, 85% of a log). Called with g_mutex held.
+bool log_handle_change() {
+    constexpr int kLogged = 60;
+    static int count = 0;
+    if (count > kLogged) return false;
+    if (++count > kLogged) {
+        log("nativepad: more controller opens and closes follow, not logged");
+        return false;
+    }
+    return true;
+}
+
 void track(HANDLE h, uint16_t vendor, uint16_t product, bool ds4, bool bluetooth) {
     const HIDP_CAPS caps = device_caps(h);
     const DWORD length = caps.InputReportByteLength;
@@ -233,8 +247,9 @@ void track(HANDLE h, uint16_t vendor, uint16_t product, bool ds4, bool bluetooth
         d.counter = 0;
         d.handle.store(h, std::memory_order_release);
         ++g_device_count;
-        log("nativepad: the game opened controller %04X:%04X (handle %p, %lu-byte input reports)%s", vendor, product, h,
-            length, ds4 ? (bluetooth ? ", Bluetooth, shown to it as a USB DualShock 4" : ", shown to it as a DualShock 4") : "");
+        if (log_handle_change())
+            log("nativepad: the game opened controller %04X:%04X (handle %p, %lu-byte input reports)%s", vendor, product, h,
+                length, ds4 ? (bluetooth ? ", Bluetooth, shown to it as a USB DualShock 4" : ", shown to it as a DualShock 4") : "");
         return;
     }
     log("nativepad: more than %d controller handles open; %04X:%04X not followed", kMaxDevices, vendor, product);
@@ -251,7 +266,8 @@ void untrack(HANDLE h) {
             p = {};
             --g_pending_count;
         }
-    log("nativepad: the game closed controller %04X:%04X (handle %p)", g_devices[i].vendor, g_devices[i].product, h);
+    if (log_handle_change())
+        log("nativepad: the game closed controller %04X:%04X (handle %p)", g_devices[i].vendor, g_devices[i].product, h);
 }
 
 void remember(OVERLAPPED* ol, HANDLE h, void* buffer, DWORD size) {
@@ -1317,11 +1333,14 @@ uint16_t hid_path_id(const wchar_t* path, const wchar_t* key) { return path ? pa
 
 namespace {
 
-// The game opened a DualSense (as itself or as a DualShock 4), closed it again unread and has none open 5 s later.
+// The game opened a DualSense (as itself or as a DualShock 4), closed it again unread and has none open some time later:
+// 5 s with Sony's library seen, 30 s when the only sign is hid.dll among the imports (S.T.A.L.K.E.R. 2 enumerates at
+// start and reads the DualSense natively 7 to 11 s after its first open).
 bool dualsense_closed_unread() {
     if (g_dualsense_read) return false;
     const ULONGLONG opened = g_dualsense_opened;
-    if (!opened || GetTickCount64() - opened < 5000) return false;
+    const ULONGLONG wait = xinput::sony_hid_import_only() ? 30000 : 5000;
+    if (!opened || GetTickCount64() - opened < wait) return false;
     for (Device& d : g_devices)  // a DualSense handle still open: the game took it (it may read it later)
         if (d.handle.load(std::memory_order_acquire) && is_dualsense(d.vendor, d.product)) return false;
     return true;

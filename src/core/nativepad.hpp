@@ -26,8 +26,9 @@ namespace gyro4all::nativepad {
 // it (DualSenseAsDualShock4Learned=1 next to it), so it may take it back (learned_ds4_rejected).
 void install(bool suppression, bool dualsense_as_ds4, bool learned);
 
-// The game opened a DualSense, closed it again unread and has none open 5 s later: its own PlayStation support doesn't
-// take the DualSense (only the DualShock 4). False with dualsense_as_ds4 or once the game read a DualSense.
+// The game opened a DualSense, closed it again unread and has none open 5 s later (30 s when hid.dll among the imports
+// is the only sign of Sony's library): its own PlayStation support doesn't take the DualSense (only the DualShock 4).
+// False with dualsense_as_ds4 or once the game read a DualSense.
 bool dualsense_ignored();
 
 // The same with the DualShock 4 identity Gyro4All learned itself: the game rejected the emulation too (RE7 finds its
