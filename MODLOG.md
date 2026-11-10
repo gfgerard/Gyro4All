@@ -5,6 +5,48 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-10 **Cyberpunk 2077: GyroLib's flick stick (defaults, duration 150 ms; NativeFlickStick=1) turned only 20-50
+  degrees instead of 90/180 (user report).** Sensor pacer ruled out (the real `sensor_pacer.cpp` over a simulated 90 degree
+  flick delivers it all; here it runs in GyroLib's burst mode anyway) and REDengine's `limit_turn` doesn't limit on-foot yaw.
+  Read-only sampler `games/Cyberpunk2077/flick_sampler.py` (body heading at ~1 kHz against the status lines' `applied yaw`):
+  the body turned exactly what Gyro4All wrote (-8.5 vs +8.5 over 30 s, no steps back), so no writes lost; the turns were
+  +35, -21, -50, +27 degrees in 17-79 ms, i.e. GyroLib's flick itself ended early. Cause, in the log: every flick logged
+  `camera on foot -> cinematic` and back 1-2 ms later. The view is classified by matching the FPP camera's orientation
+  with the active camera data, a copy a frame older; the matched camera's tolerance (`kContinueDot`, ~20 degrees, MODLOG
+  2026-11-05) is less than a flick's turn between them, so one frame read as cinematic (view 0) and GyroLib cancelled the
+  flick there. Fix (`red_engine.cpp`): the tolerance of the camera matched last frame is 20 degrees plus the turn Gyro4All
+  wrote in the last 100 ms (`note_own_turn` in `apply`). Builds, 1034 checks; user-tested: flicks turn the full 90 and 180 degrees again (DualSense, native pad flick stick; the XInput route is not tested). Repeated left-right flicks drifting a few degrees is GyroLib's free pivot plus circular turning (`flick.snap=0`, `flick.style=0`), not a loss: `flick.snap` 1 or 2 with `flick.style=1` makes them return exactly.
+- 2026-11-10 **Cyberpunk 2077: sitting on a chair (a workspot) turned the view in little steps and drifted (gyro Always
+  On).** Log: `can't write the first-person view (neither on foot nor seated): gyro as right stick`, then the blind stick
+  fallback (default dead zone 0.20 / curve 1.50: pulses to get past the dead zone, and any leftover motion integrated by
+  the game; GyroLib's bias read 0 for a while after two `gyrolib.ini` reloads from the panel, not investigated).
+  Read-only sampler (`games/Cyberpunk2077/chair_sampler.py`, ReadProcessMemory every 50 ms; follows the FPP camera's
+  address in the log, since the game replaces the player's camera at some transitions). On the chair: moveComponent
+  `+0x158` 0, FPP `+0x400` 0 (so neither on foot nor in a vehicle seat), FPP `+0x418` 1 (0 on foot, 1 seated), FPP
+  `+0x454`/`+0x460` 7/50. The look node turns the head as in a vehicle seat: yaw `+0x1AC` and pitch `+0x1B0`, read back at
+  FPP `+0x42C`/`+0x430`, clamped to the FPP limits `+0x3E0`/`+0x3E4` (-47.3/58.6) and `yawMaxLeft/Right` `+0x3E8`/`+0x3EC`
+  (62.3/-57.7; yaw grows to the left; the look yaw stopped at 62.3 and -57.6). Held 11.2 degrees for 6 s with the stick
+  released: no recentring. Sitting down (~3 s) and getting up (~3 s) the limits ramp (+-80/+-180 <-> the chair's) and FPP
+  `+0x430` stays frozen while the look node moves (the camera follows the animation). Fix (`red_engine.cpp`): chair =
+  `+0x158` 0, `+0x400` 0, `+0x418` 1; written like the seat (look yaw + pitch) within the FPP's yaw and pitch limits, only
+  once the limits have held 300 ms and the look node's totals (`+0x1BC`/`+0x1C0`) match the FPP outputs within 10 degrees;
+  no nudges. And whenever the FPP camera is active but its sources can't be written (sitting down, getting up, states not
+  known yet) the gyro is off (no gameplay view) instead of the blind stick fallback (`... : gyro off`); the status line says
+  why. On-foot view (view 1) on the chair. Builds, 1034 checks; not tested in game yet; `Gyro4All-v1.11.0.zip` repackaged.
+- 2026-11-10 **Cyberpunk 2077 (1.10.1, user report): no gyro on foot, `view=cinematic` and `gyro enabled=0` the whole
+  session (L2 hold and Always On both).** The log: `gameFPPCameraComponent keeps the active camera's orientation at +0xd0`,
+  then `camera on foot -> cinematic` 170 ms later; "on foot" again only for under a second at two moments in 10 min.
+  Our 2.50 test had learnt **+0xF0** (world orientation). +0xD0 is `entIPlacedComponent.localTransform`'s orientation
+  (relative to the PlayerPuppet), equal to the world one only while the player faces world heading ~0, as on the first
+  frame here. `orientation_offset` kept the first offset that matched on one frame, scanning up from +0x90, for that
+  class for good. Fix (`red_engine.cpp`): an offset is kept only after it matched through a 10 degree heading sweep;
+  until then any offset matching this frame counts (gyro on right away). The vehicles' third-person camera ("matched once
+  then not") was likely the same bug: if it is learnt now, it reports no gameplay view (no gyro, no stick fallback), as
+  before. Also: the FPP camera learns only on foot (FPP `+0x400` = 0; seated, a head turn in a vehicle facing heading 0
+  would sweep the local orientation too), and a kept offset that stops matching is replaced by another that matches
+  through the same 10 degree sweep (`... at +0x.. now (... +0x.. stopped matching)`), so a wrong one can't last the
+  session; after an offset is kept, other offsets don't count until they replace it. Builds, 1034 checks; not tested in game. `Gyro4All-v1.11.0.zip` repackaged with this fix (version kept at
+  1.11.0 on the user's choice; the zip also carries the uncommitted Glacier look changes in the working tree).
 - 2026-11-08 **RDR2 (`kSettingAPI_Vulkan` in `system.xml`): GyroLib's panel shows but not the "Gyro4All settings" window; fix
   built, in-game test pending.** No `captured Vulkan swapchain` line: the panel goes through DXGI (`captured D3D12
   swapchain`; why a Vulkan setting ends on D3D12 is not established). The game captures a swapchain for one window, 2.5 s

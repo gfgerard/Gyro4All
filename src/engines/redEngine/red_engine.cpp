@@ -132,6 +132,13 @@ constexpr uintptr_t kLookFov = 0x1A8, kLookPitch = 0x1B0, kLookPitchExtra = 0x1B
 // +0x158 is 0 (1 on foot) and FPP +0x400 is 1 (0 on foot).
 constexpr uintptr_t kLookYaw = 0x1AC, kLookYawExtra = 0x1B4, kLookYawTotal = 0x1BC, kFppYawOut = 0x42C;
 constexpr uintptr_t kMoverBodyFollowsInput = 0x158, kFppSeated = 0x400;
+// Sitting on a chair (a workspot; sampled in game, MODLOG 2026-11-10): moveComponent +0x158 0 and FPP +0x400 0 (neither
+// on foot nor seated in a vehicle), FPP +0x418 1 (also 1 in a vehicle seat, 0 on foot). The look node turns the head
+// as in a vehicle seat (yaw +0x1AC, pitch +0x1B0, read back at FPP +0x42C/+0x430), within the FPP camera's limits:
+// pitchMin/Max +0x3E0/+0x3E4 (-47.3/58.6 on that chair) and yawMaxLeft/Right +0x3E8/+0x3EC (62.3/-57.7; the yaw grows
+// to the left). No recentring. Sitting down and getting up the limits ramp and the camera doesn't follow the look node.
+constexpr uintptr_t kFppLookDriven = 0x418, kFppYawMaxLeft = 0x3E8, kFppYawMaxRight = 0x3EC;
+constexpr ULONGLONG kChairSettleMs = 300;  // the limits unchanged this long before the chair's view is written
 constexpr uintptr_t kFppSeatedCombatA = 0x454, kFppSeatedCombatB = 0x460;  // 10 / 50 driving, 0 with a weapon out
 constexpr int kSeatedNudgeFrames = 6;   // stick frames shown when a weapon is drawn in the seat
 constexpr float kSeatedNudge = 0.2f;    // their deflection, alternating sides
@@ -420,6 +427,14 @@ constexpr double kSameDot = 0.9995;  // within about 3.6 degrees: the copy may b
 // the one-frame lag failed the strict test, and the view flipped to "cinematic" and back for one frame, with the gyro
 // off, up to 32 times a second (MODLOG 2026-11-05). A real switch to another camera still fails it, or fails it soon.
 constexpr double kContinueDot = 0.985;
+// Plus the turn Gyro4All wrote in the last kOwnTurnWindowMs: a flick stick turn (90 degrees in GyroLib's 150 ms) puts more
+// than 20 degrees between the component and the copy, the view read as "cinematic" for one frame, and that frame's
+// view 0 ended GyroLib's flick there: flicks stopped after 20-50 degrees (MODLOG 2026-11-10).
+constexpr double kContinueDegrees = 20;
+constexpr ULONGLONG kOwnTurnWindowMs = 100;
+
+// The dot product of two unit quaternions that are `degrees` apart.
+double dot_within(double degrees) { return cos(std::fmin(degrees, 360.0) * 3.14159265358979323846 / 360); }
 
 bool same_orientation(const float (&a)[4], const float (&b)[4], double min_dot = kSameDot) {
     const double dot = double(a[0]) * b[0] + double(a[1]) * b[1] + double(a[2]) * b[2] + double(a[3]) * b[3];
@@ -531,18 +546,28 @@ public:
         // person cameras (not found yet) it is the right stick.
         const std::string why = fpp_ ? resolve_sources() : std::string("not in first person");
         sources_ok_ = why.empty();
-        if (why != sources_why_) {
-            if (sources_ok_ && seated_)
+        const std::string mode = !sources_ok_ ? why : chair_ ? "chair" : seated_ ? "seated" : "on foot";
+        if (mode != sources_why_) {
+            if (sources_ok_ && chair_)
+                log("red: writing the view: on a chair, look yaw and pitch at %s (%.2f) within its limits",
+                    mem::module_offset(look_).c_str(), look_pitch());
+            else if (sources_ok_ && seated_)
                 log("red: writing the view: seated, look yaw and pitch at %s (%.2f)", mem::module_offset(look_).c_str(),
                     look_pitch());
             else if (sources_ok_)
                 log("red: writing the view: body yaw at %s, look pitch at %s (%.2f)", mem::module_offset(body_).c_str(),
                     mem::module_offset(look_).c_str(), look_pitch());
             else if (fpp_)
-                log("red: can't write the first-person view (%s): gyro as right stick", why.c_str());
-            sources_why_ = why;
+                log("red: can't write the first-person view (%s): gyro off", why.c_str());
+            sources_why_ = mode;
         }
         f.no_camera = !sources_ok_;
+        // The FPP camera is active but its sources can't be written now (sitting down, getting up, a state not known
+        // yet): no gyro. The blind stick fallback turned in little steps there and drifted (MODLOG 2026-11-10).
+        if (fpp_ && !sources_ok_) {
+            f.view_id = 0;
+            f.no_camera = false;
+        }
         // Seated in a vehicle (first person): no gyro and no stick fallback while driving; with a weapon drawn (aiming
         // from the seat) the look yaw and pitch are written, never the stick.
         const bool drawn = fpp_ && seated_ && seated_weapon_drawn();
@@ -578,6 +603,11 @@ public:
             f.stick_nudge_x = (nudge_frames_ % 2) ? kSeatedNudge : -kSeatedNudge;
             --nudge_frames_;
         }
+        // The vehicles' third-person cameras: no sources found, and no gyro or stick fallback while driving.
+        if (!fpp_ && (kind == Kind::Car || kind == Kind::Motorcycle)) {
+            f.view_id = 0;
+            f.no_camera = false;
+        }
         if (fpp_ && seated_ && !(drawn && sources_ok_)) {
             f.view_id = 0;
             f.no_camera = false;
@@ -593,7 +623,14 @@ public:
     // Keeps the pitch within the FPP camera's limits (the look node clamps to its own, the same +-80 in 2.50).
     void limit_turn(double& pitch, double& yaw) override {
         if (!sources_ok_) return;
-        if (seated_ && yaw != 0) {
+        if (chair_ && yaw != 0) {
+            float now = 0, left = 0, right = 0;  // the yaw grows to the left: a right turn lowers it, down to `right`
+            if (rd(look_ + kLookYaw, now) && rd(fpp_ + kFppYawMaxLeft, left) && rd(fpp_ + kFppYawMaxRight, right) &&
+                left > 0 && left <= 180 && right < 0 && right >= -180) {
+                if (yaw > 0) yaw = std::fmax(0.0, std::fmin(yaw, double(now) - right));
+                else yaw = std::fmin(0.0, std::fmax(yaw, double(now) - left));
+            }
+        } else if (seated_ && yaw != 0) {
             float now = 0;
             if (rd(look_ + kLookYaw, now)) {  // the yaw goes down to the right
                 if (yaw > 0) yaw = std::fmax(0.0, std::fmin(yaw, double(now) + kLookYawLimit));
@@ -612,7 +649,7 @@ public:
     bool apply(double pitch, double yaw) override {
         if (!sources_ok_) return false;
         bool ok = true;
-        if (yaw != 0 && seated_) {
+        if (yaw != 0 && (seated_ || chair_)) {
             float y = 0;
             ok = rd(look_ + kLookYaw, y);
             if (ok) {
@@ -636,6 +673,7 @@ public:
             const float p = float(look_pitch() + pitch);
             ok = store(look_ + kLookPitch, &p, sizeof p);
         }
+        if (ok) note_own_turn(fabs(yaw) + fabs(pitch));
         return ok;
     }
 
@@ -651,7 +689,10 @@ public:
     std::string status_scene() const override {
         if (cursor_) return "view=menu (cursor)";
         return std::string("view=") + kind_name(kind_) + active_desc_ +
-               (!sources_ok_ ? " (gyro as right stick)" : seated_ ? " (seated: look yaw + pitch)" : " (body yaw + look pitch)");
+               (!sources_ok_ ? (fpp_ ? " (gyro off: " + sources_why_ + ")" : std::string(" (gyro as right stick)"))
+                : chair_    ? std::string(" (chair: look yaw + pitch)")
+                : seated_   ? std::string(" (seated: look yaw + pitch)")
+                            : std::string(" (body yaw + look pitch)"));
     }
 
 private:
@@ -678,10 +719,28 @@ private:
         return rd(look_ + kLookPitch, p) ? p : 0;
     }
 
+    // The turn written in the last kOwnTurnWindowMs, in 10 ms buckets (an upper bound of how far the active camera's
+    // copy can trail the component it copies because of our own writes).
+    void note_own_turn(double degrees) {
+        const ULONGLONG slot = GetTickCount64() / 10;
+        if (own_turn_slot_[slot % kOwnTurnSlots] != slot) {
+            own_turn_slot_[slot % kOwnTurnSlots] = slot;
+            own_turn_[slot % kOwnTurnSlots] = 0;
+        }
+        own_turn_[slot % kOwnTurnSlots] += degrees;
+    }
+    double own_turn() const {
+        const ULONGLONG slot = GetTickCount64() / 10;
+        double sum = 0;
+        for (size_t i = 0; i < kOwnTurnSlots; ++i)
+            if (own_turn_slot_[i] + kOwnTurnSlots > slot) sum += own_turn_[i];
+        return sum;
+    }
+
     // Finds and checks the on-foot view's sources (constants above); "" when both can be written, else why not.
     std::string resolve_sources() {
         body_ = look_ = 0;
-        seated_ = false;
+        seated_ = chair_ = false;
         if (!fpp_ || !is_a(fpp_owner_, h("PlayerPuppet"))) return "no player FPP camera";
         // Yaw: the mover's body orientation.
         if (fpp_owner_ != mover_owner_ || class_hash(mover_) != h("moveComponent")) {
@@ -694,13 +753,34 @@ private:
         if (!mover_) return "no moveComponent";
         uint32_t mode = 0;
         uint8_t mover_on = 0;
-        uint32_t follows = 0, seated = 0;
-        if (!rd(mover_ + kMoverBodyFollowsInput, follows) || !rd(fpp_ + kFppSeated, seated) || follows > 1 || seated > 1 ||
-            follows == seated)
+        uint32_t follows = 0, seated = 0, look_driven = 0;
+        if (!rd(mover_ + kMoverBodyFollowsInput, follows) || !rd(fpp_ + kFppSeated, seated) || follows > 1 || seated > 1)
             return "neither on foot nor seated";
+        chair_ = follows == 0 && seated == 0 && rd(fpp_ + kFppLookDriven, look_driven) && look_driven == 1;
+        if (follows == seated && !chair_) return "neither on foot nor seated";
         seated_ = seated != 0;
         const uintptr_t look = look_node();
         if (!look) return "no animation graph";
+        if (chair_) {
+            // Sitting down or getting up: the limits ramp; written only once they have held still a while.
+            float limits[4] = {};
+            if (!rd(fpp_ + kFppPitchMin, limits)) return "the chair's view limits can't be read";
+            const ULONGLONG now = GetTickCount64();
+            if (memcmp(limits, chair_limits_, sizeof limits) != 0) {
+                memcpy(chair_limits_, limits, sizeof limits);
+                chair_limits_since_ = now;
+            }
+            if (now - chair_limits_since_ < kChairSettleMs) return "sitting down or getting up";
+            float yaw_total = 0, pitch_total = 0, yaw_out = 0, pitch_out = 0;
+            if (!rd(look + kLookYawTotal, yaw_total) || !rd(look + kLookPitchTotal, pitch_total) ||
+                !rd(fpp_ + kFppYawOut, yaw_out) || !rd(fpp_ + kFppPitchOut, pitch_out))
+                return "the look node can't be read";
+            // The game's own values of the same frame (unaffected by our write): the camera follows the look node.
+            if (!(fabs(yaw_total - yaw_out) < 10 && fabs(pitch_total - pitch_out) < 10))
+                return "the camera doesn't follow the look node now";
+            look_ = look;
+            return "";
+        }
         if (seated_) {
             float yaw = 0, extra = 0, total = 0, out = 0;
             if (!rd(look + kLookYaw, yaw) || !rd(look + kLookYawExtra, extra) || !rd(look + kLookYawTotal, total) ||
@@ -810,26 +890,91 @@ private:
 
     // The offset where a component of this class stores the orientation the active camera data copies, learnt by
     // matching (16-byte aligned quaternions in the component); 0 = not found.
+    // An offset is kept only once it has matched while the view's heading swept kLearnSweep degrees: the component's
+    // local orientation (entIPlacedComponent.localTransform, +0xD0 in the FPP camera, relative to the player) equals the
+    // world one (+0xF0) whenever the player faces heading 0, and a first build that kept the first match learnt +0xD0
+    // for good on such a frame, so the on-foot view read as a cinematic (gyro off) at every other heading. Until one
+    // is kept, every offset that matches this frame counts.
+    // The FPP camera learns only on foot: seated, the body follows the vehicle and the head turns, so in a vehicle facing
+    // heading 0 the local orientation would follow a head turn as the world one does.
+    // A kept offset that stops matching is replaced by another that matches through the same sweep (logged), so a
+    // wrong one can't stay for the session; until then the camera doesn't match (no provisional matches once kept).
+    static constexpr double kLearnSweep = 10;
+    struct Learning {
+        uintptr_t off;
+        double last_yaw;     // the heading at the last match
+        double heading = 0;  // unwrapped, relative to the first match
+        double lo = 0, hi = 0;
+    };
     uintptr_t orientation_offset(const Candidate& c, bool matched_last_frame = false) {
+        uintptr_t kept_off = 0;
         if (const auto it = orientation_at_.find(c.cls); it != orientation_at_.end()) {
             float q[4];
             if (it->second && rd(c.component + it->second, q) &&
-                same_orientation(q, active_.q, matched_last_frame ? kContinueDot : kSameDot))
+                same_orientation(q, active_.q,
+                                 matched_last_frame ? std::fmin(kContinueDot, dot_within(kContinueDegrees + own_turn()))
+                                                    : kSameDot)) {
+                if (const auto l = learning_.find(c.cls); l != learning_.end()) learning_.erase(l);
                 return it->second;
-            return 0;
+            }
+            kept_off = it->second;
         }
+        bool may_learn = true;
+        if (c.cls == h("gameFPPCameraComponent")) {
+            uint32_t seated = 1;
+            may_learn = rd(c.component + kFppSeated, seated) && seated == 0;
+        }
+        const uintptr_t found = learn(c, kept_off, may_learn);
+        if (!kept_off) return found;  // not kept yet: any match counts
+        if (const auto it = orientation_at_.find(c.cls); it != orientation_at_.end() && it->second != kept_off)
+            return it->second;  // replaced this frame
+        return 0;
+    }
+
+    // Matches the component's quaternions against the active camera (skipping `skip`) and tracks the heading each
+    // matching offset has followed; one that has swept kLearnSweep degrees becomes the class's offset. Returns the
+    // first offset that matched this frame, 0 if none.
+    uintptr_t learn(const Candidate& c, uintptr_t skip, bool may_learn) {
+        double pitch, yaw;
+        angles(active_.q, pitch, yaw);
+        std::vector<Learning>& learning = learning_[c.cls];
+        std::vector<Learning> kept;
+        uintptr_t first = 0;
         for (uintptr_t off = 0x90; off + 16 <= kComponentSize; off += 0x10) {
+            if (off == skip) continue;
             float q[4];
             if (!rd(c.component + off, q)) break;
             const double n = double(q[0]) * q[0] + double(q[1]) * q[1] + double(q[2]) * q[2] + double(q[3]) * q[3];
-            if (fabs(n - 1.0) < 0.01 && same_orientation(q, active_.q)) {
+            const Learning* was = nullptr;
+            for (const Learning& l : learning)
+                if (l.off == off) was = &l;
+            if (!(fabs(n - 1.0) < 0.01 && same_orientation(q, active_.q, was ? kContinueDot : kSameDot))) continue;
+            if (!first) first = off;
+            if (!may_learn) continue;  // the sweep starts again once allowed
+            Learning l = was ? *was : Learning{off, yaw};
+            double step = fmod(yaw - l.last_yaw, 360.0);
+            if (step > 180) step -= 360;
+            if (step < -180) step += 360;
+            l.last_yaw = yaw;
+            l.heading += step;
+            l.lo = std::fmin(l.lo, l.heading);
+            l.hi = std::fmax(l.hi, l.heading);
+            if (l.hi - l.lo >= kLearnSweep) {
                 orientation_at_[c.cls] = off;
-                log("red: %s keeps the active camera's orientation at +0x%llx", describe_class(c.cls).c_str(),
-                    static_cast<unsigned long long>(off));
+                learning_.erase(c.cls);
+                if (skip)
+                    log("red: %s keeps the active camera's orientation at +0x%llx now (matched over a %.0f degree turn; "
+                        "+0x%llx stopped matching)", describe_class(c.cls).c_str(), static_cast<unsigned long long>(off),
+                        l.hi - l.lo, static_cast<unsigned long long>(skip));
+                else
+                    log("red: %s keeps the active camera's orientation at +0x%llx (matched over a %.0f degree turn)",
+                        describe_class(c.cls).c_str(), static_cast<unsigned long long>(off), l.hi - l.lo);
                 return off;
             }
+            kept.push_back(l);
         }
-        return 0;
+        learning = std::move(kept);
+        return first;
     }
 
     // The current and unzoomed FOV for GyroLib's zoom compensation: the active camera data's FOV and the active camera
@@ -899,9 +1044,13 @@ private:
     uintptr_t cached_gi_ = 0, cached_camera_system_ = 0;
     std::vector<Candidate> candidates_;
     std::unordered_map<uint64_t, uintptr_t> orientation_at_;  // class hash -> offset of its world orientation
+    std::unordered_map<uint64_t, std::vector<Learning>> learning_;  // offsets matching so far, per class not learnt yet
     Kind kind_ = Kind::Unknown;
     std::string active_desc_;
     uint64_t frames_ = 0, last_scan_ = 0;
+    static constexpr size_t kOwnTurnSlots = kOwnTurnWindowMs / 10;
+    ULONGLONG own_turn_slot_[kOwnTurnSlots] = {};
+    double own_turn_[kOwnTurnSlots] = {};
     bool scanned_ = false;
     // The on-foot sources: the active FPP camera and its owner, the player's mover, the body and the look node state.
     uintptr_t fpp_ = 0, fpp_owner_ = 0, mover_ = 0, mover_owner_ = 0, body_ = 0, look_ = 0;
@@ -911,6 +1060,9 @@ private:
     float last_yaw_ = 0;
     bool have_last_yaw_ = false;
     bool seated_ = false;  // seated in a vehicle in first person: the look node turns the head  // sources whose values matched the camera once
+    bool chair_ = false;   // sitting on a chair: the look node turns the head within the FPP camera's limits
+    float chair_limits_[4] = {};
+    ULONGLONG chair_limits_since_ = 0;
     bool sources_ok_ = false;
     std::string sources_why_ = "-";  // why the sources can't be written ("" = they can), logged when it changes
 };
