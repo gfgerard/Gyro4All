@@ -349,6 +349,44 @@ bool playstation_pad() {
     return false;
 }
 
+// Is GyroLib's manual recalibration showing its message in the footer? That message ("Calibrating - keep still",
+// the countdown, "Calibration complete") sits where the folded button goes, so the button hides meanwhile. Manual
+// = GyroLib's shared "calibration.cancel" action is visible (it replaces "calibration.begin" during the manual
+// countdown, collection and movement retries; automatic calibration never shows it, so the button doesn't flicker
+// in menus). After it, "Calibration complete" stays a moment: the button waits while the state is still COMPLETE,
+// at most kCompleteHold, in case GyroLib keeps that state until the next calibration.
+bool g_manual_calibration = false;
+std::chrono::steady_clock::time_point g_complete_at{};
+constexpr auto kCompleteHold = std::chrono::seconds(3);
+
+bool manual_calibration_shown() {
+    if (!g_ctx) return false;
+    bool cancel_visible = false;
+    for (uint32_t i = 0, n = gl_menu_shared_setting_count(g_ctx); i < n; ++i) {
+        gl_setting_info info{};
+        if (gl_menu_shared_setting_at(g_ctx, i, &info) != GL_OK || !info.id) continue;
+        if (std::strcmp(info.id, "calibration.cancel") == 0) {
+            cancel_visible = info.visible != 0;
+            break;
+        }
+    }
+    if (cancel_visible) {
+        g_manual_calibration = true;
+        g_complete_at = {};
+        return true;
+    }
+    if (!g_manual_calibration) return false;
+    gl_diagnostics d{};
+    if (gl_get_diagnostics(g_ctx, &d) == GL_OK && d.calibration_state == GL_CAL_COMPLETE) {
+        const auto now = std::chrono::steady_clock::now();
+        if (g_complete_at == std::chrono::steady_clock::time_point{}) g_complete_at = now;
+        if (now - g_complete_at < kCompleteHold) return true;
+    }
+    g_manual_calibration = false;  // cancelled, finished or failed: the button is back
+    g_complete_at = {};
+    return false;
+}
+
 // A button setting's combo (the activation-button entries), `width` wide plus its reset arrow.
 void button_combo(const char* key, float width) {
     // Persistent storage refilled every frame: a combo popup stays open across frames and reads these pointers
@@ -672,6 +710,8 @@ void draw(float dpi_scale, bool gyrolib_open) {
     const float s = panel.scale;
     const ImVec2 at = button_pos(panel);
     if (!g_expanded) {
+        // GyroLib's manual recalibration message takes the button's place on the footer: back once it is gone.
+        if (manual_calibration_shown()) return;
         ScopedScale scale_ui(s);
         // Tighter padding than the expanded window: this is just a button. Its height is the 18*s frame plus the
         // padding, ~40*s, centred on the footer's action row. Not navigable: the controller reaches it with L3+R3 (the
