@@ -236,6 +236,15 @@ bool turn_front(double pitch_deg, double yaw_deg) {
     return true;
 }
 
+// The first-person camera (vtable exe+0x3396310; no stored front, the gyro turns its frame): it keeps the gyro's turn in
+// its frame, but only up to about 88 degrees from the body, which turns after it at a limited speed. A flick stick 180
+// (GyroLib's 150 ms) passed that edge, and the game moved the frame back to it on each update: flicks turned 126-136
+// degrees, 90s were whole (MODLOG 2026-11-10).
+bool first_person_camera(uintptr_t cam) {
+    static const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    return cam && mem::rdp(cam) == base + 0x3396310;
+}
+
 bool cursor_shown() {
     CURSORINFO ci{sizeof ci};
     return GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING) && ci.hCursor;
@@ -312,7 +321,45 @@ public:
         return f;
     }
 
-    bool apply(double pitch, double yaw) override { return turn_front(pitch, yaw); }
+    // The yaw the first-person camera cut from the last write (its body limit) goes again with the next frames' turns,
+    // until the body has turned far enough to take it, so a flick turns its whole angle there (later than in third
+    // person). A cut is the frame turned back against that write by the next update, at most that write's turn; a turn
+    // the other way (the player changed direction) drops it, and so do another camera and 1.5 s of carrying.
+    bool apply(double pitch, double yaw) override {
+        applied_ = true;
+        const uintptr_t cam = active_camera();
+        const bool fp = first_person_camera(cam);
+        double owed = fp ? cut_yaw(cam) : 0;
+        if (owed != 0 && yaw * owed < 0 && std::abs(yaw) > 0.2) owed = 0;
+        const ULONGLONG now = GetTickCount64();
+        if (owed == 0) owed_since_ = 0;
+        else if (!owed_since_) owed_since_ = now;
+        else if (now - owed_since_ > 1500) owed = 0;
+        if (owed != 0 && !logged_cut_) {
+            logged_cut_ = true;
+            log("rage: the first-person camera held back %.1f degrees of a turn (its limit against the body): carried to "
+                "the next frames", std::abs(owed));
+        }
+        const double total = yaw + owed;
+        const bool ok = turn_front(pitch, total);
+        remember_write(ok && fp ? cam : 0, total);
+        return ok;
+    }
+
+    // A frame without a gyro turn right after a cut still carries it (a flick's turn ends while the body catches up).
+    void after_frame(double) override {
+        const bool applied = applied_;
+        applied_ = false;
+        if (applied || !wrote_cam_ || cursor_) return;
+        const uintptr_t cam = active_camera();
+        const double owed = first_person_camera(cam) ? cut_yaw(cam) : 0;
+        if (owed == 0 || (owed_since_ && GetTickCount64() - owed_since_ > 1500)) {
+            remember_write(0, 0);
+            return;
+        }
+        if (!owed_since_) owed_since_ = GetTickCount64();
+        remember_write(turn_front(0, owed) ? cam : 0, owed);
+    }
 
     bool view_angles(double& pitch, double& yaw, uintptr_t& camera) override {
         const uintptr_t cam = active_camera();
@@ -357,6 +404,30 @@ public:
     }
 
 private:
+    // The yaw (degrees, right) the game took back from the last first-person write, in that write's sense; 0 if none.
+    double cut_yaw(uintptr_t cam) const {
+        double h, p;
+        if (cam != wrote_cam_ || wrote_yaw_ == 0 || !read_front(cam + kFrame + 0x10, h, p)) return 0;
+        double back = h - wrote_heading_;  // heading grows to the left: yaw = -heading
+        back = std::remainder(back, 2 * kPi) * 180 / kPi;
+        const double cut = back * (wrote_yaw_ > 0 ? 1 : -1);  // > 0: turned back against the write
+        if (cut < 0.05) return 0;
+        return std::min(cut, std::abs(wrote_yaw_)) * (wrote_yaw_ > 0 ? 1 : -1);
+    }
+    void remember_write(uintptr_t cam, double yaw) {
+        double h, p;
+        wrote_cam_ = cam && read_front(cam + kFrame + 0x10, h, p) ? cam : 0;
+        wrote_heading_ = wrote_cam_ ? h : 0;
+        wrote_yaw_ = wrote_cam_ ? yaw : 0;
+        if (!wrote_cam_) owed_since_ = 0;
+    }
+
+    uintptr_t wrote_cam_ = 0;   // the first-person camera last written, 0 = none
+    double wrote_heading_ = 0;  // its frame's heading right after that write (radians)
+    double wrote_yaw_ = 0;      // that write's yaw (degrees, right)
+    ULONGLONG owed_since_ = 0;  // when the carried cut began, 0 = none
+    bool applied_ = false;      // apply ran this frame
+    bool logged_cut_ = false;
     bool cursor_ = false;
     bool camera_ = false;
     double zoom_reference_fov_ = 0;  // [Gyro4All] ZoomReferenceFOV=, horizontal degrees; 0 = the unzoomed camera's

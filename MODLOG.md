@@ -5,6 +5,20 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-10 **RDR2: flick stick 180s in first person turned only 126-136 degrees and drifted; 90s and third person
+  exact (user report; flick style 1, snap 1, 150 ms).** Not the Cyberpunk cause (RAGE has one view, no camera matching).
+  Read-only sampler `games/RedDeadRedemption2/flick_sampler.py` (active camera at ~1 kHz; stored front `+0x7b0`, else
+  the frame's forward row `+0x30`, as `read_view`): third person (`exe+0x339a6c0`) 90.0 and 180.0 every time; first
+  person (`exe+0x3396310`, no stored front, the gyro turns its frame) 126-136 degrees on 20 flicks. In each, the game keeps
+  the written row up to ~88-106 degrees, then each update moves it back to a heading that trails the turn (88, 91, 95,
+  100, 106, 113 degrees from the start, the same in every flick): the first-person camera stays within ~88 degrees of
+  the body, which follows at a limited, rising speed; the turn past that edge is lost. Fix (`rage_engine.cpp`): on the
+  first-person camera, the yaw an update took back from the last write (at most that write's turn) goes again with the
+  next frames' turns (and in `after_frame` on frames without a turn) until the body takes it; dropped by a turn the
+  other way, another camera, or after 1.5 s. Log `rage: the first-person camera held back ... carried to the next
+  frames` once. Builds, 1034 checks; **user-tested: first-person 180 flicks work** (DualSense shown as XInput, not under
+Steam Input; the connection wasn't recorded). Also seen once: right after a first-person flick the view
+  eased back ~80 degrees over 1.3 s by itself (not explained).
 - 2026-11-10 **Cyberpunk 2077: GyroLib's flick stick (defaults, duration 150 ms; NativeFlickStick=1) turned only 20-50
   degrees instead of 90/180 (user report).** Sensor pacer ruled out (the real `sensor_pacer.cpp` over a simulated 90 degree
   flick delivers it all; here it runs in GyroLib's burst mode anyway) and REDengine's `limit_turn` doesn't limit on-foot yaw.
