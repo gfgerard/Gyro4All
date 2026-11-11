@@ -9,6 +9,7 @@
 #include "re_tdb.hpp"
 
 #include "engine.hpp"
+#include "fov.hpp"
 #include "log.hpp"
 #include "mem.hpp"
 #include "settings.hpp"
@@ -268,6 +269,7 @@ public:
     const char* default_settings() const override { return kSettings; }
 
     void configure() override {
+        load_zoom_reference();
         g_entry_name = settings::get_string(L"FrameEntry", L"LateUpdateBehavior");
         g_tdb_dump = settings::get_string(L"TdbDump", L"");
         g_camera_watch = settings::get(L"CameraWatch", 0) != 0;
@@ -275,7 +277,20 @@ public:
             g_tdb_dump.c_str());
     }
 
-    std::vector<ViewInfo> views() const override { return {{1, "Default", 0}}; }
+    void settings_changed() override { load_zoom_reference(); }
+
+    // The unzoomed FOV for zoom compensation: [Gyro4All] ZoomReferenceFOV= (horizontal degrees) when set, else the
+    // camera model's own (RE Requiem; models without one report no FOV and compensation stays off).
+    void load_zoom_reference() {
+        const double fov = fov::reference_setting();
+        if (fov != zoom_reference_fov_)
+            log("re: zoom reference FOV %.1f degrees ([Gyro4All] ZoomReferenceFOV%s)", fov,
+                fov > 0 ? "" : ": 0, the camera model's unzoomed FOV");
+        zoom_reference_fov_ = fov;
+    }
+
+    // Zoom compensation is offered for every RE game; it works where the camera model reports FOV (RE Requiem).
+    std::vector<ViewInfo> views() const override { return {{1, "Default", 0, true}}; }
 
     bool frame_source(FrameFn frame) override {
         g_frame = frame;
@@ -305,6 +320,16 @@ public:
         f.paused = c.paused;
         f.view_id = c.free_look ? 1 : 0;
         f.target = c.target;
+        if (fov::is_valid(c.fov)) {
+            const double reference = zoom_reference_fov_ > 0
+                                         ? fov::vertical_from_horizontal(zoom_reference_fov_, fov::game_window_aspect())
+                                         : c.fov_reference;
+            if (fov::is_valid(reference)) f.zoom_fov = ZoomFov{c.fov, reference};
+            if (reference != last_reference_) {
+                last_reference_ = reference;
+                log("re: zoom compensation: unzoomed FOV %.1f degrees vertical (now %.1f)", reference, c.fov);
+            }
+        }
         if (!camera && g_no_camera) {
             f.no_camera = true;
             f.in_game = true;
@@ -352,6 +377,9 @@ public:
         return std::format("re: TDB {} {} {}", g_tdb.version, kStages[g_stage.load()],
                            camera ? camera->status() : "no camera model");
     }
+
+private:
+    double zoom_reference_fov_ = 0, last_reference_ = 0;
 };
 
 }  // namespace

@@ -22,6 +22,9 @@ struct CameraFrame {
     std::string view;        // target plus its state, logged when it changes
     uintptr_t object = 0;    // the active camera object, for CameraWatch= (0 = none)
     uintptr_t system = 0;    // the object that picks it (camera system or manager), also watched
+    // Zoom compensation: the rendered camera's vertical FOV and the unzoomed one, in degrees (0 = unknown).
+    double fov = 0;
+    double fov_reference = 0;
 };
 
 class Camera {
@@ -61,6 +64,8 @@ std::unique_ptr<Camera> make_mhwilds_camera();
 constexpr uintptr_t kGameObjectTransform = 0x18;  // via.GameObject -> its via.Transform (the first component)
 constexpr uintptr_t kComponentOwner = 0x10;       // via.Component -> its via.GameObject
 constexpr uintptr_t kComponentNext = 0x18;        // via.Component -> the GameObject's next component
+constexpr uintptr_t kTransformRotation = 0x40;    // via.Transform -> its local rotation (via.Quaternion; RE Requiem)
+constexpr uintptr_t kCameraFov = 0x38;            // via.Camera -> its FOV (float degrees, vertical; RE Requiem)
 constexpr uintptr_t kArrayCount = 0x1C;           // managed array: element count, elements from 0x20
 constexpr uintptr_t kArrayItems = 0x20;
 

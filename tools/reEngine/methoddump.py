@@ -56,10 +56,9 @@ class Process:
 
 def methods_of(proc, tdb, header, index):
     """(name, encoded_offset) of a type's own methods, from the TDB in memory (TDB 71+ layouts)."""
-    types, types_impl, methods = (proc.u64(header + o) for o in (0x68, 0x70, 0x78))
-    td = types + index * tdbdump.TYPEDEF_SIZE
-    first = tdbdump.bits(proc.u64(td + 0x20), 22, 22)
-    count = proc.u16(types_impl + tdbdump.bits(proc.u64(td + 8), 38, 18) * tdbdump.TYPEIMPL_SIZE + 0x18)
+    methods = proc.u64(header + tdbdump.HEADERS[tdb.version]["methods"])
+    t = tdb.typedef(index)  # same tables as in memory: first method and count from the file
+    first, count = t["member_method"], t["num_methods"]
     names = [m["name"] for m in tdb.methods(index)]  # names from the file (same tables)
     return [(names[k] if k < len(names) else f"#{k}", proc.i32(methods + (first + k) * 0xC + 8)) for k in range(count)]
 
@@ -67,7 +66,10 @@ def methods_of(proc, tdb, header, index):
 def find_base(proc, img, offsets):
     """The 16-byte aligned base (as an RVA) that puts the most method addresses right after int3/ret padding."""
     import numpy as np
+    # The code section: .text, or the largest section when .text is a stub (RE Requiem's code is in .xtls).
     text = next(s for s in img.sections if s[0] == ".text")
+    if text[2] < 1 << 20:
+        text = max(img.sections, key=lambda s: s[2])
     _, rva, size, _, _ = text
     data = bytearray()
     for off in range(0, size, 1 << 24):

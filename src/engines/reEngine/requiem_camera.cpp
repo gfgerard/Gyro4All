@@ -5,11 +5,19 @@
 // into the camera every frame (checked live: a write there turns the camera and stays). Pitch limits: the rotation
 // interpolation's _PitchRangeDeg, a via.Range (start, size). Pause: app.PauseManager's _CurrentPauseTypeBits. Its
 // pitch is the other way round from RE7's (user-verified: inverted with RE7's sign), its yaw is the same.
+// Aiming (L2, with or without a scope) switches to app.ADSCameraController, which turns its own GameObject's transform:
+// a write to that transform's rotation turns the aiming camera and stays (checked live through a scope; same pitch
+// sign). Its pitch limits: the controller's _OperateController (app.CameraOperateController) <PitchRangeDeg>.
+// FOV (zoom compensation): the main blender's _Camera (via.Camera, vertical FOV: 51 first person, 40 third person,
+// about 43 aiming without a scope on the player's own camera, 25 and less through a scope). The unzoomed FOV: the
+// widest blender _RequestFOV each player camera has settled at (see read_scene).
 #include "re_camera.hpp"
 
 #include "log.hpp"
 #include "mem.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <format>
 
 namespace gyro4all::re {
@@ -43,6 +51,16 @@ public:
         t_.pitch_range = field_offset(tdb, rotation_interpolation, "_PitchRangeDeg");
         t_.camera_rotation = field_offset(tdb, rotation_calc, "<CameraRotation>k__BackingField");
         t_.pause_bits = field_offset(tdb, t_.pause_manager, "_CurrentPauseTypeBits");
+        // Aiming camera: optional (the player's own cameras work without it).
+        t_.ads = find_type(tdb, "app", "ADSCameraController");
+        t_.ads_operate = field_offset(tdb, t_.ads, "_OperateController");
+        t_.operate_pitch_range =
+            field_offset(tdb, find_type(tdb, "app", "CameraOperateController"), "<PitchRangeDeg>k__BackingField");
+        t_.blender_camera = field_offset(tdb, blender, "_Camera");
+        t_.request_fov = field_offset(tdb, blender, "_RequestFOV");
+        log("re: FOV: CameraBlender _Camera +0x%x, _RequestFOV +0x%x", t_.blender_camera, t_.request_fov);
+        log("re: aiming camera: ADSCameraController %u (_OperateController +0x%x, PitchRangeDeg +0x%x)", t_.ads,
+            t_.ads_operate, t_.operate_pitch_range);
         log("re: scene types: CameraSystem %u (_CameraBlenders +0x%x), CameraBlender %u (_Role +0x%x, "
             "BusyCameraController +0x%x), PlayerTPSCameraController %u, PlayerFPSCameraController %u, TPS/FPS "
             "ActionInterpolation %u/%u (_RotationInterpolation +0x%x/+0x%x), PlayerCameraRotationInterpolation %u "
@@ -68,14 +86,16 @@ public:
         return true;
     }
 
-    // One view: the player's own third- or first-person camera. Every other controller (aiming, events, gimmicks,
-    // fixed and detail-search cameras, photo mode) is left to the game.
+    // One view: the player's own third- or first-person camera, and aiming (ADSCameraController). Every other
+    // controller (events, gimmicks, fixed and detail-search cameras, photo mode) is left to the game.
     CameraFrame read() override {
         s_ = read_scene();
         CameraFrame f;
         f.in_game = s_.controller != 0;
         f.paused = s_.pause_bits != 0;
         f.free_look = s_.rotation != 0;
+        f.fov = s_.fov;
+        f.fov_reference = fov_reference_;
         f.target = s_.controller ? short_name(s_.controller) : "no camera";
         f.view = s_.pause_bits ? std::format("{} (paused, bits 0x{:x})", f.target, s_.pause_bits) : f.target;
         return f;
@@ -103,15 +123,19 @@ public:
         if (!s_.controller) return "no camera";
         double yaw = 0, pitch = 0;
         const bool known = s_.rotation && read_rotation(s_.rotation, yaw, pitch, kPitchSign);
-        return std::format("camera={} pause=0x{:x}{}", short_name(s_.controller), s_.pause_bits,
+        return std::format("camera={} pause=0x{:x}{} fov={:.1f}/{:.1f}", short_name(s_.controller), s_.pause_bits,
                            known ? std::format(" yaw={:.1f} pitch={:.1f} range={:.0f}..{:.0f}", yaw, pitch,
                                                s_.pitch_lower, s_.pitch_upper)
-                                 : std::string{});
+                                 : std::string{},
+                           s_.fov, fov_reference_);
     }
 
 private:
     struct Types {
         uint32_t camera_system = 0, pause_manager = 0, tps = 0, fps = 0, tps_interpolation = 0, fps_interpolation = 0;
+        uint32_t ads = 0;
+        int32_t ads_operate = -1, operate_pitch_range = -1;                       // ADSCameraController
+        int32_t blender_camera = -1, request_fov = -1;                            // CameraBlender
         int32_t blenders = -1, role = -1, busy = -1;                              // CameraSystem, CameraBlender
         int32_t tps_rotation_interpolation = -1, fps_rotation_interpolation = -1;  // ...ActionInterpolation
         int32_t next_info = -1, pitch_range = -1;                                 // PlayerCameraRotationInterpolation
@@ -124,6 +148,7 @@ private:
         uintptr_t rotation = 0;       // the player camera's <CameraRotation> (0: not the player's own camera)
         double pitch_lower = -60, pitch_upper = 60;
         uint64_t pause_bits = 0;
+        double fov = 0;               // the main camera's vertical FOV (0 = unknown)
     };
 
     // Field address of a managed object (its field base plus offset), 0 if unreadable.
@@ -149,7 +174,22 @@ private:
         const uintptr_t controller = main ? mem::rdp(field(main, t_.busy)) : 0;
         s.controller = object_type(*tdb_, controller);
         const bool tps = is_a(*tdb_, s.controller, t_.tps), fps = !tps && is_a(*tdb_, s.controller, t_.fps);
-        if (!tps && !fps) return s;
+        float fov = 0, request = 0;
+        const uintptr_t camera = main && t_.blender_camera >= 0 ? mem::rdp(field(main, t_.blender_camera)) : 0;
+        if (camera && mem::rd(camera + kCameraFov, fov) && fov > 1 && fov < 170) s.fov = fov;
+        // The unzoomed FOV of each player camera (third, first person): the widest _RequestFOV the camera has settled
+        // at. _RequestFOV alone follows the zoom at times (25 for a few frames after the scope, 43 aiming); a loading
+        // screen forgets it (a changed FOV option). Aiming (ADS) uses the player camera it came from.
+        if (s.pause_bits & 0x1) widest_[0] = widest_[1] = 0;
+        if (tps || fps) player_kind_ = fps ? 1 : 0;
+        if ((tps || fps) && t_.request_fov >= 0 && mem::rd(field(main, t_.request_fov), request) && request > 1 &&
+            request < 170 && std::abs(request - s.fov) < 0.5)
+            widest_[player_kind_] = std::max(widest_[player_kind_], double(request));
+        fov_reference_ = widest_[player_kind_];
+        if (!tps && !fps) {
+            if (t_.ads && is_a(*tdb_, s.controller, t_.ads)) read_aiming(controller, s);
+            return s;
+        }
         // The interpolation component is looked up again when the controller changes or no longer has it.
         if (controller != cached_controller_ ||
             mem::rdp(cached_interpolation_ + kComponentOwner) != mem::rdp(controller + kComponentOwner)) {
@@ -169,6 +209,21 @@ private:
         return s;
     }
 
+    // Aiming: the rotation of the ADS controller's own transform, its pitch limits from its operate controller.
+    void read_aiming(uintptr_t controller, Scene& s) const {
+        const uintptr_t object = mem::rdp(controller + kComponentOwner);
+        const uintptr_t transform = object ? mem::rdp(object + kGameObjectTransform) : 0;
+        if (!transform) return;
+        s.rotation = transform + kTransformRotation;
+        const uintptr_t operate = t_.ads_operate >= 0 ? mem::rdp(field(controller, t_.ads_operate)) : 0;
+        float range[2];  // via.Range: start, size
+        if (operate && t_.operate_pitch_range >= 0 && mem::rd(field(operate, t_.operate_pitch_range), range) &&
+            range[1] > 0 && range[1] < 180) {
+            s.pitch_lower = range[0];
+            s.pitch_upper = range[0] + range[1];
+        }
+    }
+
     // "PlayerTPSCameraController" for app.PlayerTPSCameraController.
     std::string short_name(uint32_t type) const {
         const std::string name = type ? type_name(*tdb_, type) : "none";
@@ -179,6 +234,9 @@ private:
     Types t_;
     uintptr_t camera_system_slot_ = 0, pause_manager_slot_ = 0;
     Scene s_;
+    double fov_reference_ = 0;      // the unzoomed FOV for this frame (0 = not known yet)
+    double widest_[2] = {0, 0};     // widest settled _RequestFOV: third person, first person
+    int player_kind_ = 1;           // the last player camera: 0 third person, 1 first person
     uintptr_t cached_controller_ = 0, cached_interpolation_ = 0;
 };
 
