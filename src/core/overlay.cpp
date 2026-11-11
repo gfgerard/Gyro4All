@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <sstream>
@@ -308,8 +309,50 @@ void check_vtable(IDXGISwapChain* sc) {
         "call through dxgi's shared vtable", module_of(vtable).c_str(), module_of(vtable[8]).c_str());
 }
 
+// A function for the Present chain report: its module+offset, and where a jump at its start leads (an inline hook,
+// e.g. an overlay's on dxgi's Present: jmp rel32, jmp [rip+disp32], mov rax,imm64 / jmp rax).
+std::string describe_function(const void* fn) {
+    if (!fn) return "null";
+    const auto at = reinterpret_cast<uintptr_t>(fn);
+    std::string text = mem::module_offset(at);
+    uint8_t b[12] = {};
+    if (!mem::guarded_copy(b, at, sizeof b)) return text;
+    uintptr_t target = 0;
+    if (b[0] == 0xE9) {
+        int32_t rel = 0;
+        std::memcpy(&rel, b + 1, 4);
+        target = at + 5 + rel;
+    } else if (b[0] == 0xFF && b[1] == 0x25) {
+        int32_t disp = 0;
+        std::memcpy(&disp, b + 2, 4);
+        mem::rd(at + 6 + disp, target);
+    } else if (b[0] == 0x48 && b[1] == 0xB8 && b[10] == 0xFF && b[11] == 0xE0) {
+        std::memcpy(&target, b + 2, 8);
+    }
+    if (target) text += " (starts with a jump to " + mem::module_offset(target) + ")";
+    return text;
+}
+
+// The D3D10/D3D11 Present chain, logged a few times (other overlays: RTSS, Steam, ReShade): who calls our hook, where
+// the slot and our original point. Our hook missing from the slot later means another module rewrote it.
+std::atomic<int> g_chain_reports{0};
+constexpr int kChainReportAt[] = {1, 600, 3000};
+HRESULT STDMETHODCALLTYPE hk_present(IDXGISwapChain* sc, UINT sync, UINT flags);
+
+void report_present_chain(IDXGISwapChain* sc, void* caller) {
+    if (g_chain_reports.load(std::memory_order_relaxed) >= kChainReportAt[std::size(kChainReportAt) - 1]) return;
+    const int n = g_chain_reports.fetch_add(1) + 1;
+    if (std::find(std::begin(kChainReportAt), std::end(kChainReportAt), n) == std::end(kChainReportAt)) return;
+    void** const vtable = com::vtable_of(sc);
+    log("overlay: Present chain (call %d): called from %s; slot 8 %s; our original %s", n,
+        mem::module_offset(reinterpret_cast<uintptr_t>(caller)).c_str(),
+        vtable[8] == reinterpret_cast<void*>(&hk_present) ? "holds our hook" : describe_function(vtable[8]).c_str(),
+        describe_function(reinterpret_cast<void*>(original_of(sc, 8, g_present))).c_str());
+}
+
 HRESULT STDMETHODCALLTYPE hk_present(IDXGISwapChain* sc, UINT sync, UINT flags) {
     check_vtable(sc);
+    if (panel_host::is_dxgi_target(sc)) report_present_chain(sc, _ReturnAddress());
     if (!(flags & DXGI_PRESENT_TEST)) {
         note_present();
         const int64_t start = perf::now();

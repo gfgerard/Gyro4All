@@ -7862,3 +7862,31 @@ heap, ~3 GB, ~1 s each, then only the candidates re-read; 6 poses, turns up to 1
     and deployed. Tested in game by the user (on foot, fast turns, a car, a scene): works well. Log over about 6 min:
     8 "on foot -> cinematic" flips (single frames, seconds apart) instead of 303 in 3.5 min; scenes and the car camera
     are still detected; `perf:` 114-122 us average.
+
+## 2026-11-11 RivaTuner's OSD vanishes in D3D11 games with the settings panel
+
+User report: RivaTuner Statistics Server's OSD shows briefly at launch, then disappears, in every game with Gyro4All
+installed (also seen in Metro: Last Light Redux). Tested in MOUSE: P.I. For Hire (Unity 6, D3D11), RTSS and MSI
+Afterburner running.
+- Not the known load-order problem (RTSS's `RTSSHooks64.dll` pulling System32's WINMM first, MODLOG 2026-10-08):
+  Gyro4All loaded, and `RTSSHooks64.dll` was in the game (its WINMM import resolved to our proxy, which forwards).
+- With the panel's graphics hooks off (`gyrolib.ini`: `ui.menu_key=` and `ui.gamepad_menu_shortcut=0`, log `overlay:
+  disabled ... no graphics hooks installed`) the OSD stayed and the gyro worked: the D3D10/11 panel path is the cause.
+- Present chain (new diagnostic, logged three times per session): the game (`UnityPlayer.dll+0x925C6C`) calls our hook
+  in the swapchain's vtable slot 8; our original is `dxgi.dll+0x19000`, which starts with a jump to a trampoline (RTSS's
+  inline hook). So RTSS stays in the chain and draws right after the panel, every frame; the slot is never rewritten.
+- The OSD vanished right after `D3D11 renderer ready`. Deferring the panel's `CreateDeviceContextState` to the first
+  panel frame kept the OSD until F10; as soon as the panel drew (`SwapDeviceContextState` around its drawing), the OSD
+  was gone for the rest of the session, also after closing the panel and releasing the state object. (A first attempt
+  also deferred `ImGui_ImplDX11_Init`: crash on F10, `ImGui user error: Backend does not support
+  ImGuiBackendFlags_RendererHasTextures, and font atlas is not built!`; ImGui 1.92 needs the renderer backend before
+  the panel's first ImGui frame.)
+- Fix (`panel_dx11.cpp`): no device context state any more. The panel saves what its drawing changes on the game's
+  immediate context through ordinary Get calls (render targets and depth view, viewports, scissors, rasterizer, blend,
+  depth-stencil, input layout, topology, vertex/index buffers, all six shader stages with class instances, VS/PS
+  constant buffer 0, PS views 0-1 and sampler 0) and sets it back after (`SavedState`). ImGui's backend also restores
+  most of its own state, but not render targets, and it leaves the hull/domain/compute shaders null. The panel no
+  longer needs a D3D 11.1 device (`ID3D11Device1`). D3D10 already used a state block; DX12 is GyroLib's own overlay.
+  Built (all unit checks pass). Tested in game by the user (MOUSE, D3D11, RTSS running): the OSD stays after the game
+  loads, while the panel is open and after closing it; the panel opens with F10 and the game's image is unchanged.
+  Also tested by the user in Metro: Last Light Redux: works as expected.

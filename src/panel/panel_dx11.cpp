@@ -1,8 +1,7 @@
 // The panel in D3D11 games: ImGui's DX11 backend, drawn on the game's backbuffer just before its Present.
 //
-// The game's pipeline state is left exactly as it was: the panel draws inside its own device context state
-// (ID3D11DeviceContext1::SwapDeviceContextState), which swaps out ALL of the game's immediate-context state and brings
-// it back afterwards (ImGui's own backup misses render targets, hull/domain/compute shaders, UAVs...). Wrappers that
+// The game's pipeline state is left as it was: everything the panel's drawing changes is saved first and restored after
+// (SavedState), through the context's ordinary calls, so other overlays drawing after us (RivaTuner) and wrappers that
 // track state through their own context proxy (ReShade) keep a correct picture. No reference to a backbuffer is kept
 // between frames, so ResizeBuffers and swapchain recreation never wait for the panel.
 //
@@ -38,8 +37,7 @@ enum class Mode { Sdr, ScRgb, Hdr10 };
 const char* name(Mode m) { return m == Mode::Sdr ? "SDR" : m == Mode::ScRgb ? "scRGB" : "HDR10"; }
 
 ID3D11Device* g_device = nullptr;  // the device the backend runs on (AddRef'd)
-ID3D11DeviceContext1* g_context = nullptr;
-ID3DDeviceContextState* g_state = nullptr;  // the panel's own pipeline state
+ID3D11DeviceContext* g_context = nullptr;
 bool g_failed = false;
 
 // HDR composition.
@@ -240,42 +238,134 @@ void composite(ID3D11RenderTargetView* backbuffer, const D3D11_TEXTURE2D_DESC& b
     g_context->Draw(3, 0);
 }
 
+// The game's immediate-context state the panel's drawing changes, saved before it and restored after. ImGui's backend
+// restores most of its own state, but not the render targets, and it clears the hull/domain/compute shaders; the HDR
+// composite sets more. A device context state of the panel's own (SwapDeviceContextState) did this before, but once
+// used it made RivaTuner's OSD (an inline hook on dxgi's Present, drawing right after ours) vanish for the rest of the
+// session, in every D3D11 game (MODLOG 2026-11-11).
+struct Shader {
+    static constexpr UINT kMaxInstances = 256;  // the most a *SSetShader call takes
+    IUnknown* shader = nullptr;
+    ID3D11ClassInstance* instances[kMaxInstances] = {};
+    UINT count = kMaxInstances;
+    void forget() {
+        if (shader) shader->Release();
+        for (UINT i = 0; i < count; ++i) {
+            if (instances[i]) instances[i]->Release();
+            instances[i] = nullptr;
+        }
+        shader = nullptr;
+        count = kMaxInstances;
+    }
+};
+
+struct SavedState {
+    ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    ID3D11DepthStencilView* dsv = nullptr;
+    UINT viewports_count = 0, scissors_count = 0;
+    D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    D3D11_RECT scissors[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    ID3D11RasterizerState* raster = nullptr;
+    ID3D11BlendState* blend = nullptr;
+    float blend_factor[4] = {};
+    UINT sample_mask = 0;
+    ID3D11DepthStencilState* depth = nullptr;
+    UINT stencil_ref = 0;
+    ID3D11InputLayout* layout = nullptr;
+    D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    ID3D11Buffer* vertex_buffer = nullptr;
+    UINT vertex_stride = 0, vertex_offset = 0;
+    ID3D11Buffer* index_buffer = nullptr;
+    DXGI_FORMAT index_format = DXGI_FORMAT_UNKNOWN;
+    UINT index_offset = 0;
+    Shader vs, ps, gs, hs, ds, cs;
+    ID3D11Buffer* vs_constants = nullptr;
+    ID3D11Buffer* ps_constants = nullptr;
+    ID3D11ShaderResourceView* ps_views[2] = {};
+    ID3D11SamplerState* ps_sampler = nullptr;
+
+    void save(ID3D11DeviceContext* c) {
+        c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, &dsv);
+        viewports_count = scissors_count = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+        c->RSGetViewports(&viewports_count, viewports);
+        c->RSGetScissorRects(&scissors_count, scissors);
+        c->RSGetState(&raster);
+        c->OMGetBlendState(&blend, blend_factor, &sample_mask);
+        c->OMGetDepthStencilState(&depth, &stencil_ref);
+        c->IAGetInputLayout(&layout);
+        c->IAGetPrimitiveTopology(&topology);
+        c->IAGetVertexBuffers(0, 1, &vertex_buffer, &vertex_stride, &vertex_offset);
+        c->IAGetIndexBuffer(&index_buffer, &index_format, &index_offset);
+        c->VSGetShader(reinterpret_cast<ID3D11VertexShader**>(&vs.shader), vs.instances, &vs.count);
+        c->PSGetShader(reinterpret_cast<ID3D11PixelShader**>(&ps.shader), ps.instances, &ps.count);
+        c->GSGetShader(reinterpret_cast<ID3D11GeometryShader**>(&gs.shader), gs.instances, &gs.count);
+        c->HSGetShader(reinterpret_cast<ID3D11HullShader**>(&hs.shader), hs.instances, &hs.count);
+        c->DSGetShader(reinterpret_cast<ID3D11DomainShader**>(&ds.shader), ds.instances, &ds.count);
+        c->CSGetShader(reinterpret_cast<ID3D11ComputeShader**>(&cs.shader), cs.instances, &cs.count);
+        c->VSGetConstantBuffers(0, 1, &vs_constants);
+        c->PSGetConstantBuffers(0, 1, &ps_constants);
+        c->PSGetShaderResources(0, 2, ps_views);
+        c->PSGetSamplers(0, 1, &ps_sampler);
+    }
+
+    // Puts it all back and drops the references save() took.
+    void restore(ID3D11DeviceContext* c) {
+        c->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, dsv);
+        c->RSSetViewports(viewports_count, viewports);
+        c->RSSetScissorRects(scissors_count, scissors);
+        c->RSSetState(raster);
+        c->OMSetBlendState(blend, blend_factor, sample_mask);
+        c->OMSetDepthStencilState(depth, stencil_ref);
+        c->IASetInputLayout(layout);
+        c->IASetPrimitiveTopology(topology);
+        c->IASetVertexBuffers(0, 1, &vertex_buffer, &vertex_stride, &vertex_offset);
+        c->IASetIndexBuffer(index_buffer, index_format, index_offset);
+        c->VSSetShader(static_cast<ID3D11VertexShader*>(vs.shader), vs.instances, vs.count);
+        c->PSSetShader(static_cast<ID3D11PixelShader*>(ps.shader), ps.instances, ps.count);
+        c->GSSetShader(static_cast<ID3D11GeometryShader*>(gs.shader), gs.instances, gs.count);
+        c->HSSetShader(static_cast<ID3D11HullShader*>(hs.shader), hs.instances, hs.count);
+        c->DSSetShader(static_cast<ID3D11DomainShader*>(ds.shader), ds.instances, ds.count);
+        c->CSSetShader(static_cast<ID3D11ComputeShader*>(cs.shader), cs.instances, cs.count);
+        c->VSSetConstantBuffers(0, 1, &vs_constants);
+        c->PSSetConstantBuffers(0, 1, &ps_constants);
+        c->PSSetShaderResources(0, 2, ps_views);
+        c->PSSetSamplers(0, 1, &ps_sampler);
+        for (auto*& v : rtvs) release(v);
+        release(dsv);
+        release(raster);
+        release(blend);
+        release(depth);
+        release(layout);
+        release(vertex_buffer);
+        release(index_buffer);
+        for (Shader* s : {&vs, &ps, &gs, &hs, &ds, &cs}) s->forget();
+        release(vs_constants);
+        release(ps_constants);
+        for (auto*& v : ps_views) release(v);
+        release(ps_sampler);
+    }
+};
+SavedState g_saved;  // under Lock; static: its shader instance arrays are large for the stack
+
 void shutdown() {
     if (!g_device) return;
     release_hdr_pipeline();
     ImGui_ImplDX11_Shutdown();
-    release(g_state);
     release(g_context);
     release(g_device);
     renderer_ready(false);
 }
 
+// The game's device and immediate context, and ImGui's backend started on them (it creates its device objects when the
+// panel first draws).
 bool init(ID3D11Device* device) {
-    ID3D11Device1* device1 = nullptr;
-    ID3D11DeviceContext* context = nullptr;
-    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device1)))) {
-        log("D3D11 device %p has no ID3D11Device1 (D3D 11.1 runtime): panel unavailable", static_cast<void*>(device));
-        return false;
-    }
-    device->GetImmediateContext(&context);
-    const bool have_context = context && SUCCEEDED(context->QueryInterface(IID_PPV_ARGS(&g_context)));
-    release(context);
-    D3D_FEATURE_LEVEL level = device->GetFeatureLevel();
-    const UINT flags = (device->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED)
-                           ? D3D11_1_CREATE_DEVICE_CONTEXT_STATE_SINGLETHREADED
-                           : 0;
-    const HRESULT hr = have_context ? device1->CreateDeviceContextState(flags, &level, 1, D3D11_SDK_VERSION,
-                                                                        __uuidof(ID3D11Device1), nullptr, &g_state)
-                                    : E_NOINTERFACE;
-    release(device1);
-    if (FAILED(hr)) {
-        log("D3D11: no device context state of its own (0x%08lX): panel unavailable", static_cast<unsigned long>(hr));
-        release(g_context);
+    device->GetImmediateContext(&g_context);
+    if (!g_context) {
+        log("D3D11 device %p has no immediate context: panel unavailable", static_cast<void*>(device));
         return false;
     }
     if (!ImGui_ImplDX11_Init(device, g_context)) {
         log("ImGui's DX11 backend did not start: panel unavailable");
-        release(g_state);
         release(g_context);
         return false;
     }
@@ -284,8 +374,8 @@ bool init(ID3D11Device* device) {
     g_hdr_failed = false;
     g_mode_logged = false;
     renderer_ready(true);
-    log("D3D11 renderer ready on device %p (feature level %X%s)", static_cast<void*>(device), unsigned(level),
-        flags ? ", single-threaded" : "");
+    log("D3D11 renderer ready on device %p (feature level %X)", static_cast<void*>(device),
+        unsigned(device->GetFeatureLevel()));
     return true;
 }
 
@@ -344,8 +434,7 @@ bool present(IUnknown* swapchain, uint32_t color_space) {
     }
 
     ImGui_ImplDX11_NewFrame();  // (re)creates the backend's device objects when needed
-    ID3DDeviceContextState* game_state = nullptr;
-    g_context->SwapDeviceContextState(g_state, &game_state);
+    g_saved.save(g_context);
     if (mode == Mode::Sdr) {
         g_context->OMSetRenderTargets(1, &rtv, nullptr);
         ImGui_ImplDX11_RenderDrawData(data);
@@ -357,9 +446,7 @@ bool present(IUnknown* swapchain, uint32_t color_space) {
         if (mode == Mode::Hdr10) g_context->CopyResource(g_scene_texture, backbuffer);
         composite(rtv, bb, mode);
     }
-    g_context->ClearState();  // the panel's state object keeps no reference to the game's buffers
-    g_context->SwapDeviceContextState(game_state, nullptr);
-    release(game_state);
+    g_saved.restore(g_context);
     rtv->Release();
     backbuffer->Release();
     sc->Release();
