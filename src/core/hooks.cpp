@@ -3,10 +3,12 @@
 #include "log.hpp"
 
 #include <MinHook.h>
+#include <intrin.h>
 #include <psapi.h>
 #include <winternl.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <iterator>
@@ -418,6 +420,40 @@ bool add_ordinal(const char* dll, WORD ordinal, const char* function, void* repl
 
 bool add_with_pad_library(const char* dll, const char* function, void* replacement, void** original) {
     return register_hook(dll, 0, function, replacement, original, true);
+}
+
+namespace {
+
+using GetProcAddress_t = FARPROC(WINAPI*)(HMODULE, LPCSTR);
+GetProcAddress_t g_get_proc = nullptr;
+std::mutex g_lookup_mutex;  // registration only (add() takes g_mutex itself)
+// Fixed slots, published by the count: the hook reads them on any thread without a lock.
+LookupFilter g_filters[4] = {};
+std::atomic<int> g_filter_count{0};
+
+FARPROC WINAPI hk_get_proc_address(HMODULE module, LPCSTR name) {
+    if (!g_get_proc) g_get_proc = &GetProcAddress;  // only a delay-load import was patched so far
+    const FARPROC real = g_get_proc(module, name);
+    if (!real || !module) return real;
+    const int n = g_filter_count.load(std::memory_order_acquire);
+    for (int i = 0; i < n; ++i)
+        if (const FARPROC replaced = g_filters[i](module, name, real, _ReturnAddress()); replaced != real) return replaced;
+    return real;
+}
+
+}  // namespace
+
+void filter_lookups(LookupFilter filter) {
+    std::lock_guard lock(g_lookup_mutex);
+    const int n = g_filter_count.load();
+    if (n == int(std::size(g_filters))) {
+        log("hooks: too many GetProcAddress filters; one ignored");
+        return;
+    }
+    g_filters[n] = filter;
+    g_filter_count.store(n + 1, std::memory_order_release);
+    if (n == 0) add("kernel32.dll", "GetProcAddress", reinterpret_cast<void*>(&hk_get_proc_address),
+                    reinterpret_cast<void**>(&g_get_proc));
 }
 
 bool add_in_module(HMODULE module, const char* dll, const char* function, void* replacement, void** original) {

@@ -37,6 +37,7 @@ add_subdirectory(engines/asura)
 add_subdirectory(engines/rage)
 add_subdirectory(engines/redEngine)
 add_subdirectory(engines/halo)
+add_subdirectory(engines/unity)
 # panel/: gyro4all.dll, the settings panel for non-DX12 games (dynamic CRT, loaded by winmm.dll only when needed).
 add_subdirectory(panel)
 
@@ -44,7 +45,7 @@ add_subdirectory(panel)
 configure_file(core/version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/version.rc" @ONLY)
 add_library(Gyro4All SHARED engine_registry.cpp core/proxy.def "${CMAKE_CURRENT_BINARY_DIR}/version.rc")
 set_target_properties(Gyro4All PROPERTIES OUTPUT_NAME winmm)
-target_link_libraries(Gyro4All PRIVATE gyro_options gyro_core gyro_unreal gyro_re gyro_frostbite gyro_idtech gyro_source gyro_unreal3 gyro_foura gyro_swarm gyro_cryengine gyro_glacier gyro_northlight gyro_asura gyro_rage gyro_red gyro_halo delayimp dxguid)
+target_link_libraries(Gyro4All PRIVATE gyro_options gyro_core gyro_unreal gyro_re gyro_frostbite gyro_idtech gyro_source gyro_unreal3 gyro_foura gyro_swarm gyro_cryengine gyro_glacier gyro_northlight gyro_asura gyro_rage gyro_red gyro_halo gyro_unity delayimp dxguid)
 # gyrolib.dll lives in the Gyro4All subfolder and is loaded by full path before first use.
 target_link_options(Gyro4All PRIVATE /DELAYLOAD:gyrolib.dll)
 # Symbols for crash dumps (build/Gyro4All/Release/winmm.pdb; never shipped). /OPT keeps the release layout.
@@ -54,7 +55,7 @@ target_link_options(Gyro4All PRIVATE /DEBUG /PDBALTPATH:%_PDB% /OPT:REF /OPT:ICF
 # Unit tests of the parts that need no game (the Unreal profile's views, the core's Match=Camera choice):
 # tools/test-gyro4all.sh builds and runs them. Never shipped.
 add_executable(gyro4all_tests ../tests/profile_tests.cpp engines/unrealEngine/ue_profile.cpp core/settings.cpp core/log.cpp core/stick_fallback.cpp core/stick_response.cpp core/stick_camera.cpp core/sensor_pacer.cpp)
-target_include_directories(gyro4all_tests PRIVATE core engines/unrealEngine "${MINHOOK_DIR}/src/hde")
+target_include_directories(gyro4all_tests PRIVATE core engines/unrealEngine engines/unity "${MINHOOK_DIR}/src/hde")
 target_link_libraries(gyro4all_tests PRIVATE minhook)
 target_compile_definitions(gyro4all_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE
                            "GYRO4ALL_VERSION=\"${PROJECT_VERSION}\"")

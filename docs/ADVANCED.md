@@ -132,6 +132,7 @@ Limits:
 | Hogwarts Legacy | UE 4 | yes | Third person detached camera, new objects detected. Native DualSense (delay-loaded `libScePad.dll`): XInput translation stays off. |
 | Visage | UE 4  | no | First person camera XInput translation/Steam input needed. |
 | Valor Mortis | UE 5.7 | no |  |
+| MOUSE: P.I. For Hire | Unity 6000.3 (Mono), DX11 | yes (shipped) | Unity module: the profile turns the character controller's yaw and the camera rig's pitch through Unity's transforms, while the game's Look input action is enabled (off in menus, dialogue and cutscenes). Tested with a GameSir Cyclone 2 in DS4 mode with `XInput=1` (the game's own PlayStation support) and `XInput=2` (Xbox controller, Xbox prompts). The boss cannon's camera isn't turned by the gyro. |
 | PAYDAY 3 | UE 5 | yes (shipped) | Generic path in normal play; during some actions the camera is turned by a camera modifier (`SBZClampCameraRotationModifier`, raw +0x68), which the profile adds as a `Match=Camera` view: Gyro4All switches to it and back by itself. Case-preserving names build (`WITH_CASE_PRESERVING_NAME`): Gyro4All detects the different name pool layout by itself. Native DualSense (HID): XInput translation stays off. Always-online co-op game: use at your own risk, private or solo lobbies only. Tested with GyroUE 0.9.1 (DualSense), same engine code; not yet with Gyro4All. |
 | Resident Evil 7 biohazard | RE Engine (TDB 70, the 2022+ DX12 build) | yes (shipped) | The gyro turns the free-look camera controller (`app.PlayerCamera`, `MaximumOperatable`); scripted cameras, animations and pause turn it off. The game only reads XInput (it takes a real DualShock 4 found through DirectInput, but not a DualSense, nor a DualSense shown as a DualShock 4): the profile sets `XInput=2`. Tested with a DualSense, Steam Input off. |
 | Onimusha: Way of the Sword (demo) | RE Engine (TDB 82) | no | The gyro turns the game camera (`app.CameraManager._InGameCameraOperator._GameCamera`) through its base param worker's current param (`_BaseParamWorker._CurrentParam` -> `_AttachDeg`), and the camera's blend while aiming in and out; pitch within the game's `_StaticPitchLimit`. Off during lock-on, Issen and the death camera. Tested with a DualSense, REFramework installed. |
@@ -548,6 +549,43 @@ profile turns the check off. Zoom compensation (`gyro.zoom_compensation`) report
 MenuLevel=0
 ZoomReferenceFOV=85
 ```
+
+### Unity games (`[Unity]`)
+
+Unity games built with the Mono scripting backend (a `MonoBleedingEdge` folder next to the exe) are supported; IL2CPP
+builds (`GameAssembly.dll`) are not yet. Install next to the game's exe (where `UnityPlayer.dll` is). Unity has no
+engine-wide camera: each game turns its own objects, so a Unity game needs a profile that says which. Without one the
+gyro goes to the game as right-stick input. The profile's `[Unity]` section names managed fields or properties by name
+(as in the game's C# code, e.g. read with a .NET decompiler), as dot-separated paths from the player object:
+
+| Key | Meaning |
+|---|---|
+| `Player=` | The player object: a static field or property, `Assembly:Namespace.Class::Member` (`Assembly:Class::Member` without a namespace). Required. |
+| `Yaw=` | The object whose world yaw (`transform.eulerAngles.y`) turns. Empty = the player itself. |
+| `Pitch=` | The object whose local pitch (`transform.localEulerAngles.x`) turns. Empty = the player itself. |
+| `PitchMin=`, `PitchMax=` | Pitch limits in Unity's degrees (positive looks down): numbers or paths. Default -89 and 89. |
+| `Look=` | Comma-separated true/false paths that must all be true for the gyro to turn (`!` in front negates one). Default: whenever the player exists. |
+| `Camera=` | The player's `Camera` (its vertical `fieldOfView` feeds zoom compensation). |
+| `ZoomReference=` | The unzoomed vertical FOV (a path or a number); else `[Gyro4All] ZoomReferenceFOV=` (horizontal). |
+
+A path ending at a component or GameObject uses its transform. Pause (`Time.timeScale` 0) and a free mouse cursor
+(menus) hold the gyro in every Unity game. With `XInput=2`, Unity's Windows.Gaming.Input gamepad support is refused so
+the game falls back to XInput and reads the Xbox controller Gyro4All shows. MOUSE: P.I. For Hire's profile:
+
+```ini
+[Unity]
+Player=Mouse:Player::Instance
+Yaw=characterController
+Pitch=cameraRigController
+PitchMin=_rotationSettings.MinPitch
+PitchMax=_rotationSettings.MaxPitch
+Look=gameObject.activeInHierarchy, inputs._controls.m_Player_Look.enabled
+Camera=playerCamera
+ZoomReference=cameraFovController._baseVerticalFOV
+```
+
+The log's `unity:` lines show the profile as read, a path that names a missing member, the player found or gone, and
+why the gameplay view is off (`gameplay view off: <path> is false`).
 
 ## Finding the camera of a new game
 

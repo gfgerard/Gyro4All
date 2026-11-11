@@ -28,6 +28,13 @@ bool add_ordinal(const char* dll, WORD ordinal, const char* function, void* repl
 // it loads), for hooks that must see how that library opens the controller.
 bool add_with_pad_library(const char* dll, const char* function, void* replacement, void** original);
 
+// Exports a game module looks up at run time (GetProcAddress) instead of importing them: filter(module, name, real,
+// caller) returns the replacement to hand out, else real. name may be an ordinal (IS_INTRESOURCE); caller is the
+// lookup's return address in the game module. One GetProcAddress hook in the game modules serves every filter (the
+// first that replaces wins); at most four. DllMain or any thread; filters run on the caller's thread.
+using LookupFilter = FARPROC (*)(HMODULE module, LPCSTR name, FARPROC real, void* caller);
+void filter_lookups(LookupFilter filter);
+
 // Import slots this module patched that were written back by something else (another mod, an overlay, the game) are
 // patched again; the first time for each slot is logged. Returns how many were fixed. Any thread.
 int verify();

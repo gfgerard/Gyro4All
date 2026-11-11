@@ -1231,6 +1231,7 @@ void host_configure(Engine& engine) {
     xs.touchpad_back = settings::get(L"XInputTouchpadBack", 1) != 0;
     xs.trace = settings::get(L"XInputTrace", 0) != 0;
     xs.window_class = engine.window_class();
+    xs.wgi_falls_back = engine.wgi_falls_back_to_xinput();
     xs.controllers_changed = [] { g_engine->controllers_changed(); };
     xinput::install(xs);
     // The game's DirectInput controllers: idle while GyroLib's panel has the controller (every XInput mode), and

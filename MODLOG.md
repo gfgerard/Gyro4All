@@ -5,6 +5,67 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-11 **First Unity game: MOUSE: P.I. For Hire (Fumi Games), new Unity engine module** (branch `unity-mouse-pi`;
+  built, 872 checks pass; tested in game by the user: gyro, pause/menus/dialogue gates, `XInput=1` and `XInput=2`).
+  Unity 6000.3.13f1, Mono scripting backend (`MonoBleedingEdge\EmbedRuntime\mono-2.0-bdwgc.dll`), D3D11 in the user's
+  run (a `D3D12` folder ships too). `MOUSE.exe` is a stub; `UnityPlayer.dll` imports `PeekMessageW`, `WINMM.dll` and
+  `VERSION.dll`, so `winmm.dll` next to `MOUSE.exe` loads and the module prefix `UnityPlayer` gets its imports hooked.
+  Its main thread pumps messages, then runs the frame's scripts: the gyro frame runs right before the game's `Update`,
+  on the thread Mono runs the scripts on. Pad: GameSir Cyclone 2 in DS4 mode (HID `054C:09CC`, plus the pad's own
+  `3537:0575` and `057E:2009` interfaces), Steam Input not involved.
+  - **The camera** (decompiled with ILSpy into the scratchpad, not kept): `Mouse.dll`,
+    `Mouse.CharacterMovement.PlayerRotationBehaviour.Update` reads `IRotationBehaviourDependencies.PitchYaw` =
+    (`Head.localEulerAngles.x`, `CharacterController.transform.eulerAngles.y`) every frame, adds stick/mouse (degrees),
+    clamps pitch to `RotationBehaviourSettings.MinPitch/MaxPitch` (fields, -90/90 by default; Unity pitch positive =
+    down) and writes both back. `Head` = `Player.cameraRigController.transform`, `CharacterController` =
+    `Player.characterController` (a serialized `MouseCharacterController`, so not assumed to be the player's own
+    transform). The player: `Player.Instance` (static auto-property, global namespace, `Mouse.dll`). No managed float
+    holds the angles: they live in Unity's native transforms, so the gyro turns them through `Transform`'s own
+    `eulerAngles`/`localEulerAngles` setters, called with `mono_runtime_invoke`. The game's `ApplyGyro` is an empty stub.
+  - **Gates:** pause = `Time.timeScale` 0 (the game's `TimeUtil.IsTimePaused`; `Player.Update` skips the rotation then).
+    Menus, dialogue and cutscenes: the game's `InputManager` disables the whole Player action map through its input
+    blockers (`OnBlockerUpdated`), so `Player.inputs._controls.m_Player_Look.enabled` (`InputAction.enabled`) is the
+    game's own "can look" signal (log: `gameplay view off: inputs._controls.m_Player_Look.enabled is false`). The hub map
+    is a car (`HubPlayer`), with `Player`'s GameObject inactive: `gameObject.activeInHierarchy` gates it.
+  - **Zoom:** `SecondaryWeaponAbilityScope` sets the virtual camera's vertical FOV to `scopedFov`;
+    `CameraFOVController._baseVerticalFOV` is the unzoomed vertical FOV; dash/slide/kick add FOV modifiers (wider). The
+    profile reports `playerCamera` (`Camera.fieldOfView`) against `_baseVerticalFOV`. Not verified with a scope yet.
+  - **Module** (`src/engines/unity/`): detection `<stem>_Data` + `UnityPlayer.dll`; Mono's embedding API bound from the
+    loaded runtime (`unity_mono.cpp`), member paths from the profile's `[Unity]` section (`unity_path.hpp`,
+    unit-tested): `Player=Assembly:Class::Member`, then `Yaw=`, `Pitch=`, `PitchMin=`/`PitchMax=`, `Look=` (bool
+    conditions, `!` negates), `Camera=`, `ZoomReference=`. Fields and property getters are found by name on each
+    object's class; a destroyed Unity object (`UnityEngine.Object.m_CachedPtr` 0) ends a path. Nothing managed is kept
+    across frames, only classes and members. No profile, or IL2CPP (`GameAssembly.dll`): the gyro as right stick.
+  - **Dead end 1: `session: handed to ...\UnityCrashHandler64.exe`.** The player starts its crash handler from the game
+    folder at launch; the core took it for the real game started by a launcher, handed it the session, and the game ran
+    without gyro or panel. Fix: `UnityEngine::is_launcher` names `UnityCrashHandler64/32.exe` (as RED's error reporter);
+    `detect` also matches it so it stays a plain proxy.
+  - **Dead end 2: `Cursor.visible` has no getter in this build** (setter only: managed code stripping keeps what the game
+    uses). Only the members that turn the camera are required now (`m_CachedPtr`, Transform angles and setters,
+    `Component.transform`); `GameObject.transform`, `Camera.fieldOfView`, `Time.timeScale`, `Cursor.lockState` and
+    `Cursor.visible` getters are optional (logged when stripped). Menus' cursor = `lockState` not Locked (and visible
+    when the build can tell).
+  - **`XInput=2`** (the user's setup for this pad: Xbox prompts) first gave the game no controller at all. Player.log:
+    `Using Windows.Gaming.Input`: Unity 6 reads gamepads through Windows.Gaming.Input (`RoGetActivationFactory` of
+    `Windows.Gaming.Input.Gamepad` / `RawGameController`, UnityPlayer imports from `api-ms-win-core-winrt-l1-1-0.dll`)
+    and only if that fails loads `XInput1_4/1_3/9_1_0.dll` and looks the functions up with `GetProcAddress`; neither
+    reaches the core's import-table XInput hooks, while `XInput=2` refused the DS4's HID device. Fix in the core:
+    `hooks::filter_lookups` (one `GetProcAddress` hook in the game modules, several filters; the overlay's run-time
+    D3D lookups moved onto it unchanged); `Engine::wgi_falls_back_to_xinput()` (Unity only): the game modules'
+    run-time XInput lookups get the translated functions, and with `XInput=2` activating any `Windows.Gaming.Input.*`
+    class fails with `REGDB_E_CLASSNOTREG`. Log: `Windows.Gaming.Input.Gamepad refused`, `the game looks XInput up at
+    run time (XInputGetState, from UnityPlayer.dll+0xA4D40A)`, `PS4 Controller shown as XInput controller 0`;
+    Player.log: `Windows.Gaming.Input failed to initialize ... fallback to XInput` / `Using XInput`. User: works,
+    Xbox UI. Other engines keep exactly their import-table XInput translation. Metro 2033 worked with `XInput=2`
+    because its exe imports `XINPUT1_3` by ordinal. The game still opens the pad's `3537:0575` interface (not Sony:
+    not refused); no doubled input seen.
+  - Build machine notes: VS 2022 Build Tools (MSVC 14.44) can't link `gyro4all.dll` against GyroLib 1.3.1's
+    `gyrolib_panel.lib` (unresolved `__std_max_element_f_`, a newer STL); VS 2026 Build Tools (MSVC 14.51) builds it. A
+    user `CMAKE_PREFIX_PATH` pointing at another SDK with its own SDL3 made CMake pick that SDL3 over GyroLib's bundled
+    one: build with it unset.
+  - Next: the boss cannon (`CannonViewfinder`, its own `ViewFinderRotationDependencies` pivots, no static instance) and
+    the noclip ghost are separate cameras the gyro doesn't turn; check the scope's zoom compensation in play.
+
 - 2026-11-05 **RDR2 (Steam): Gyro4All ran in the launcher `PlayRDR2.exe`, never in `RDR2.exe`; launchers now hand the
   session over with any engine, also when the game starts through another program** (built, 853 checks pass; verified
   with a fake launcher, `bash tools/launchertest/run.sh`; not yet tested with the real game). User log: only `Gyro4All

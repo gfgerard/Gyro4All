@@ -51,6 +51,7 @@
 | Metro Exodus Enhanced Edition | ✅ Works (tested on the Steam version) | 4A Engine | Install next to `MetroExodus.exe` in the game's main folder. |
 | Monster Hunter Wilds | ⚠️ Partially tested | RE Engine | Game seems to implement only Steam Input for controller support. Functionality should be already covered by Steam. |
 | Mortal Shell | ✅ Works | Unreal Engine 4.25.0 | `F10` panel works (DX11). The game's own PlayStation support only knows the DualShock 4: its profile makes Gyro4All show your DualSense (USB or Bluetooth) to it as one, with PlayStation icons, rumble and light bar. |
+| MOUSE: P.I. For Hire | ✅ Works | Unity 6 | Install next to `MOUSE.exe` in the game's main folder. Uses the profile provided. Gyro off in menus, dialogue and cutscenes; not in the boss cannon sequence. |
 | Out of sight | ✅ Works | Unreal Engine 5.5.4 | |
 | Robocop: Rogue city | ✅ Works | Unreal Engine 5.2.0 | |
 | The Outer Worlds: Spacer's Choice Edition | ✅ Works | Unreal Engine 4.27.2 | Native DualSense support: Gyro4All leaves the controller to the game. |

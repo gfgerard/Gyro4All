@@ -1279,9 +1279,7 @@ void install_legacy(bool native) {
 // Graphics APIs looked up at run time (LoadLibrary + GetProcAddress) by a game module that also imports the API's DLL
 // for other functions, so loads_graphics_api_itself doesn't apply: Crysis's CryRenderD3D10.dll imports d3d10.dll's
 // shader helpers but gets D3D10CreateDevice and CreateDXGIFactory with GetProcAddress, and CryRenderD3D9.dll
-// Direct3DCreate9. The game modules' GetProcAddress hands out the same hooks the import tables get.
-using GetProcAddress_t = FARPROC(WINAPI*)(HMODULE, LPCSTR);
-GetProcAddress_t g_get_proc = nullptr;
+// Direct3DCreate9. The game modules' GetProcAddress hands out the same hooks the import tables get (hooks::filter_lookups).
 
 struct RuntimeExport {
     const char* dll;
@@ -1313,10 +1311,8 @@ RuntimeExport g_runtime_exports[] = {
     {"d3d9.dll", "Direct3DCreate9Ex", nullptr, nullptr},
 };
 
-FARPROC WINAPI hk_get_proc_address(HMODULE module, LPCSTR name) {
-    if (!g_get_proc) g_get_proc = &GetProcAddress;  // only a delay-load import was patched so far
-    const FARPROC real = g_get_proc(module, name);
-    if (!real || !module || IS_INTRESOURCE(name)) return real;
+FARPROC lookup_filter(HMODULE module, LPCSTR name, FARPROC real, void* caller) {
+    if (IS_INTRESOURCE(name)) return real;
     for (RuntimeExport& e : g_runtime_exports) {
         if (std::strcmp(name, e.function) != 0 || module != GetModuleHandleA(e.dll)) continue;
         void* hook = e.hook;
@@ -1328,7 +1324,7 @@ FARPROC WINAPI hk_get_proc_address(HMODULE module, LPCSTR name) {
         if (!hook) return real;
         if (!e.logged.exchange(true))
             log("overlay: %s!%s looked up at run time by %s: hooked", e.dll, e.function,
-                mem::module_offset(reinterpret_cast<uintptr_t>(_ReturnAddress())).c_str());
+                mem::module_offset(reinterpret_cast<uintptr_t>(caller)).c_str());
         return reinterpret_cast<FARPROC>(hook);
     }
     return real;
@@ -1412,8 +1408,7 @@ void install(const std::wstring& settings_path) {
                reinterpret_cast<void**>(&g_create_factory1));
     hooks::add("dxgi.dll", "CreateDXGIFactory2", reinterpret_cast<void*>(&hk_create_factory2),
                reinterpret_cast<void**>(&g_create_factory2));
-    hooks::add("kernel32.dll", "GetProcAddress", reinterpret_cast<void*>(&hk_get_proc_address),
-               reinterpret_cast<void**>(&g_get_proc));
+    hooks::filter_lookups(&lookup_filter);
     if (no_streamline) g_sl_mode = -1;
     else if (!watch_streamline()) log("overlay: cannot watch DLL loads: Streamline's factory not available to the panel");
     log("overlay: enabled (%s); DXGI factory hooks registered%s", why.c_str(),

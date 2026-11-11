@@ -1,7 +1,7 @@
 // Unit tests for the parts of Gyro4All that need no game: the Unreal module's game profile (ue_profile.cpp), the
 // core's Match=Camera choice (camera_match.hpp), FOV conversion (fov.hpp), stick fallback (stick_fallback.cpp,
-// stick_response.cpp), stick camera (stick_camera.cpp), sensor-time pacing (sensor_pacer.cpp) and zoom compensation
-// (zoom.hpp). Built with Gyro4All (target gyro4all_tests); run with tools/test-gyro4all.sh.
+// stick_response.cpp), stick camera (stick_camera.cpp), sensor-time pacing (sensor_pacer.cpp), zoom compensation
+// (zoom.hpp) and the Unity module's profile member paths (unity_path.hpp). Built with Gyro4All (target gyro4all_tests); run with tools/test-gyro4all.sh.
 #include "camera_match.hpp"
 #include "fov.hpp"
 #include "sensor_pacer.hpp"
@@ -9,6 +9,7 @@
 #include "stick_fallback.hpp"
 #include "ue_profile.hpp"
 #include "ue_update_rotation_match.hpp"
+#include "unity_path.hpp"
 #include "util.hpp"
 #include "zoom.hpp"
 
@@ -1451,7 +1452,44 @@ void test_zoom_ramp() {
     CHECK(std::abs(r.step(1, 900 * ms, 0) - 1) < 1e-12);                    // no ramp: at once
 }
 
+// The Unity module's profile member paths (unity_path.hpp).
+void test_unity_paths() {
+    using unity::parse_path;
+    std::string error;
+    auto p = parse_path("Mouse:Player::Instance", error);
+    CHECK(p && p->assembly == "Mouse" && p->ns.empty() && p->cls == "Player" && p->members.size() == 1 &&
+          p->members[0] == "Instance" && !p->from_player());
+    p = parse_path(" Assembly-CSharp:Game.Core.PlayerManager::<Instance>k__BackingField.player ", error);
+    CHECK(p && p->assembly == "Assembly-CSharp" && p->ns == "Game.Core" && p->cls == "PlayerManager" &&
+          p->members.size() == 2 && p->members[0] == "<Instance>k__BackingField" && p->members[1] == "player");
+    p = parse_path("inputs._controls.m_Player_Look.enabled", error);
+    CHECK(p && p->from_player() && p->members.size() == 4 && p->members[3] == "enabled");
+    p = parse_path("", error);
+    CHECK(p && p->from_player() && p->members.empty());
+    p = parse_path(".", error);
+    CHECK(p && p->from_player() && p->members.empty());
+    p = parse_path("-89.5", error);
+    CHECK(p && p->constant && *p->constant == -89.5 && !p->from_player());
+    CHECK(!parse_path("12abc", error));
+    CHECK(!parse_path("a..b", error));
+    CHECK(!parse_path("Mouse:Player", error));             // no '::'
+    CHECK(!parse_path("Mouse:Player::", error));           // no member
+    CHECK(!parse_path("::Instance", error));               // no assembly or class
+    CHECK(!parse_path("!enabled", error));                 // '!' only in conditions
+    p = parse_path("!enabled", error, true);
+    CHECK(p && p->negate && p->members.size() == 1);
+    std::vector<unity::MemberPath> list;
+    CHECK(unity::parse_path_list("gameObject.activeInHierarchy, !paused,,", list, error) && list.size() == 2 &&
+          !list[0].negate && list[1].negate && list[1].members[0] == "paused");
+    CHECK(unity::parse_path_list("", list, error) && list.empty());
+    CHECK(!unity::parse_path_list("ok, bad name", list, error));
+    CHECK(unity::describe(*parse_path("Mouse:Player::Instance", error)) == "Mouse:Player::Instance");
+    CHECK(unity::describe(*parse_path("a.b", error)) == "a.b");
+    CHECK(unity::describe(*parse_path("", error)) == "(the player)");
+}
+
 int main() {
+    test_unity_paths();
     test_rewritten_helper();
     test_match_single_member();
     test_match_base_follows();

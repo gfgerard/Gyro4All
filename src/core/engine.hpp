@@ -73,6 +73,11 @@ public:
     // Window class of the game's windows, which get WM_DEVICECHANGE when the virtual Xbox controller comes or goes
     // (nullptr = every top-level window of the game thread).
     virtual const wchar_t* window_class() const { return nullptr; }
+    // The game reads gamepads through Windows.Gaming.Input and falls back to XInput when those classes can't be
+    // activated, looking XInput's functions up with GetProcAddress (Unity): those lookups get the translated functions,
+    // and with XInput=2 the classes are refused, so the game reads the Xbox controller Gyro4All shows (Windows.Gaming.
+    // Input reads real devices only). Off by default: a game without that fallback would lose every gamepad.
+    virtual bool wgi_falls_back_to_xinput() const { return false; }
     // Game thread, right after that WM_DEVICECHANGE: for games that look for controllers only at other times (e.g. when
     // their viewport is created), make the game look again now.
     virtual void controllers_changed() {}

@@ -4,6 +4,7 @@
 #include "dinputpad.hpp"
 #include "hooks.hpp"
 #include "log.hpp"
+#include "mem.hpp"
 #include "nativepad.hpp"
 #include "notify.hpp"
 #include "overlay.hpp"
@@ -777,6 +778,87 @@ void announce_device_change() {
     log("xinput: WM_DEVICECHANGE posted to %d game window(s)%s", posted.first, posted.second ? " of the process" : "");
 }
 
+// Game modules that look the XInput functions up at run time instead of importing them (Unity's UnityPlayer.dll:
+// LoadLibrary of XInput1_4/1_3/9_1_0 + GetProcAddress) get the same translated functions the import tables get.
+bool is_xinput_dll(HMODULE module) {
+    wchar_t path[MAX_PATH];
+    if (!GetModuleFileNameW(module, path, MAX_PATH)) return false;
+    const wchar_t* file = wcsrchr(path, L'\\');
+    file = file ? file + 1 : path;
+    return _wcsnicmp(file, L"xinput", 6) == 0;
+}
+
+FARPROC xinput_lookup(HMODULE module, LPCSTR name, FARPROC real, void* caller) {
+    struct Export {
+        const char* function;
+        WORD ordinal;  // xinput1_3/1_4's
+        void* hook;
+        void** original;
+    };
+    static const Export exports[] = {
+        {"XInputGetState", 2, reinterpret_cast<void*>(&hk_get_state), reinterpret_cast<void**>(&g_get_state)},
+        {"XInputSetState", 3, reinterpret_cast<void*>(&hk_set_state), reinterpret_cast<void**>(&g_set_state)},
+        {"XInputGetCapabilities", 4, reinterpret_cast<void*>(&hk_get_caps), reinterpret_cast<void**>(&g_get_caps)},
+        {"XInputEnable", 5, reinterpret_cast<void*>(&hk_enable), reinterpret_cast<void**>(&g_enable)},
+        {"XInputGetStateEx", 100, reinterpret_cast<void*>(&hk_get_state_ex), reinterpret_cast<void**>(&g_get_state_ex)},
+    };
+    static std::atomic<bool> logged{false};
+    for (const Export& e : exports) {
+        const bool match = IS_INTRESOURCE(name) ? LOWORD(reinterpret_cast<uintptr_t>(name)) == e.ordinal
+                                                : std::strcmp(name, e.function) == 0;
+        if (!match || !is_xinput_dll(module)) continue;
+        InterlockedCompareExchangePointer(e.original, reinterpret_cast<void*>(real), nullptr);
+        if (!logged.exchange(true))
+            log("xinput: the game looks XInput up at run time (%s, from %s): translated like an import",
+                IS_INTRESOURCE(name) ? "by ordinal" : name, mem::module_offset(reinterpret_cast<uintptr_t>(caller)).c_str());
+        return reinterpret_cast<FARPROC>(e.hook);
+    }
+    return real;
+}
+
+// XInput=2 for games that read gamepads through Windows.Gaming.Input first (Engine::wgi_falls_back_to_xinput):
+// activating its classes fails as if the API weren't there, so the game falls back to XInput and reads the Xbox
+// controller shown to it. Other Windows Runtime classes pass.
+using RoGetActivationFactory_t = HRESULT(WINAPI*)(void* class_id, REFIID iid, void** factory);
+using RoActivateInstance_t = HRESULT(WINAPI*)(void* class_id, void** instance);
+using WindowsGetStringRawBuffer_t = PCWSTR(WINAPI*)(void* string, UINT32* length);
+RoGetActivationFactory_t g_ro_get_factory = nullptr;
+RoActivateInstance_t g_ro_activate = nullptr;
+constexpr HRESULT kClassNotRegistered = HRESULT(0x80040154);  // REGDB_E_CLASSNOTREG
+
+bool refused_class(void* class_id) {
+    static const auto raw = reinterpret_cast<WindowsGetStringRawBuffer_t>(
+        GetProcAddress(LoadLibraryW(L"combase.dll"), "WindowsGetStringRawBuffer"));
+    if (!raw || !class_id) return false;
+    UINT32 length = 0;
+    const PCWSTR text = raw(class_id, &length);
+    constexpr wchar_t kPrefix[] = L"Windows.Gaming.Input.";
+    constexpr UINT32 kLen = UINT32(std::size(kPrefix) - 1);
+    if (!text || length < kLen || wcsncmp(text, kPrefix, kLen) != 0) return false;
+    static std::atomic<int> logs{0};
+    if (logs.fetch_add(1) < 4)
+        log("xinput: XInput=2: the game's Windows.Gaming.Input class %ls refused (it falls back to XInput)", text);
+    return true;
+}
+
+HRESULT WINAPI hk_ro_get_factory(void* class_id, REFIID iid, void** factory) {
+    if (refused_class(class_id)) {
+        if (factory) *factory = nullptr;
+        return kClassNotRegistered;
+    }
+    if (!g_ro_get_factory) return kClassNotRegistered;
+    return g_ro_get_factory(class_id, iid, factory);
+}
+
+HRESULT WINAPI hk_ro_activate(void* class_id, void** instance) {
+    if (refused_class(class_id)) {
+        if (instance) *instance = nullptr;
+        return kClassNotRegistered;
+    }
+    if (!g_ro_activate) return kClassNotRegistered;
+    return g_ro_activate(class_id, instance);
+}
+
 void install(const Settings& settings) {
     g_settings = settings;
     const char* modes[] = {"off", "auto", "always"};
@@ -843,6 +925,16 @@ void install(const Settings& settings) {
     }
     log("xinput: XInputGetState hook %s (%s)", any ? "installed" : "registered, no game module imports it yet",
         any ? hooks::source_dll("XInputGetState").c_str() : "patched when a module that imports it loads");
+    // Only for the engines that ask (Unity): other games keep exactly the import-table translation they were tested with.
+    if (g_settings.wgi_falls_back) hooks::filter_lookups(&xinput_lookup);
+    if (g_settings.mode == Always && g_settings.wgi_falls_back) {
+        hooks::add(nullptr, "RoGetActivationFactory", reinterpret_cast<void*>(&hk_ro_get_factory),
+                   reinterpret_cast<void**>(&g_ro_get_factory));
+        hooks::add(nullptr, "RoActivateInstance", reinterpret_cast<void*>(&hk_ro_activate),
+                   reinterpret_cast<void**>(&g_ro_activate));
+        log("xinput: XInput=2: the game's Windows.Gaming.Input gamepad classes will be refused (the engine falls back to "
+            "XInput)");
+    }
     // Auto watches how the game reads controllers; XInput=2 keeps it from reading them itself (HID devices, also
     // through Sony's pad library DLL: nativepad.cpp; and Raw Input for game controllers).
     hooks::add(nullptr, "RegisterRawInputDevices", reinterpret_cast<void*>(&hk_register_raw), reinterpret_cast<void**>(&g_register_raw));
