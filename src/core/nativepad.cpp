@@ -58,14 +58,7 @@ GetValueCaps_t g_get_value_caps = nullptr;
 // The original of an import: from the hook, else from the DLL the game imports it from (never called from DllMain).
 template <typename F>
 F original(F& slot, const char* function, const char* fallback_dll) {
-    if (F f = reinterpret_cast<F>(InterlockedCompareExchangePointer(reinterpret_cast<void**>(&slot), nullptr, nullptr)))
-        return f;
-    std::string dll = hooks::source_dll(function);
-    if (dll.empty()) dll = fallback_dll;
-    HMODULE m = LoadLibraryA(dll.c_str());
-    F f = m ? reinterpret_cast<F>(GetProcAddress(m, function)) : nullptr;
-    if (f) InterlockedExchangePointer(reinterpret_cast<void**>(&slot), reinterpret_cast<void*>(f));
-    return f;
+    return hooks::resolve_original(slot, function, fallback_dll);
 }
 
 constexpr uint16_t kSony = 0x054C;

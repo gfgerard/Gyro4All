@@ -24,11 +24,10 @@ std::atomic<HWND> g_window{nullptr};
 // nothing, so the panel is drawn once per frame.
 thread_local int t_swapping = 0;
 
+// The original, loading the DLL when a delay-load slot was patched before its first call.
 template <class T>
-T original(T hooked, const wchar_t* dll, const char* name) {
-    if (hooked) return hooked;
-    HMODULE m = GetModuleHandleW(dll);
-    return m ? reinterpret_cast<T>(GetProcAddress(m, name)) : nullptr;
+T original(T& hooked, const char* dll, const char* name) {
+    return hooks::resolve_original(hooked, name, dll);
 }
 
 void before_swap(HDC hdc) {
@@ -41,7 +40,7 @@ void before_swap(HDC hdc) {
 
 BOOL WINAPI hk_swap_buffers(HDC hdc) {
     before_swap(hdc);
-    const auto real = original(g_swap_buffers, L"gdi32.dll", "SwapBuffers");
+    const auto real = original(g_swap_buffers, "gdi32.dll", "SwapBuffers");
     ++t_swapping;
     const BOOL r = real ? real(hdc) : FALSE;
     --t_swapping;
@@ -50,7 +49,7 @@ BOOL WINAPI hk_swap_buffers(HDC hdc) {
 
 BOOL WINAPI hk_wgl_swap_buffers(HDC hdc) {
     before_swap(hdc);
-    const auto real = original(g_wgl_swap_buffers, L"opengl32.dll", "wglSwapBuffers");
+    const auto real = original(g_wgl_swap_buffers, "opengl32.dll", "wglSwapBuffers");
     ++t_swapping;
     const BOOL r = real ? real(hdc) : FALSE;
     --t_swapping;

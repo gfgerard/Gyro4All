@@ -118,15 +118,10 @@ bool g_native_allowed = true;  // OverlayFactory=game: only the objects the game
 thread_local int t_create_depth = 0;
 thread_local bool t_inner_device = false;
 
-// The real export when the import hook had no original yet (a delay-load resolved after the hook was registered).
+// The real export when the import hook had no original yet (a delay-load slot patched before its first call).
 template <class T>
 T resolve(T& original, const char* function) {
-    if (!original) {
-        std::string dll = hooks::source_dll(function);
-        HMODULE m = GetModuleHandleA(dll.empty() ? "d3d9.dll" : dll.c_str());
-        if (m) original = reinterpret_cast<T>(GetProcAddress(m, function));
-    }
-    return original;
+    return hooks::resolve_original(original, function, "d3d9.dll");
 }
 
 void draw(IDirect3DDevice9* device) {

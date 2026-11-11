@@ -16,7 +16,7 @@ void init(const std::wstring& module_prefix, bool force_inline = false);
 
 // Register an import to redirect in all game modules (regular and delay-load import tables). dll may be
 // null to match any DLL name. *original receives the first resolved original function; it stays null
-// when the only imports are delay-loads of a DLL that isn't loaded yet (resolve it from source_dll()).
+// when the only imports are delay-loads of a DLL that isn't loaded yet: replacements get it with resolve_original().
 // Patches already-loaded modules now. Returns true if at least one module was patched so far.
 bool add(const char* dll, const char* function, void* replacement, void** original);
 
@@ -64,6 +64,16 @@ bool inline_mode();
 
 // Name of the DLL whose import of `function` was patched first (e.g. "XINPUT1_4.dll"), or "" if none yet.
 std::string source_dll(const char* function);
+
+// The original a hook's replacement calls: *original if set, else the export (or `ordinal`) from the DLL the game imports
+// `function` from (source_dll(), else fallback_dll), loaded if it isn't yet. A delay-load slot patched before its first
+// call never ran the game's helper that loads the DLL, so *original is still null then. Cached atomically. Call only at
+// call time, never in DllMain. Returns null if the export doesn't exist.
+void* resolve_original_raw(void** original, const char* function, const char* fallback_dll, WORD ordinal = 0);
+template <class T>
+T resolve_original(T& original, const char* function, const char* fallback_dll, WORD ordinal = 0) {
+    return reinterpret_cast<T>(resolve_original_raw(reinterpret_cast<void**>(&original), function, fallback_dll, ordinal));
+}
 
 // DLLs imported by the loaded game modules (regular and delay-load tables), as written in the import table.
 struct ImportedDll {

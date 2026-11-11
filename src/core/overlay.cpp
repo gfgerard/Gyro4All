@@ -841,21 +841,24 @@ std::atomic<bool> g_import_factory_seen{false};
 
 HRESULT WINAPI hk_create_factory(REFIID riid, void** out) {
     g_import_factory_seen = true;  // before the call: a factory made through Streamline inside it is the import's
-    const HRESULT hr = g_create_factory(riid, out);
+    const auto fn = hooks::resolve_original(g_create_factory, "CreateDXGIFactory", "dxgi.dll");
+    const HRESULT hr = fn ? fn(riid, out) : E_FAIL;
     if (SUCCEEDED(hr) && out) hook_factory(*out);
     return hr;
 }
 
 HRESULT WINAPI hk_create_factory1(REFIID riid, void** out) {
     g_import_factory_seen = true;  // before the call: a factory made through Streamline inside it is the import's
-    const HRESULT hr = g_create_factory1(riid, out);
+    const auto fn = hooks::resolve_original(g_create_factory1, "CreateDXGIFactory1", "dxgi.dll");
+    const HRESULT hr = fn ? fn(riid, out) : E_FAIL;
     if (SUCCEEDED(hr) && out) hook_factory(*out);
     return hr;
 }
 
 HRESULT WINAPI hk_create_factory2(UINT flags, REFIID riid, void** out) {
     g_import_factory_seen = true;  // before the call: a factory made through Streamline inside it is the import's
-    const HRESULT hr = g_create_factory2(flags, riid, out);
+    const auto fn = hooks::resolve_original(g_create_factory2, "CreateDXGIFactory2", "dxgi.dll");
+    const HRESULT hr = fn ? fn(flags, riid, out) : E_FAIL;
     if (SUCCEEDED(hr) && out) hook_factory(*out);
     return hr;
 }
@@ -886,12 +889,11 @@ D3D10CreateDeviceAndSwapChain_t g_d3d10_create_sc = nullptr;
 D3D10CreateDevice1_t g_d3d10_create1 = nullptr;
 D3D10CreateDeviceAndSwapChain1_t g_d3d10_create_sc1 = nullptr;
 
-// The export itself when the import hook had no original yet (a delay-load resolved after the hook was registered).
+// The original, loading the DLL when a delay-load slot was patched before the game called it (returning E_FAIL there
+// made UE games fail with "A D3D11-compatible GPU ... is required").
 template <class T>
 T real(T& original, const char* dll, const char* function) {
-    if (!original)
-        if (HMODULE m = GetModuleHandleA(dll)) original = reinterpret_cast<T>(GetProcAddress(m, function));
-    return original;
+    return hooks::resolve_original(original, function, dll);
 }
 
 void begin_create() {

@@ -160,8 +160,8 @@ bool patch_slots(HMODULE module, const char* dll, const IMAGE_THUNK_DATA64* name
         }
         const bool unresolved = delay && slots->u1.Function >= base && slots->u1.Function < end;
         if (unresolved) {
-            // The DLL may not be loaded yet (no LoadLibrary here: this can run in DllMain); then the caller resolves the
-            // original itself from source_dll().
+            // The DLL may not be loaded yet (no LoadLibrary here: this can run in DllMain); then the replacement resolves
+            // the original at call time with resolve_original().
             if (!*hook.original)
                 if (HMODULE loaded = GetModuleHandleA(dll))
                     *hook.original = reinterpret_cast<void*>(
@@ -560,6 +560,20 @@ std::string source_dll(const char* function) {
     for (const Hook& hook : g_hooks)
         if (!hook.from.empty() && std::strcmp(hook.function, function) == 0) return hook.from;
     return {};
+}
+
+void* resolve_original_raw(void** original, const char* function, const char* fallback_dll, WORD ordinal) {
+    if (void* f = InterlockedCompareExchangePointer(original, nullptr, nullptr)) return f;
+    std::string dll = source_dll(function);
+    if (dll.empty() && fallback_dll) dll = fallback_dll;
+    if (dll.empty()) return nullptr;
+    // LoadLibrary only when not loaded: a missing export retried on every call adds no module references.
+    HMODULE m = GetModuleHandleA(dll.c_str());
+    if (!m) m = LoadLibraryA(dll.c_str());
+    void* f = m ? reinterpret_cast<void*>(GetProcAddress(m, ordinal ? MAKEINTRESOURCEA(ordinal) : function)) : nullptr;
+    if (!f) return nullptr;
+    void* prev = InterlockedCompareExchangePointer(original, f, nullptr);
+    return prev ? prev : f;
 }
 
 std::vector<ImportedDll> imported_dlls() {

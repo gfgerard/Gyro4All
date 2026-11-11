@@ -126,20 +126,12 @@ struct Call {
     ~Call() { --t_depth; }
 };
 
-HMODULE loader() { return GetModuleHandleW(L"vulkan-1.dll"); }
-
-template <class T>
-T loader_proc(const char* name) {
-    HMODULE m = loader();
-    return m ? reinterpret_cast<T>(GetProcAddress(m, name)) : nullptr;
-}
-
 // The original of a path's hooked function; on vulkan-1.dll's path the loader's export when the import had none yet (a
-// delay-load resolved later, or a function the exe only fetches through vkGet*ProcAddr).
+// delay-load slot patched before its first call, loaded here, or a function the exe only fetches through vkGet*ProcAddr).
 template <int P, class T>
 T real(T Originals::*field, const char* name) {
-    if (T fn = g_orig[P].*field) return fn;
-    return P == kLoader ? loader_proc<T>(name) : nullptr;
+    if (P != kLoader) return g_orig[P].*field;
+    return hooks::resolve_original(g_orig[P].*field, name, "vulkan-1.dll");
 }
 
 // The first few calls of a kind through each path are logged (which path the game uses, and when it changes).
