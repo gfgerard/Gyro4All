@@ -5,6 +5,20 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-10 **RAGE (2011, id Tech 5, Steam 9200, `Rage64.exe`): detection.** Gyro4All 1.11.0 loaded (winmm.dll, OpenGL pump thread, panel,
+  DualSense samples) but took it for id Tech 6: RAGE has DOOM's `base\gameresources.resources` marker, not TNO's `master.index`/`chunk0.resources`.
+  Type info 2856 classes, none of the player's fields; RTTI `idGameLocal` exe+0x1973AB8, `idPlayer` exe+0x19A4D38, `idPhysics_Player` exe+0x1C06E58;
+  the exe has the `idUsercmdGenLocal` RTTI name. Change: `base\streamed.resources` + `virtualtextures\` mark id Tech 5 before DOOM's marker.
+  Plan: `games/RAGE/MODDING_PLAN.md`.
+- 2026-11-11 **RAGE: gyro works on foot** (user-confirmed, DualSense). `idUsercmdGenLocal` exe+0x290BE80, input angles +0x10 (a +30 yaw write
+  turned the view). RAGE's own offsets (TNO's are wrong here): physics pointer idPlayer+0x340; the physics object holds repeated
+  player-state blocks: command angles short[3] at physics+0x30a6 (SHORT2ANGLE), command time at +0x30c4 (new every tick: the pause gate),
+  float view angles at +0x3120 (copy at +0x31b0); deltaViewAngles not located (0 on foot), the check takes view = command. The heap scan
+  missed the player: RAGE's idPlayer is 8-aligned, `scan_region` only read 16-aligned qwords (now 8).
+  - **Vehicles:** the player's view and command angles freeze while the vehicle camera keeps resetting the input angles to 0; the gyro
+    there moved the vehicle camera. Gate: gyro off while the command stays >5 degrees from the input angles for 250 ms (log `idtech: RAGE:
+    the player's command no longer follows the input angles`). Not yet tested in game.
+
 - 2026-11-10 **RDR2: flick stick 180s in first person turned only 126-136 degrees and drifted; 90s and third person
   exact (user report; flick style 1, snap 1, 150 ms).** Not the Cyberpunk cause (RAGE has one view, no camera matching).
   Read-only sampler `games/RedDeadRedemption2/flick_sampler.py` (active camera at ~1 kHz; stored front `+0x7b0`, else
@@ -287,6 +301,23 @@ Steam Input; the connection wasn't recorded). Also seen once: right after a firs
     The generic view now learns the clamp (a pitch write that comes back pulled toward zero; starts at +-89;
     `unity: learnt the game's pitch clamp`); `PitchLimit=` pins it. To re-verify: aim past where the mouse stops.
 
+- 2026-11-10 **RDR2 "drift", reporter's third report: "almost always, very noticeable" after switching to defaults, "random and
+  barely noticeable" with their backed-up files.** The backup holds an older `winmm.dll` (an earlier build also labelled 1.10.1,
+  size differs from the 1.10.1 release zip: the log line can't tell the two apart), their `gyrolib.ini` and the game's
+  `system.xml`. Not established which "defaults" they mean (Gyro4All files, the game's settings, or both).
+  - Their `gyrolib.ini`: Hold on L2 (`gyro.activation=3`, `activation.trigger=1`, `activation.trigger_threshold=0`), smoothing
+    0, tightening 0, sensitivity 2, `calibration.automatic=2`, and a saved manual calibration
+    (`calibration.device.<id>.manual`, bias about 0.49 -0.16 0.06). A fresh `gyrolib.ini` has no manual reference: GyroLib then
+    learns only under the stricter limits (mean under 3 deg/s, noise under 0.9 deg/s RMS) and, during active use, only within
+    0.15 deg/s, so a pad that is always hand-held may keep a wrong bias. That fits "almost always", unconfirmed.
+  - Their trace (backup setup, old build, no B lines): applied against raw fits r > 0.999, gain 2.0, zero points x 0.517,
+    y -0.028, matching the logged bias (0.48-0.53, -0.03). The scan finds only short slides of 0.2-0.5 deg, all `pad reads`.
+    The pad's own zero moves between sessions: y -0.14 and z +0.09 on 2026-11-06, y -0.03 and z -0.09 here.
+  - `system.xml` differs only in graphics and display (DLSS, Reflex On + Boost, 160 Hz, HDR off); nothing in it reaches the gyro
+    path. The game's targeting and lock-on settings live elsewhere, and their defaults (aim assist on) would pull the aim while
+    L2 is held: still the main game-side suspect if "defaults" meant the game's.
+  - A trace shows what Gyro4All asked of the camera, not where the camera went: the RAGE module has no `view_angles`, so the
+    game's own turns (aim assist) can't be separated from the gyro's yet.
 - 2026-11-06 **RDR2 "drift", reporter's update and a long-session trace.** Rare and random, usually after sudden movements,
   "as if the gyro occasionally leaks"; "menus only" didn't help (on RAGE a saved "menus only" becomes "any time" at the
   next start, `host.cpp`), switching back to "any time" it almost disappeared. A bias knocked off by a sudden movement is

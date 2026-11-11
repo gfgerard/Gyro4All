@@ -130,6 +130,7 @@ std::atomic<bool> g_need_input{false};  // id Tech 5: the game thread's check re
 int64_t g_mg6_physics = 0xeb68;
 std::atomic<bool> g_ready{false};
 std::atomic<bool> g_scan_started{false};
+bool g_tech5_rage = false;   // detect(): RAGE (2011), id Tech 5 with its own offsets
 bool g_tech5_files = false;  // detect(): the install has id Tech 5's resource files (set before the scan thread starts)
 // Found by the scan thread, any time after g_ready.
 std::atomic<uintptr_t> g_game_local{0};
@@ -139,7 +140,7 @@ std::atomic<bool> g_need_player{true};    // the game thread has no valid player
 
 bool Layout::complete() const {
     if (mg6 || mg7) return g_input_angles >= 0;
-    return physics >= 0 && view_angles >= 0 && current >= 0 && delta_angles >= 0;
+    return physics >= 0 && view_angles >= 0 && current >= 0 && (delta_angles >= 0 || tech5);
 }
 
 // The input generator's angles in memory, 0 while unknown.
@@ -344,6 +345,20 @@ DWORD WINAPI scan_thread(void*) {
         g_input_angles = gen ? int64_t(gen - g_image.base) + 0x10 : 0x1c1cb40;
         log("idtech: id Tech 5 idUsercmdGenLocal %s: input angles at %s", gen ? mem::module_offset(gen).c_str() : "not found",
             mem::module_offset(g_image.base + uintptr_t(int64_t(g_input_angles))).c_str());
+        if (g_tech5_rage) {
+            // RAGE (Steam 9200, MODLOG 2026-11-11): physics pointer at idPlayer+0x340; the physics object holds
+            // repeated player-state blocks: the command's short angles at +0x30a6 (pitch, yaw), its time at +0x30c4
+            // (new every tick) and the float view angles at +0x3120. deltaViewAngles not located (0 on foot): the
+            // check takes view = command.
+            g_layout.physics = 0x340;
+            g_layout.view_angles = 0x3120;
+            g_layout.cmd = 0x30a0;
+            g_layout.current = 0x3046;
+            g_layout.delta_angles = -1;
+            g_layout.cmd_angles = 0x60;
+            log("idtech: RAGE offsets: physics at idPlayer+0x340, viewAngles +0x3120, command angles +0x30a6, "
+                "command +0x30a0 (deltaViewAngles unknown, taken as 0)");
+        } else {
         g_layout.physics = 0x310;
         g_layout.view_angles = 0x488;
         g_layout.cmd = 0x43c;
@@ -352,6 +367,7 @@ DWORD WINAPI scan_thread(void*) {
         g_layout.cmd_angles = 0x60;
         log("idtech: id Tech 5 offsets (no player fields in its type info): physics at idPlayer+0x310, viewAngles +0x488, "
             "deltaViewAngles +0x3578, input command +0x43c (checked against the game's own equation)");
+        }
     } else if (g_layout.mg6) {
         // Wolfenstein II (MODLOG 2026-10-20, Game Pass 1.5.0.0): one idPlayer in the heap with its
         // idHavokPhysics_Player embedded at +0xeb68 (mg6_physics: another build's offset is found in the player), whose
@@ -457,6 +473,10 @@ public:
         // DOOM 2016 and Eternal: base\gameresources.resources; The Dark Ages: base\common.resources; Indiana Jones and
         // the Great Circle (MachineGames' id Tech 7): base\gameresources_pc.resources.
         auto has = [&](const wchar_t* file) { return GetFileAttributesW((dir + file).c_str()) != INVALID_FILE_ATTRIBUTES; };
+        // id Tech 5 (RAGE): base\gameresources.resources as DOOM's, so it is told apart first by base\streamed.resources
+        // and the virtualtextures folder.
+        g_tech5_rage = g_tech5_files = has(L"\\base\\streamed.resources") && has(L"\\virtualtextures");
+        if (g_tech5_files) return true;
         for (const wchar_t* marker :
              {L"\\base\\gameresources.resources", L"\\base\\common.resources", L"\\base\\gameresources_pc.resources"})
             if (has(marker)) return true;
@@ -677,10 +697,10 @@ private:
     bool check_tech5() const {
         const uintptr_t physics = physics_of(player_);
         const uintptr_t state = physics + uintptr_t(g_layout.current);
-        Angles view, delta;
+        Angles view, delta{};
         int16_t angles[3] = {};
         if (!physics || !mem::rd(physics + uintptr_t(g_layout.view_angles), view) ||
-            !mem::rd(state + uintptr_t(g_layout.delta_angles), delta) ||
+            (g_layout.delta_angles >= 0 && !mem::rd(state + uintptr_t(g_layout.delta_angles), delta)) ||
             !mem::guarded_copy(angles, state + uintptr_t(g_layout.cmd_angles), sizeof angles))
             return false;
         constexpr float kShort = 360.0f / 65536.0f;
@@ -765,6 +785,9 @@ private:
             }
             if (frozen) f.paused = true;
             if (!player_since_ || now - player_since_ < 2000) why = "player just spawned";
+            // RAGE's vehicles: the player's command angles freeze while the vehicle camera keeps resetting the input
+            // angles (MODLOG 2026-11-11). On foot the command follows the input angles within a tick.
+            if (!why && !frozen && g_tech5_rage && !rage_follows(now)) why = "vehicle (the player's command doesn't follow the input angles)";
         } else if (g_layout.mg6 || g_layout.mg7) {
             // No pause or menu signal mapped yet: the game pauses itself when it loses focus (the core's focus gate
             // covers that); its pause menu and cutscenes are still to find.
@@ -781,6 +804,30 @@ private:
         f.view_id = why ? 0 : 1;
         f.target = why ? why : g_layout.mg7 ? "idUsercmdGenLocal" : "idPlayer";
         return f;
+    }
+
+    // RAGE: false once the player's command angles (SHORT2ANGLE) have stayed more than 5 degrees from the input angles
+    // for 250 ms (several ticks: a fast turn is copied on the next one); true again as soon as they meet.
+    bool rage_follows(ULONGLONG now) {
+        const uintptr_t physics = physics_of(player_);
+        int16_t cmd[2] = {};
+        float input[2] = {};
+        const uintptr_t at = input_at();
+        if (!physics || !at || !mem::guarded_copy(cmd, physics + uintptr_t(g_layout.current + g_layout.cmd_angles), sizeof cmd) ||
+            !mem::guarded_copy(input, at, sizeof input) || !std::isfinite(input[0]) || !std::isfinite(input[1]))
+            return true;
+        constexpr float kShort = 360.0f / 65536.0f;
+        const float off = std::max(std::fabs(std::remainder(input[0] - cmd[0] * kShort, 360.0f)),
+                                   std::fabs(std::remainder(input[1] - cmd[1] * kShort, 360.0f)));
+        if (off < 5.0f) apart_since_ = 0;
+        else if (!apart_since_) apart_since_ = now;
+        const bool follows = !apart_since_ || now - apart_since_ < 250;
+        if (follows != rage_follows_logged_) {
+            rage_follows_logged_ = follows;
+            log("idtech: RAGE: the player's command %s the input angles (%.1f degrees apart): %s", follows ? "follows" : "no longer follows",
+                off, follows ? "on foot" : "vehicle or scripted view, gyro off");
+        }
+        return follows;
     }
 
     // The gate candidates (g_watches) and the Windows cursor, one line whenever any of them changes ("-" = unreadable).
@@ -813,6 +860,8 @@ private:
     ULONGLONG asked_at_ = 0, stuck_since_ = 0;
     int stuck_dir_ = 0;
     uintptr_t player_ = 0;
+    ULONGLONG apart_since_ = 0;        // RAGE: when the command's angles last left the input angles (0 = together)
+    bool rage_follows_logged_ = true;
     uintptr_t tech5_checked_ = 0;  // id Tech 5: the player whose offsets passed check_tech5
     ULONGLONG tech5_next_check_ = 0;
     mutable int last_check_ = -1;

@@ -62,6 +62,7 @@
 | PAYDAY 3 | ✅ Works | Unreal Engine 5.5.4 | ✅⚠️ **Always-online co-op game: use at your own risk**, in private or solo lobbies only. Its profile lets the gyro follow the camera during actions that take it over. |
 | The Planet Crafter | ✅ Works (tested on the demo) | Unity (Mono) | Install next to `Planet Crafter.exe` in the game's main folder. |
 | Pragmata | ✅ Works, **with [REFramework](https://github.com/praydog/REFramework)** | RE Engine | Install next to `PRAGMATA.exe` in the game's main folder, **together with a recent REFramework**: the game has Capcom's anti-tamper, which crashes the game about 30 s after start without it (an older REFramework build crashed it too). **Turn off the game's own gyro option** (it works while aiming with L2): Gyro4All's gyro also works while aiming, and the two would add up. |
+| RAGE (2011) | ✅ Works (tested on the Steam version) | id Tech 5 | Install next to `Rage64.exe` in the game's main folder. 64-bit only (`Rage.exe` not supported). Gyro off in vehicles. |
 | Red Dead Redemption 2 | ✅ Works (tested on the Rockstar launcher version) | RAGE | Install next to `RDR2.exe` in the game's main folder. Story mode only: never play Red Dead Online with it. Binoculars turn through the right stick (less precise). |
 | Remnant 2 | ✅ Works | Unreal Engine 5 | Needs the profile provided |
 | Remnant: From the Ashes | ✅ Works (tested on the Steam version) | Unreal Engine 4 | Needs the profile provided |

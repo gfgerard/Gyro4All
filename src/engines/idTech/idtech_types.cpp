@@ -162,10 +162,10 @@ uintptr_t find_qword(uintptr_t begin, uintptr_t end, uint64_t value) {
 
 namespace {
 
-// The 16-aligned qwords equal to value in [begin, end), appended to out up to max. Guarded per region.
+// The 8-aligned qwords equal to value (RAGE allocates its idPlayer 8-aligned) in [begin, end), appended to out up to max. Guarded per region.
 size_t scan_region(uintptr_t begin, uintptr_t end, uint64_t value, uintptr_t* out, size_t n, size_t max) {
     __try {
-        for (uintptr_t p = begin; p + 8 <= end && n < max; p += 16)
+        for (uintptr_t p = begin; p + 8 <= end && n < max; p += 8)
             if (*reinterpret_cast<const uint64_t*>(p) == value) out[n++] = p;
     } __except (mem::guard_filter(GetExceptionInformation())) {
     }

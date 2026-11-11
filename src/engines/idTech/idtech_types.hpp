@@ -54,7 +54,7 @@ uintptr_t rtti_vtable(const Image& image, const char* decorated);
 std::string rtti_name(const Image& image, uintptr_t p);
 // First 8-aligned address in [begin, end) holding value, 0 if none (guarded scan).
 uintptr_t find_qword(uintptr_t begin, uintptr_t end, uint64_t value);
-// Up to max 16-aligned addresses in the process's committed private read-write memory (the heaps) holding value: the
+// Up to max 8-aligned addresses in the process's committed private read-write memory (the heaps) holding value: the
 // objects whose vtable is value. Returns how many were found; bytes receives the amount scanned.
 size_t heap_find(uint64_t value, uintptr_t* out, size_t max, uint64_t* bytes = nullptr);
 
