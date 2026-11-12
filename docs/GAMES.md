@@ -68,6 +68,7 @@
 | Onimusha: Way of the Sword | ✅ Works (tested on the demo) | RE Engine | Install next to the game's exe in its main folder. The gyro turns off during lock-on. Needs REFramework installed.|
 | Out of sight | ✅ Works | Unreal Engine 5.5.4 | |
 | Firewatch | ✅ Works | Unity (Mono) | Install next to `Firewatch.exe` in the game's main folder. |
+| Outer Wilds | ✅ Works (tested on the Steam version) | Unity 2019 (Mono) | Install next to `OuterWilds.exe` in the game's main folder. Gyro off at the ship's flight console (the right stick turns the ship there); ship free look not covered. |
 | The Outer Worlds: Spacer's Choice Edition | ✅ Works | Unreal Engine 4.27.2 | Native DualSense support: Gyro4All leaves the controller to the game. |
 | Pacific Drive | ✅ Works | Unreal Engine 4.27 | Gyro on foot **and** in the car. |
 | PAYDAY 3 | ✅ Works | Unreal Engine 5.5.4 | ✅⚠️ **Always-online co-op game: use at your own risk**, in private or solo lobbies only. Its profile lets the gyro follow the camera during actions that take it over. |
@@ -87,6 +88,7 @@
 | Returnal | ✅ Works | Unreal Engine 4.25.1 | Tip: in the settings panel, set the gyro to work only while L2/R2 is held. |
 | Risk of Rain 2 | ✅ Works | Unity (Mono) | Install next to `Risk of Rain 2.exe`. |
 | Robocop: Rogue city | ✅ Works | Unreal Engine 5.2.0 | |
+| Routine | ✅ Works | Unreal Engine | Install in `Routine\Binaries\Win64`, next to `Routine-Win64-Shipping.exe`. Needs the profile provided. |
 | Severed Steel | ✅ Works (tested on the demo) | Unreal Engine 4 | DX11: the `F10` panel isn't verified in this game yet. Rename `MSVCP140.dll` and `MSVCP140_2.dll` in its `Binaries\Win64` folder (e.g. to `.bak`): it ships an old VC++ runtime that GyroLib can't use. Until you do, Gyro4All leaves the gyro off and tells you so on screen. |
 | Silent Hill 2 (remake) | ✅ Works (tested on the Steam version) | Unreal Engine 5 | Install in `SHProto\Binaries\Win64`. Needs the custom profile in `Gyro4All\profiles` dir |
 | Star Wars Jedi: Fallen Order | ✅ Works | Unreal Engine 4 | |

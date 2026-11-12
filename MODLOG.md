@@ -5,6 +5,10 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-13 **User confirmations (1.11.0):** Cyberpunk 2077 sitting on a chair (workspot) works with the gyro; RAGE's
+  vehicle gate (gyro off while the command stays away from the input angles) works in game. `docs/GAMES.md` rows added for
+  Outer Wilds and Routine (Routine's profile was learned by the probe, see 2026-11-11; its engine version is not recorded).
+
 - 2026-11-12 **Firewatch (Steam, Unity Mono, `Firewatch.exe`): the probe found no pitch; the look state is a camera mode in
   a `LinkedList`, now reachable by Unity paths; hand-made profile** (1.11.0 build, unit tests pass; **works in game, smooth,
   user's run with a DualSense**; connection and Steam Input state not recorded).
