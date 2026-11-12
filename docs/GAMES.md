@@ -6,9 +6,19 @@
 ## Supported games
 
 > [!TIP]
-> **Your game isn't listed?** Many games made with the tested engines work without any setup: just try it. 
-> In Unreal Engine if the camera doesn't follow the gyro, Gyro4All tells you on screen, and [Advanced](ADVANCED.md#finding-the-camera-of-a-new-game) explains how to add support by yourself.
+> **Your game isn't listed?** Many games made with the tested engines work without any setup: just try it.
 > If the game isn't working you can [suggest adding support for it here](https://github.com/gfgerard/Gyro4All/issues/new?template=game_support.md)
+
+> [!TIP]
+> ## Unreal Engine and Unity
+> **Games that don't work "out of the box" (most in Unity): the probe**. When the camera doesn't follow the gyro, the
+> probe starts by itself and tells you on screen how to proceed. Turn the right stick when it tells you, then leave
+> the controller alone for a few seconds. If successful it creates the game's profile (`Gyro4All\profiles\<game exe>.ini`), and the camera follows
+> the gyro from then on (restart the game if the on-screen message asks you to). 
+> You can also start the probe by hand with `Ctrl+F7`.
+> [Details in Advanced](ADVANCED.md#finding-the-camera-of-a-new-game).
+>
+> In both engines, **play windowed or borderless**: the probe's on-screen messages don't show in exclusive fullscreen.
 
 | Game | Status | Engine | What to know |
 |---|---|---|---|
