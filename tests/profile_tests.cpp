@@ -18,6 +18,7 @@
 #include "util.hpp"
 #include "zoom.hpp"
 
+#include <array>
 #include <windows.h>
 
 #include <algorithm>
@@ -1481,6 +1482,50 @@ void test_unity_quaternions() {
     CHECK(near_angle(a.pitch, 0) && near_angle(a.yaw, -165));
     a = view_angles(add_turn(from_euler(0, 0), 20, 0));
     CHECK(near_angle(a.pitch, 20) && near_angle(a.yaw, 0));
+    // A body's yaw around an up: the world's for an upright frame, the planet's for a body on its side.
+    a = view_angles(add_yaw_about(from_euler(0, 170), up_of(Quaternion{}), 25));
+    CHECK(near_angle(a.pitch, 0) && near_angle(a.yaw, -165));
+    const Quaternion tilted = from_euler(0, 0, 90);  // up is the world's -X: a body on the side of a planet
+    const Vector3 tilted_up = up_of(tilted);
+    CHECK(std::abs(tilted_up.x + 1) < 1e-9 && std::abs(tilted_up.y) < 1e-9 && std::abs(tilted_up.z) < 1e-9);
+    const Quaternion yawed = add_yaw_about(tilted, tilted_up, 30);
+    const Vector3 u1 = up_of(yawed);
+    CHECK(std::abs(u1.x - tilted_up.x) < 1e-9 && std::abs(u1.y - tilted_up.y) < 1e-9 && std::abs(u1.z - tilted_up.z) < 1e-9);
+    CHECK(std::abs(yaw_between_about(tilted, yawed, tilted_up) - 30) < 1e-9);
+    CHECK(std::abs(yaw_between_about(yawed, tilted, tilted_up) + 30) < 1e-9);
+    // A pitched head under an upright parent (PowerWash Simulator's HeadTurn): the parent's up gives a plain world yaw, and
+    // the pitch it carries adds no yaw.
+    const Quaternion head = from_euler(-20, 40);
+    a = view_angles(add_yaw_about(head, up_of(Quaternion{}), 10));
+    CHECK(near_angle(a.pitch, 20) && near_angle(a.yaw, 50));
+    CHECK(std::abs(yaw_between_about(head, add_yaw_about(head, up_of(Quaternion{}), 10), up_of(Quaternion{})) - 10) < 1e-9);
+    CHECK(std::abs(yaw_between_about(from_euler(0, 40), head, up_of(Quaternion{}))) < 1e-9);
+    // A root body (Outer Wilds' Player_Body) turns around its own up: the same as a local yaw, q * Ry.
+    for (const Quaternion& q : {tilted, head, from_euler(33, -120, 47)}) {
+        const Quaternion world = add_yaw_about(q, up_of(q), 17), local = normalize(multiply(q, from_euler(0, 17)));
+        CHECK(std::abs(world.x * local.x + world.y * local.y + world.z * local.z + world.w * local.w) > 1 - 1e-12);
+        CHECK(std::abs(yaw_between_about(q, local, up_of(local)) - 17) < 1e-9);
+    }
+    CHECK(yaw_up_from_parent(head, Quaternion{}));                     // a pitched head: its parent's up
+    CHECK(yaw_up_from_parent(from_euler(0, 40), Quaternion{}));        // upright: either is the same
+    CHECK(!yaw_up_from_parent(tilted, Quaternion{}));                  // on a planet's side, under a world-aligned frame
+    CHECK(!yaw_up_from_parent(from_euler(-20, 40, 15), Quaternion{})); // rolled: not a pitch alone
+    // The probe's angles in a body's frame: the world's for an upright body, the look's own for a tilted one.
+    {
+        const Quaternion upright = from_euler(0, 70), look = from_euler(-25, 15);  // the camera's turn on the body
+        const ViewAngles world = view_angles(multiply(upright, look));
+        const ViewAngles in_body = angles_in_body(upright, 70, multiply(upright, look));
+        CHECK(near_angle(in_body.pitch, world.pitch) && near_angle(in_body.yaw, world.yaw));
+        const ViewAngles own = view_angles(look);
+        for (const Quaternion& body : {tilted, from_euler(33, -120, 47)}) {
+            const ViewAngles a2 = angles_in_body(body, 10, multiply(body, look));
+            CHECK(near_angle(a2.pitch, own.pitch) && near_angle(a2.yaw, own.yaw + 10));
+            // The body yawed around its own up by 30 (body yaw added up to 40): the camera's yaw 30 more, pitch unchanged.
+            const Quaternion turned = add_yaw_about(body, up_of(body), 30);
+            const ViewAngles a3 = angles_in_body(turned, 10 + yaw_between_about(body, turned, up_of(turned)), multiply(turned, look));
+            CHECK(near_angle(a3.pitch, own.pitch) && near_angle(a3.yaw, own.yaw + 40));
+        }
+    }
     const Quaternion combined = multiply(from_euler(10, 20, 30), from_euler(-5, 15, -10));
     CHECK(std::isfinite(combined.x) && std::isfinite(combined.y) && std::isfinite(combined.z) &&
           std::isfinite(combined.w));
@@ -1536,6 +1581,67 @@ void test_unity_profile() {
     write_file(floats, "[Unity]\r\nObjectType=Look\r\nPitchPath=_pitch\r\nYawPerDegree=0\r\n");
     CHECK(!load_unity_profile(floats).enabled());
     CHECK(load_unity_profile(floats).yaw_per_degree == 1);
+    // Both axes on Transforms the player script holds, the game's Look action as the gate, its own unzoomed FOV (MOUSE).
+    write_file(floats, "[Unity]\r\nObjectType=Player\r\nPitchObject=cameraRigController\r\nYawObject=characterController\r\n"
+                       "Look=gameObject.activeInHierarchy, inputs._controls.m_Player_Look.enabled\r\n"
+                       "ZoomReference=cameraFovController._baseVerticalFOV\r\n");
+    const auto objects = load_unity_profile(floats);
+    CHECK(objects.enabled() && objects.pitch_on_object() && objects.yaw_on_object() && objects.has_view());
+    CHECK(objects.pitch_object.size() == 1 && objects.yaw_object[0] == "characterController");
+    CHECK(objects.look.size() == 2 && !objects.look[0].negate && objects.look[1].path.size() == 4 &&
+          objects.look[1].path[3] == "enabled");
+    CHECK(objects.zoom_reference.size() == 2 && objects.zoom_reference_value == 0 &&
+          objects.zoom_axis == gyro4all::unity::FovAxis::Auto);
+    // A float wins over an object for the same axis; YawParent too; ZoomReference= may be a number.
+    write_file(floats, "[Unity]\r\nObjectType=Look\r\nPitchPath=_pitch\r\nPitchObject=rig\r\nYawParent=1\r\nYawObject=body\r\n"
+                       "ZoomReference=60\r\nZoomReferenceAxis=horizontal\r\nLook=!paused\r\n");
+    const auto mixed = load_unity_profile(floats);
+    CHECK(mixed.enabled() && !mixed.pitch_on_object() && !mixed.yaw_on_object() && mixed.zoom_reference_value == 60);
+    CHECK(mixed.zoom_axis == gyro4all::unity::FovAxis::Horizontal);
+    CHECK(mixed.look.size() == 1 && mixed.look[0].negate && mixed.look[0].path[0] == "paused");
+    // An object alone for one axis is no view; a malformed Look= is dropped whole.
+    write_file(floats, "[Unity]\r\nObjectType=Player\r\nPitchObject=cameraRigController\r\nLook=a..b, c\r\nZoomReference=500\r\n");
+    const auto half = load_unity_profile(floats);
+    CHECK(!half.enabled() && half.look.empty() && half.zoom_reference_value == 0 && half.zoom_reference.empty());
+    std::vector<gyro4all::unity::LookCondition> look;
+    CHECK(gyro4all::unity::parse_look("", look) && look.empty());
+    CHECK(gyro4all::unity::parse_look(" a.b , ,! c ", look) && look.size() == 2 && look[1].negate && look[1].path[0] == "c");
+    CHECK(!gyro4all::unity::parse_look("a b", look) && look.empty());
+    CHECK(!gyro4all::unity::parse_look("!", look));
+}
+
+// ZoomReference='s axis: Camera.fieldOfView is vertical; MOUSE's _baseVerticalFOV holds 105, its horizontal at 16:9 (72.5).
+void test_unity_zoom_reference_axis() {
+    using namespace gyro4all::unity;
+    std::puts("unity: ZoomReference's axis told from the camera's FOV, and the probe's pick of the unzoomed FOV");
+    constexpr double wide = 16.0 / 9;
+    const double v105 = gyro4all::fov::vertical_from_horizontal(105, wide);
+    CHECK(std::abs(v105 - 72.45) < 0.1);
+    CHECK(parse_fov_axis("Vertical") == FovAxis::Vertical && parse_fov_axis("h") == FovAxis::Horizontal &&
+          parse_fov_axis("") == FovAxis::Auto && parse_fov_axis("diagonal") == FovAxis::Auto);
+    CHECK(fov_axis_seen(105, v105, wide) == FovAxis::Horizontal);
+    CHECK(fov_axis_seen(72.5, 72.5, wide) == FovAxis::Vertical);
+    CHECK(fov_axis_seen(105, 40, wide) == FovAxis::Auto);  // zoomed: neither
+    CHECK(fov_axis_seen(90, 90, 1.0) == FovAxis::Auto);    // a square window: both
+    // Unzoomed frames decide it; zoomed ones don't count, and a few matching the other axis don't override it.
+    FovAxisVote vote;
+    for (int i = 0; i < 100; ++i) CHECK(vote.add(105, 40, wide) == FovAxis::Auto);
+    for (int i = 0; i < 5; ++i) vote.add(105, 105, wide);
+    for (int i = 0; i < FovAxisVote::kVotes - 1; ++i) CHECK(vote.add(105, v105, wide) == FovAxis::Auto);
+    CHECK(vote.add(105, v105, wide) == FovAxis::Horizontal);
+    CHECK(vote.add(105, 105, wide) == FovAxis::Horizontal);  // decided: stays
+    vote.reset();
+    CHECK(vote.decided() == FovAxis::Auto);
+    for (int i = 0; i < FovAxisVote::kVotes; ++i) vote.add(60, 60, wide);
+    CHECK(vote.decided() == FovAxis::Vertical);
+    // The probe's pick: named for a FOV, not a zoom or a speed, equal to the camera's in one axis; base and the like first.
+    const auto mouse = fov_reference_match("_baseVerticalFOV", 105, v105, wide);
+    CHECK(mouse && mouse->axis == FovAxis::Horizontal && mouse->score == 3);
+    const auto plain = fov_reference_match("settings.fov", v105, v105, wide);
+    CHECK(plain && plain->axis == FovAxis::Vertical && plain->score == 1);
+    CHECK(!fov_reference_match("_zoomFov", 105, v105, wide) && !fov_reference_match("currentFov", v105, v105, wide));
+    CHECK(!fov_reference_match("fovLerpSpeed", 105, v105, wide) && !fov_reference_match("_baseHeight", 105, v105, wide));
+    CHECK(!fov_reference_match("_baseFov", 90, v105, wide));  // not the camera's in either axis
 }
 
 void test_unity_aim_check() {
@@ -1610,6 +1716,9 @@ void test_unity_discovery() {
     CHECK(discovery_score("Game.Foo", "_yaw", false) > 0);
     CHECK(discovery_score("Cinemachine.CinemachinePOV", "m_HorizontalAxis.Value", false) > 0);
     CHECK(discovery_score("Game.Mover", "m_Input", false) == 0);
+    // Outer Wilds' pitch: a look word ("degrees") on a camera class, on the camera's rig, ahead of a bare "y" there.
+    CHECK(discovery_score("PlayerCameraController", "_degreesY", true) > discovery_score("PlayerCameraController", "_offsetY", true));
+    CHECK(discovery_score("PlayerCameraController", "_degreesY", true) >= 12);
     CHECK(discovery_score("PlayerCamera", "maxPitch", true) == 0);
     CHECK(discovery_score("PlayerCamera", "pitchSpeed", true) == 0);
     CHECK(discovery_score("PlayerCamera", "recoilPitch", true) == 0);
@@ -1746,6 +1855,45 @@ void test_unity_probe_candidates() {
     r.camera_field.clear();
     keys = profile_keys(r);
     CHECK(value("YawObjectType") == "Game.Body" && value("CameraField") == "(none)");
+    CHECK(value("PitchObject") == "(none)" && value("YawObject") == "(none)");
+    // Transforms a script holds: no floats, no units.
+    ProbeResult t;
+    t.pitch_class = t.yaw_class = "Player";
+    t.pitch_object = "cameraRigController";
+    t.yaw_object = "characterController";
+    keys = profile_keys(t);
+    CHECK(value("ObjectType") == "Player" && value("YawObjectType") == "(none)" && value("PitchObject") == "cameraRigController" &&
+          value("YawObject") == "characterController" && value("PitchPath") == "(none)" && value("PitchPerDegree") == "(none)" &&
+          value("YawPath") == "(none)" && value("YawPerDegree") == "(none)");
+    t.yaw_class = "Body";
+    t.automatic = true;
+    keys = profile_keys(t);
+    CHECK(value("YawObjectType") == "Body" && value("Source") == "auto");
+    // A pitch on an object with the body's yaw above the camera.
+    t.yaw_object.clear();
+    t.yaw_class.clear();
+    t.yaw_parent = 2;
+    keys = profile_keys(t);
+    CHECK(value("YawParent") == "2" && value("YawObjectType") == "(none)" && value("YawObject") == "(none)");
+    CHECK(value("ZoomReference") == "(none)" && value("ZoomReferenceAxis") == "(none)");
+    // The unzoomed FOV found, with the axis the camera showed it in.
+    t.zoom_reference = "cameraFovController._baseVerticalFOV";
+    t.zoom_axis = gyro4all::unity::FovAxis::Horizontal;
+    keys = profile_keys(t);
+    CHECK(value("ZoomReference") == "cameraFovController._baseVerticalFOV" && value("ZoomReferenceAxis") == "Horizontal");
+    t.pitch_class.clear();  // no ObjectType: nothing for the path to start from
+    keys = profile_keys(t);
+    CHECK(value("ZoomReference") == "(none)");
+    // A Transform turns about one degree per degree, the same way; names put the body before a head for yaw.
+    CHECK(transform_score({0.99, 1.0}, {}, 10) > 0);
+    CHECK(transform_score({0.99, -1.0}, {}, 10) == 0 && transform_score({0.99, 0.0174}, {}, 10) == 0);
+    CHECK(transform_score({0.99, 1.0}, {0.9, 1}, 10) == 0);
+    CHECK(transform_discovery_score("Player", "characterController", false) >
+          transform_discovery_score("Player", "cameraRigController", false));
+    CHECK(transform_discovery_score("Player", "cameraRigController", true) > 0);
+    CHECK(transform_discovery_score("Player", "characterController", true) == 0);
+    CHECK(transform_discovery_score("Enemy", "target", false) == 0 && transform_discovery_score("Player", "weaponPivot", true) == 0);
+    CHECK(object_rejection("Player", "cameraRigController") == "Player @cameraRigController");
 }
 
 // The game's own pitch float, found by matching the camera's pitch after the player's turns.
@@ -1793,6 +1941,7 @@ int main() {
     test_unity_aim_check();
     test_unity_pitch_clamp();
     test_unity_probe_candidates();
+    test_unity_zoom_reference_axis();
     test_unity_discovery();
     test_unity_quaternions();
     test_unity_legacy_keys();

@@ -208,6 +208,7 @@ All diagnostics go to `Gyro4All\Gyro4All.log` (probe results, if enabled, to `Gy
 | `longpress: button N tapped` / `held` | Long-press blocking at work (first few logged): `tapped` = a short press passed to the game, `held` = a hold whose game action was blocked. N is SDL's button number (0 south/Cross, 1 east/Circle, 2 west/Square, 3 north/Triangle...). |
 | `nativepad: right stick centred in the game's reports` | Flick stick is active: the game sees a centred right stick (`passed through` when it stops, e.g. in menus). |
 | `xinput: XInput=2: the game's access to HID device 054C:0CE6 refused` | With `XInput=2` the game tried to open the controller itself (its own DualSense support) and was refused, so it only gets the Xbox controller. `Raw Input registration ... dropped` is the same for Raw Input. |
+| `xinput: XInput=2: the game's Windows.Gaming.Input class Windows.Gaming.Input.Gamepad refused` | Unity only: with `XInput=2` the player's Windows.Gaming.Input gamepad support (Unity 6) is refused, so it falls back to XInput and reads the Xbox controller Gyro4All shows. |
 | `hooks: the import of ... was written back by something else (now <module>)` | Another module (an overlay such as Epic Online Services' `EOSOVH-Win64-Shipping.dll`) rewrote a game import Gyro4All had patched. XInput imports are `patched again` so the translated controller keeps reaching the game; others are `left to it`. |
 | `gyro: Steam Input reader started (the game's steam_api64.dll)` | The game uses Steam: GyroLib also reads the controller's gyro through the game's own Steam Input (it borrows the game's Steam service and changes nothing in it). This is how the gyro works when Steam Input hides the controller and the game reads Steam Input itself (Monster Hunter Wilds). `Steam Input reader: unavailable` is normal while Steam Input has no controller. |
 | `stick fallback: the game undid the gyro's camera writes 8 frames in a row: gyro as right-stick input; game's stick: ...` (or `forced on (StickFallbackTest)`) / `stick fallback off: <why>` | The game kept putting the camera back after each gyro write (a scripted aim, or a camera rebuilt from other state), so the gyro went to the game as right-stick input until `<why>`: the game keeps the writes again, another camera, or no readable view. `the stick turns nothing` means the game doesn't read the controller through a path Gyro4All can change (Steam Input, its own SDL): no fallback for that camera. `game's stick: radial dead zone 0.20, curve 1.50, yaw 160 and pitch 110 deg/s at full stick, 2 frames late (default, to learn)` is the model of the game's stick it starts with (`(saved)`: from `StickFallbackLearned=`, `(learnt)`: this session). `stick fallback: the game's stick, learnt: ... (the model explains N% of the camera's motion)`: the model learnt from the camera (again when it changes); `(inverted)` after an axis the game turns the other way. `stick fallback: StickFallbackLearned=... saved to <profile>`: kept for the next session. While it runs, a `status: stick fallback: stick (x, y), game's stick: ... (learnt, explains N% / saved for this game, learning / default, learning)` line follows the status line. With `MotionTrace=1`, `K,x,y,yaw,pitch,used` lines in `motion-trace.csv` give each frame's deflection, the camera's turn and which axes the learner took (with `StickFallbackTest=1` the trace starts with the fallback). `stick fallback test: forced on / detection only for a minute`: `StickFallbackTest=1`. `settings: StickFallback=0`: the fallback is off (never starts); with an engine that has no camera hook, `stick fallback: off (StickFallback=0), and the engine has no hook for this game's camera` follows, and the gyro turns nothing. |
@@ -470,7 +471,11 @@ YawPath=_state.yaw
 | `PitchPerDegree`, `YawPerDegree` | The value's units for one degree up and right. Default `-1` and `1`: degrees, with pitch counting down. Radians are `0.0174533`; a negative number runs the other way. |
 | `CameraField` | Optional path to the `Camera` (its FOV, and whether it follows the gyro). Default `Camera.main`. |
 | `PitchLimit` | Optional limit up and down, in degrees. Without it the generic view learns the game's clamp from how the game pulls the camera back, and a profile's value stops at 89. |
-| `YawParent` | Instead of `YawPath`: yaw turns the Transform this many levels above the camera (the player's body). Alone, without `ObjectType`, pitch stays on the camera's own Transform. |
+| `YawParent` | Instead of `YawPath`: yaw turns the Transform this many levels above the camera (the player's body, or a head or pivot between the camera and the body). Alone, without `ObjectType`, pitch stays on the camera's own Transform. |
+| `PitchObject`, `YawObject` | Instead of `PitchPath` / `YawPath`: a path to a component or GameObject whose **Transform** holds that angle, for games that keep their look state in a Transform they read back every frame, not in a float, and whose camera doesn't hang from it (it follows through Cinemachine). The gyro turns the Transform's world yaw, or its pitch about its own right axis. `YawObject` starts from `YawObjectType`'s object when that is set. MOUSE: P.I. For Hire: `PitchObject=cameraRigController`, `YawObject=characterController`. |
+| `Look` | Optional comma-separated conditions (a part `Name()` calls a method with no arguments, e.g. `player.GetPDA().isInUse`) on `ObjectType`'s object that must all be true for the gyro to turn (`!` in front negates one), usually the game's own "can look" state: `Look=gameObject.activeInHierarchy, inputs._controls.m_Player_Look.enabled` (off in menus, dialogue and cutscenes). The log says `unity: gameplay view off: <condition> is false`. |
+| `ZoomReference` | Optional unzoomed FOV for zoom compensation: a path to the game's own float (`cameraFovController._baseVerticalFOV`) or a number. Default: `ZoomReferenceFOV=` (horizontal) from `[Gyro4All]`. |
+| `ZoomReferenceAxis` | `Vertical` or `Horizontal`: which axis `ZoomReference` is in (`Camera.fieldOfView` is always vertical; a game may keep its own FOV horizontal whatever the field's name, as MOUSE's `_baseVerticalFOV` does: 105 horizontal, 72.5 vertical at 16:9). Empty: told from the camera while you play unzoomed (about 30 frames where the camera's FOV equals it in one axis; no zoom compensation until then). The log says `unity: ZoomReference 105.0 is horizontal ...`, or `... check the profile` when this key contradicts what the camera shows. |
 | `PitchTransform` | `1`: the gyro turns the camera's own Transform along with `PitchPath`. For games that copy their pitch float to the camera only when you look around yourself (The Planet Crafter): without it the gyro's pitch shows only after the next stick or mouse turn, and with `PitchPath` missing the next stick turn puts the camera back where the stick left it. |
 | `Source` | `auto`: found with no player input. The first real stick or mouse turn confirms it, or takes it out of the profile and looks again. |
 | `Rejected` | What the player's turns showed isn't the look state (`Class path;parent N`), not to be found again. |
@@ -478,7 +483,9 @@ YawPath=_state.yaw
 A path walks instance fields, through objects and value types, and base classes' fields count. A `method(@)` part calls a
 one-argument method on the object reached so far, passing the starting object. A `name[Class]` part goes through an array,
 `List<>` or `Dictionary<,>` field to the first object of that class in it (`modes[LookState].pitch`). The value's type is checked: a path
-ending at anything else is refused and logged. The section is read again whenever the file changes.
+ending at anything else is refused and logged. A name with no field of that name is read through its property's getter
+(`gameObject`, `activeInHierarchy`, an `InputAction`'s `enabled`); fields always come first. The section is read again
+whenever the file changes.
 
 ### Finding a Unity game's camera (the probe)
 
@@ -488,7 +495,8 @@ element with the pad's or keyboard's focus counts as a menu: no search and no gy
 search waits for a camera nobody is turning, since a cutscene pans (20 s at most). A menu stops a search, which starts over 3 s
 after the menu closes. A search that finds nothing costs little and comes back: on each new camera, once more 30 s later or after
 a menu, and when you turn the camera yourself. The gyro waits until the camera has had its search, usually a few seconds and 15 s
-at most for the search itself. The search shows no notice; a camera found does:
+at most for the search itself. While any search runs, a notice on screen says what it is doing and whether to keep your
+hands off the controller (it refreshes every second; `Notices=0` turns it off):
 
 - The floats whose names look like a view angle, in the game's scripts, get a tiny change for a moment, a batch at a time. What
   turns a camera goes through the live test below, and a verified pitch and yaw go into the profile with `Source=auto`.
@@ -499,8 +507,17 @@ at most for the search itself. The search shows no notice; a camera found does:
   copies it to the camera only when you look around (The Planet Crafter) no longer undoes the gyro's pitch on your next
   stick turn. It needs a few turns up and down over at least 10 degrees, and stops for that camera once found or once no
   float can match.
-- Nothing found: Gyro4All keeps writing `Camera.main`'s rotation and watches your stick or mouse turns in the background, with no
-  notices, for up to 5 minutes per camera.
+- Still no axis: the camera's own ancestors up to its body (highest first, for the yaw: `YawParent=`), then the Transforms
+  the game's scripts hold in their fields (a camera rig, a head, a character controller; UI elements left out), likeliest
+  names first, get the same live test, turned the way a profile would (`PitchObject=`, `YawObject=`). A body the engine
+  took back (`Rejected=parent N`) is skipped, so the next search tries what hangs below it. With
+  Cinemachine, what its virtual cameras follow counts as the camera's rig, so the scripts there are searched deeper too.
+- With a verified camera, the scripts' floats named for a field of view (not a zoom, limit or speed) are compared with the
+  camera's FOV, in both axes: one that equals it, reachable from `ObjectType`'s object, goes into the profile as
+  `ZoomReference=` with the axis it matched as `ZoomReferenceAxis=` (`unzoomed FOV?` lines in `Gyro4All-probe.log`). Don't
+  aim down sights while the probe runs: a zoomed camera matches nothing.
+- Nothing found: Gyro4All keeps writing `Camera.main`'s rotation and watches your stick or mouse turns in the background
+  for up to 5 minutes per camera; the notice says how many turns it has.
 
 Writing `Camera.main` directly is only the last resort: it leaves the game's own state behind, so the game's stick or
 mouse and the direction you walk in can stop matching the view.
@@ -512,11 +529,16 @@ the camera, and says so on screen. Play windowed or borderless: the on-screen me
    stop. Do it 3 times. The gyro is paused meanwhile, unless the probe started by itself.
 2. When told, **don't touch the controller or the mouse** for a few seconds: the best candidates get a 3-degree turn
    written. A value passes if the camera turns that much, the game keeps it, and the camera comes back when it is undone.
+   With no float for the pitch after 5 turns, the Transforms the scripts hold that turned with the camera are tested
+   (yaw on the body first, then the pitch on its rig or head), the same way. Your turns also show which of the camera's
+   ancestors turns with it: a body that stays put is not tested (it only carries the camera), and the highest ancestor that
+   does turn is tested for the yaw. `hier` and `rot` lines in `Gyro4All-probe.log` show how each ancestor and each script
+   Quaternion followed your turns (logged only, never written).
 3. A verified pitch and yaw go into `[Unity]` in the game's profile and apply at once, and `Probe=` goes back to 0. A game
    that already has a `[Unity]` section gets `profiles\<exe>.suggested.ini` instead.
 
 If no camera turns with the stick or mouse, the probe says so: that is a fixed scene camera. If cameras turn but no value
-or body passes, the game turns the camera from native state or a Transform with no body, which profiles don't cover yet.
+or Transform passes, the game turns the camera from native state, which profiles don't cover yet.
 `F7` alone writes the scene's cameras and look-named values to `Gyro4All-probe.log`, without changing anything. That log
 also lists every candidate with its correlation and each live test's result.
 

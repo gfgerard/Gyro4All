@@ -68,6 +68,63 @@ inline Quaternion add_turn(const Quaternion& rotation, double pitch_up, double y
     return normalize(multiply(multiply(from_euler(0, yaw_right), rotation), from_euler(-pitch_up, 0)));
 }
 
+// The up of a body's yaw: that of the frame it hangs in (its parent's rotation), or its own when it has no parent. A body
+// hanging from an upright parent may carry the look's pitch too (PowerWash Simulator's HeadTurn): its own up would be
+// tilted. A root body on a planet's side (Outer Wilds' Player_Body) has only its own up; the world's would tilt it.
+struct Vector3 {
+    double x = 0, y = 1, z = 0;
+};
+
+inline Vector3 up_of(const Quaternion& frame) {
+    const Quaternion q = normalize(frame);
+    return {2 * (q.x * q.y - q.w * q.z), 1 - 2 * (q.x * q.x + q.z * q.z), 2 * (q.y * q.z + q.w * q.x)};
+}
+
+inline Vector3 right_of(const Quaternion& frame) {
+    const Quaternion q = normalize(frame);
+    return {1 - 2 * (q.y * q.y + q.z * q.z), 2 * (q.x * q.y + q.w * q.z), 2 * (q.x * q.z - q.w * q.y)};
+}
+
+// Which up a body yaws around (see above). The parent's only when the body leans from it by a pitch alone, its right
+// level in the parent's frame (a head carrying the look's pitch); a body hanging from an unrelated frame keeps its own.
+inline bool yaw_up_from_parent(const Quaternion& own, const Quaternion& parent) {
+    const Vector3 right = right_of(own), up = up_of(parent);
+    return std::abs(right.x * up.x + right.y * up.y + right.z * up.z) < 0.1;
+}
+
+// A turn of yaw_right degrees around up (a unit vector in world space): positive turns right, as Unity's yaw does.
+inline Quaternion yaw_about(const Vector3& up, double yaw_right) {
+    const double h = yaw_right * std::numbers::pi / 180.0 / 2, s = std::sin(h);
+    return normalize({up.x * s, up.y * s, up.z * s, std::cos(h)});
+}
+
+inline Quaternion add_yaw_about(const Quaternion& rotation, const Vector3& up, double yaw_right) {
+    if (!finite(rotation) || !std::isfinite(yaw_right)) return rotation;
+    return normalize(multiply(yaw_about(up, yaw_right), rotation));
+}
+
+// How far a body yawed around up from one rotation to the next (degrees, right): the twist about up of the change, so a
+// tilt or roll adds nothing.
+inline double yaw_between_about(const Quaternion& before, const Quaternion& after, const Vector3& up) {
+    const Quaternion a = normalize(before), b = normalize(after);
+    Quaternion delta = multiply(b, {-a.x, -a.y, -a.z, a.w});
+    if (!finite(delta)) return 0;
+    if (delta.w < 0) delta = {-delta.x, -delta.y, -delta.z, -delta.w};  // the short way round
+    const double along = delta.x * up.x + delta.y * up.y + delta.z * up.z;
+    return 2 * std::atan2(along, delta.w) * 180.0 / std::numbers::pi;
+}
+
+// A rotation's view angles in a body's frame: its pitch and yaw relative to the body, the yaw plus body_yaw, the body's own
+// turns around its up added up (yaw_between_about). For an upright body (a yaw alone, body_yaw its world yaw) the same as
+// view_angles; for one on a planet's side or in a turning frame (Outer Wilds), what the player's look turned, without the
+// world's drift and tilt. The yaw isn't wrapped.
+inline ViewAngles angles_in_body(const Quaternion& body, double body_yaw, const Quaternion& rotation) {
+    const Quaternion b = normalize(body);
+    ViewAngles angles = view_angles(multiply({-b.x, -b.y, -b.z, b.w}, rotation));
+    angles.yaw += body_yaw;
+    return angles;
+}
+
 inline Quaternion level(const Quaternion& rotation) {
     return from_euler(0, view_angles(rotation).yaw);
 }

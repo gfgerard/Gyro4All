@@ -8,6 +8,7 @@
 #include "notify.hpp"
 #include "settings.hpp"
 #include "unity_aim.hpp"
+#include "unity_candidates.hpp"
 #include "unity_legacy_keys.hpp"
 #include "unity_path.hpp"
 #include "unity_probe.hpp"
@@ -24,6 +25,8 @@
 #include <cstdint>
 #include <cwctype>
 #include <format>
+#include <string_view>
+#include <unordered_map>
 
 namespace gyro4all::unity {
 namespace {
@@ -40,6 +43,9 @@ struct Api {
     void* get_rotation = nullptr;
     void* set_rotation = nullptr;
     void* get_parent = nullptr;  // YawParent=
+    void* rigidbody = nullptr;        // the Rigidbody class, and Physics.SyncTransforms: a yaw body with physics (body_rigidbody)
+    void* sync_transforms = nullptr;
+    void* game_object_transform = nullptr;  // PitchObject=/YawObject= naming a GameObject
     // Optional: managed code stripping can remove what a game doesn't call itself, and a pause or FOV signal less is no
     // reason to lose the camera.
     void* get_fov = nullptr;
@@ -63,6 +69,9 @@ bool resolve_api() {
     g_api.get_rotation = g_runtime.find_method(transform, "get_rotation", 0);
     g_api.set_rotation = g_runtime.find_method(transform, "set_rotation", 1);
     g_api.get_parent = g_runtime.find_method(transform, "get_parent", 0);
+    g_api.rigidbody = g_runtime.find_class("UnityEngine", "Rigidbody");
+    g_api.sync_transforms = g_runtime.find_method(g_runtime.find_class("UnityEngine", "Physics"), "SyncTransforms", 0);
+    g_api.game_object_transform = g_runtime.find_method(g_runtime.find_class("UnityEngine", "GameObject"), "get_transform", 0);
     g_api.get_fov = g_runtime.find_method(camera, "get_fieldOfView", 0);
     g_api.orthographic = g_runtime.find_method(camera, "get_orthographic", 0);
     g_api.time_scale = g_runtime.find_method(time, "get_timeScale", 0);
@@ -161,6 +170,43 @@ void* ancestor(void* camera, int levels) {
     return transform;
 }
 
+// Whether a yaw body has a Rigidbody, looked up once per body. Physics reads a Transform written outside it only at the
+// next simulation step, and that late sync drops a MoveRotation the game asked for in FixedUpdate from the Rigidbody's old
+// pose (Outer Wilds in zero-g with the suit: the right stick's rotational thrusters did nothing while the gyro wrote).
+bool body_has_rigidbody(void* body) {
+    static void* last_body = nullptr;
+    static bool found = false;
+    if (body != last_body) {
+        last_body = body, found = false;
+        void* transform = body && g_api.sync_transforms ? g_runtime.invoke(g_api.transform, body) : nullptr;
+        void* array = transform && g_api.rigidbody ? g_runtime.find_objects_of_type(g_api.rigidbody) : nullptr;
+        const size_t count = g_runtime.array_length(array);
+        for (size_t i = 0; i < count && !found; ++i) {
+            void** element = static_cast<void**>(g_runtime.array_element(array, i));
+            void* rigidbody = element ? *element : nullptr;
+            found = rigidbody && g_runtime.alive(rigidbody) && g_runtime.invoke(g_api.transform, rigidbody) == transform;
+        }
+        if (found) log("unity: the yaw body has a Rigidbody: physics takes the gyro's yaw at once (Physics.SyncTransforms)");
+    }
+    return found;
+}
+
+// The up a yaw body turns around: its parent's, or its own (unity_quat.hpp, "The up of a body's yaw").
+unity::Vector3 body_up(void* body, const Quaternion& own) {
+    void* transform = g_api.get_parent ? g_runtime.invoke(g_api.transform, body) : nullptr;
+    void* parent = transform ? g_runtime.invoke(g_api.get_parent, transform) : nullptr;
+    Quaternion frame;
+    const bool from_parent = parent && rotation(parent, frame) && unity::yaw_up_from_parent(own, frame);
+    static int logged = -1;  // said when it changes
+    if (int(from_parent) != logged) {
+        logged = from_parent;
+        log("unity: the yaw body turns around %s", from_parent ? "its parent's up"
+                                                   : parent    ? "its own up (it leans from its parent by more than a pitch)"
+                                                               : "its own up (no parent)");
+    }
+    return unity::up_of(from_parent ? frame : own);
+}
+
 bool number(void* method, void* object, float& value) {
     return g_runtime.returned(g_runtime.invoke(method, object), value) && std::isfinite(value);
 }
@@ -176,6 +222,9 @@ void read_gate(EngineFrame& f) {
     const bool got_visible = g_runtime.returned(g_runtime.invoke(g_api.cursor_visible, nullptr), visible);
     const bool got_lock = g_runtime.returned(g_runtime.invoke(g_api.cursor_lock, nullptr), lock);
     if (got_visible) f.cursor = visible != 0 && !(got_lock && lock == 1);
+    // Managed code stripping may keep only Cursor.visible's setter (MOUSE: P.I. For Hire, Unity 6): the lock state alone
+    // says then. Only None counts as a menu's cursor; a confined one stays as before (no mouse look, generic view only).
+    else if (!g_api.cursor_visible && got_lock) f.cursor = lock == 0;
     g_mouse_free = got_lock && lock != 1;
     static int last = -1, lines = 0;
     const int state = (got_visible ? visible != 0 : 2) * 10 + (got_lock ? lock : 9);
@@ -191,7 +240,36 @@ bool exists(const std::wstring& path) { return GetFileAttributesW(path.c_str()) 
 
 // --- The profile's view ---
 
-ManagedPath g_pair_path, g_pitch_path, g_yaw_path, g_camera_path;
+ManagedPath g_pair_path, g_pitch_path, g_yaw_path, g_camera_path, g_pitch_object_path, g_yaw_object_path, g_zoom_path;
+std::vector<ManagedPath> g_look_paths;
+
+void once(std::string& told, const std::string& text);
+
+// The Transform of a component or GameObject (PitchObject=/YawObject=). Which of the two a class is, is kept per class.
+void* transform_of(void* object) {
+    if (!object || !g_runtime.alive(object)) return nullptr;
+    static std::unordered_map<void*, int> kinds;  // 1 component, 2 GameObject, 0 neither
+    void* klass = g_runtime.object_class(object);
+    auto [it, added] = kinds.try_emplace(klass, 0);
+    if (added) {
+        for (void* c = klass; c && !it->second; c = g_runtime.class_parent(c)) {
+            if (std::string_view(g_runtime.class_namespace(c)) != "UnityEngine") continue;
+            const std::string_view name = g_runtime.class_name(c);
+            it->second = name == "Component" ? 1 : name == "GameObject" ? 2 : 0;
+        }
+    }
+    if (it->second == 1) return g_runtime.invoke(g_api.transform, object);
+    if (it->second == 2) return g_runtime.invoke(g_api.game_object_transform, object);
+    return nullptr;
+}
+
+void* object_transform(ManagedPath& path, void* root) {
+    static std::string told;
+    void* object = path.read_object(g_runtime, root);
+    void* transform = transform_of(object);
+    if (object && !transform) once(told, "PitchObject and YawObject must name a component or GameObject");
+    return transform;
+}
 
 // An object a profile's paths start from. Held by a weak GC handle: nothing else in Gyro4All would tell the collector
 // about it, and a destroyed object's wrapper keeps answering field reads while its Unity calls throw.
@@ -306,9 +384,7 @@ bool write_axis(uintptr_t address, double per_degree, double degrees) {
 
 void* profile_camera(void* root) {
     if (g_camera_path.empty()) return main_camera();
-    FieldValue value;
-    if (!g_camera_path.resolve(g_runtime, root, value) || value.type != kTypeClass) return nullptr;
-    void* camera = reinterpret_cast<void*>(mem::rdp(value.address));
+    void* camera = g_camera_path.read_object(g_runtime, root);
     return g_runtime.alive(camera) ? camera : nullptr;
 }
 
@@ -317,16 +393,37 @@ bool main_object_valid(void* object) {
     Axes axes;
     if (!g_profile.path.empty()) {
         if (!pair_addresses(object, axes)) return false;
-    } else if (!float_address(g_pitch_path, object, axes.pitch) ||
-               (g_profile.yaw_parent == 0 && g_profile.yaw_object_type.empty() && !float_address(g_yaw_path, object, axes.yaw))) {
-        return false;
+    } else {
+        const bool pitch = g_profile.pitch_on_object() ? object_transform(g_pitch_object_path, object) != nullptr
+                                                       : float_address(g_pitch_path, object, axes.pitch);
+        if (!pitch) return false;
+        if (g_profile.yaw_parent == 0 && g_profile.yaw_object_type.empty()) {
+            const bool yaw = g_profile.yaw_on_object() ? object_transform(g_yaw_object_path, object) != nullptr
+                                                       : float_address(g_yaw_path, object, axes.yaw);
+            if (!yaw) return false;
+        }
     }
     return g_camera_path.empty() || profile_camera(object);
 }
 
 bool yaw_object_valid(void* object) {
+    if (g_profile.yaw_on_object()) return object_transform(g_yaw_object_path, object) != nullptr;
     uintptr_t address = 0;
     return float_address(g_yaw_path, object, address);
+}
+
+// Look=: the first condition that doesn't hold, or "" when they all do (or none is set). One that can't be read is false.
+std::string look_blocked(void* root) {
+    for (size_t i = 0; i < g_look_paths.size(); ++i) {
+        bool value = false;
+        const LookCondition& c = g_profile.look[i];
+        const bool read = g_look_paths[i].read_bool(g_runtime, root, value);
+        if (read && value != c.negate) continue;
+        std::string text = c.negate ? "!" : "";
+        for (const std::string& part : c.path) text += (text.size() > (c.negate ? 1u : 0u) ? "." : "") + part;
+        return text + (read ? " is false" : " can't be read");
+    }
+    return {};
 }
 
 // --- The checks on the generic view ---
@@ -384,6 +481,8 @@ public:
     }
 
     bool managed_input() const override { return true; }
+    // Unity 6's player reads gamepads through Windows.Gaming.Input and loads XInput when its classes fail (MODLOG 2026-11-11).
+    bool wgi_falls_back_to_xinput() const override { return true; }
     const char* default_settings() const override { return probe_default_settings(); }
 
     void configure() override {
@@ -430,18 +529,27 @@ public:
 
         const bool profile = g_profile.enabled();
         void* camera = nullptr;
+        pitch_body_ = yaw_object_body_ = nullptr;
+        look_off_ = false;
         if (profile) {
-            const bool yaw_float = g_profile.yaw_parent == 0;
+            // The yaw's own root: a float or an object of YawObjectType; YawParent hangs from the camera instead.
+            const bool yaw_float = g_profile.yaw_parent == 0 && !g_profile.yaw_on_object();
             root_ = g_main_object.get(main_object_valid);
-            yaw_root_ = !yaw_float || g_profile.yaw_object_type.empty() ? root_ : g_yaw_object.get(yaw_object_valid);
+            yaw_root_ = g_profile.yaw_parent > 0 || g_profile.yaw_object_type.empty() ? root_ : g_yaw_object.get(yaw_object_valid);
             axes_ = {};
-            const bool found = root_ && yaw_root_ &&
-                               (!g_profile.path.empty() ? pair_addresses(root_, axes_)
-                                                        : float_address(g_pitch_path, root_, axes_.pitch) &&
-                                                              (!yaw_float || float_address(g_yaw_path, yaw_root_, axes_.yaw)));
+            pitch_body_ = yaw_object_body_ = nullptr;
+            bool found = root_ && yaw_root_;
+            if (found && !g_profile.path.empty()) {
+                found = pair_addresses(root_, axes_);
+            } else if (found) {
+                found = g_profile.pitch_on_object() ? (pitch_body_ = object_transform(g_pitch_object_path, root_)) != nullptr
+                                                    : float_address(g_pitch_path, root_, axes_.pitch);
+                if (found && yaw_float) found = float_address(g_yaw_path, yaw_root_, axes_.yaw);
+                if (found && g_profile.yaw_on_object())
+                    found = (yaw_object_body_ = object_transform(g_yaw_object_path, yaw_root_)) != nullptr;
+            }
             state_pitch_ = state_yaw_ = 0;
-            if (!found || !read_axis(axes_.pitch, g_profile.pitch_per_degree, state_pitch_) ||
-                (yaw_float && !read_axis(axes_.yaw, g_profile.yaw_per_degree, state_yaw_))) {
+            if (!found || !read_pitch(state_pitch_) || (yaw_float && !read_axis(axes_.yaw, g_profile.yaw_per_degree, state_yaw_))) {
                 lose_camera();
                 return f;
             }
@@ -456,14 +564,20 @@ public:
             return f;
         }
         yaw_body_ = nullptr;
-        if (g_profile.yaw_parent > 0) {
+        if (g_profile.yaw_parent > 0 || yaw_object_body_) {
             Quaternion body;
-            yaw_body_ = camera ? ancestor(camera, g_profile.yaw_parent) : nullptr;
+            yaw_body_ = yaw_object_body_ ? yaw_object_body_ : camera ? ancestor(camera, g_profile.yaw_parent) : nullptr;
             if (!yaw_body_ || !rotation(yaw_body_, body)) {
                 lose_camera();
                 return f;
             }
-            state_yaw_ = unity::view_angles(body).yaw;
+            // Its yaw around its up (body_up), as the gyro turns it, added up frame to frame: a world yaw says little about a body
+            // standing on a planet's side (Outer Wilds), and made its turns look undone.
+            yaw_up_ = body_up(yaw_body_, body);
+            const double turned_since = yaw_body_ == body_last_object_ ? unity::yaw_between_about(body_last_, body, yaw_up_) : 0;
+            body_yaw_ = yaw_body_ == body_last_object_ ? wrap180(body_yaw_ + turned_since) : unity::view_angles(body).yaw;
+            state_yaw_ = body_yaw_;
+            body_last_object_ = yaw_body_, body_last_ = body;
         }
         missing_since_ = 0;
         camera_ = readable ? camera : nullptr;
@@ -505,10 +619,28 @@ public:
                 return f;
             }
             if (g_follow.ignored) return blind(f, "camera rewrites Transform (gyro as right stick)");
+        } else {
+            // Look=: the game's own "can look" state (menus, dialogue, cutscenes), on top of pause and cursor.
+            const std::string blocked = look_blocked(root_);
+            look_off_ = !blocked.empty();
+            if (blocked != told_look_) {
+                log("unity: gameplay view %s", blocked.empty() ? "on (Look= holds)" : ("off: " + blocked).c_str());
+                told_look_ = blocked;
+            }
+            if (look_off_) {
+                f.view_id = 0;
+                f.target = "look off (" + blocked + ")";
+                return f;
+            }
         }
+        // ZoomReference=: the game's own unzoomed FOV, in ZoomReferenceAxis= (or the axis the camera shows it in); else
+        // ZoomReferenceFOV= (horizontal).
+        const bool own_reference = profile && (g_profile.zoom_reference_value > 0 || !g_zoom_path.empty());
         float current = 0;
-        if (camera_ && zoom_reference_ > 0 && number(g_api.get_fov, camera_, current)) {
-            const double reference = fov::vertical_from_horizontal(zoom_reference_, fov::game_window_aspect());
+        if (camera_ && (own_reference || zoom_reference_ > 0) && number(g_api.get_fov, camera_, current)) {
+            double reference = 0;
+            if (!own_reference) reference = fov::vertical_from_horizontal(zoom_reference_, fov::game_window_aspect());
+            else reference = own_zoom_reference(current);
             if (fov::is_valid(current) && fov::is_valid(reference)) f.zoom_fov = ZoomFov{current, reference};
         }
         return f;
@@ -528,8 +660,7 @@ public:
             // Without a limit of its own: a game often clamps only what its input adds, and past 90 the view turns over.
             const double bound = limit > 0 ? limit : 89;
             double current = 0;
-            if (read_axis(axes_.pitch, g_profile.pitch_per_degree, current))
-                pitch = limit_pitch_turn(wrap180(current), pitch, -bound, bound);
+            if (read_pitch(current)) pitch = limit_pitch_turn(wrap180(current), pitch, -bound, bound);
         } else if (camera_) {
             pitch = limit_pitch_turn(unity::view_angles(rotation_).pitch, pitch, limit > 0 ? -limit : g_clamp.down,
                                      limit > 0 ? limit : g_clamp.up);
@@ -538,9 +669,10 @@ public:
 
     bool apply(double pitch, double yaw) override {
         if (g_profile.enabled()) {
+            if (look_off_) return false;
             double current_pitch = 0, current_yaw = 0;
-            if (!read_axis(axes_.pitch, g_profile.pitch_per_degree, current_pitch) ||
-                !write_axis(axes_.pitch, g_profile.pitch_per_degree, current_pitch + pitch))
+            if (!pitch_body_ && (!read_axis(axes_.pitch, g_profile.pitch_per_degree, current_pitch) ||
+                                 !write_axis(axes_.pitch, g_profile.pitch_per_degree, current_pitch + pitch)))
                 return false;
             if (yaw_body_) {
                 if (!turn_body(yaw)) return false;
@@ -548,6 +680,8 @@ public:
                        !write_axis(axes_.yaw, g_profile.yaw_per_degree, current_yaw + yaw)) {
                 return false;
             }
+            // PitchObject=: after the yaw, which it may hang from (it is read again, so its world pitch turns locally).
+            if (pitch_body_ && !turn_object_pitch(pitch)) return false;
             if (!turn_pitch_transform(pitch)) return false;
             last_write_yaw_ = yaw;
             turn_pitch_ = pitch, turn_yaw_ = yaw;
@@ -571,7 +705,7 @@ public:
 
     bool view_angles(double& pitch, double& yaw, uintptr_t& camera) override {
         if (g_profile.enabled()) {
-            if (!read_axis(axes_.pitch, g_profile.pitch_per_degree, pitch)) return false;
+            if (look_off_ || !read_pitch(pitch)) return false;
             if (yaw_body_) yaw = state_yaw_;
             else if (!read_axis(axes_.yaw, g_profile.yaw_per_degree, yaw)) return false;
             camera = reinterpret_cast<uintptr_t>(root_);
@@ -604,9 +738,9 @@ public:
     bool recenter(double fraction) override {
         if (g_profile.enabled()) {
             double pitch = 0;
-            return read_axis(axes_.pitch, g_profile.pitch_per_degree, pitch) &&
-                   write_axis(axes_.pitch, g_profile.pitch_per_degree, pitch * (1 - fraction)) &&
-                   turn_pitch_transform(-pitch * fraction);
+            if (look_off_ || !read_pitch(pitch)) return false;
+            if (pitch_body_) return turn_object_pitch(-pitch * fraction);
+            return write_axis(axes_.pitch, g_profile.pitch_per_degree, pitch * (1 - fraction)) && turn_pitch_transform(-pitch * fraction);
         }
         if (!camera_ || g_follow.ignored || aim_off()) return false;
         const Quaternion turned = add_turn(rotation_, -unity::view_angles(rotation_).pitch * fraction, 0);
@@ -644,6 +778,25 @@ private:
         g_pitch_path = ManagedPath(g_profile.pitch_path);
         g_yaw_path = ManagedPath(g_profile.yaw_path);
         g_camera_path = ManagedPath(split(g_profile.camera_field, '.'));
+        g_pitch_object_path = ManagedPath(g_profile.pitch_object);
+        g_yaw_object_path = ManagedPath(g_profile.yaw_object);
+        g_zoom_path = ManagedPath(g_profile.zoom_reference);
+        g_look_paths.clear();
+        for (const LookCondition& c : g_profile.look) g_look_paths.emplace_back(c.path);
+        told_look_.clear();
+        zoom_vote_.reset();
+        told_zoom_axis_ = false;
+        if (g_profile.enabled() && (g_profile.zoom_reference_value > 0 || !g_profile.zoom_reference.empty()))
+            log("unity: profile: ZoomReference axis %s", g_profile.zoom_axis == FovAxis::Auto
+                                                             ? "told from the camera's FOV (no zoom compensation until then)"
+                                                             : fov_axis_name(g_profile.zoom_axis));
+        pitch_body_ = yaw_object_body_ = nullptr;
+        look_off_ = false;
+        if (g_profile.enabled() && (g_profile.pitch_on_object() || g_profile.yaw_on_object() || !g_profile.look.empty()))
+            log("unity: profile: pitch %s, yaw %s, %zu Look= condition(s)",
+                g_profile.pitch_on_object() ? "on PitchObject's Transform" : "a float",
+                g_profile.yaw_on_object() ? "on YawObject's Transform" : g_profile.yaw_parent > 0 ? "on YawParent" : "a float",
+                g_profile.look.size());
         g_pair_class = nullptr;
         g_main_object.reset(g_profile.object_type);
         g_yaw_object.reset(g_profile.yaw_object_type);
@@ -661,6 +814,30 @@ private:
     }
 
     void load_zoom_reference() { zoom_reference_ = fov::reference_setting(); }
+
+    // ZoomReference='s value as a vertical FOV, 0 while its axis isn't known yet. The axis the camera shows it in is told
+    // either way: it decides an Auto one, and a ZoomReferenceAxis= it contradicts is logged.
+    double own_zoom_reference(double current) {
+        double raw = g_profile.zoom_reference_value;
+        if (raw <= 0 && (!root_ || !g_zoom_path.read_number(g_runtime, root_, raw))) return 0;
+        const double aspect = fov::game_window_aspect();
+        const FovAxis seen = zoom_vote_.add(raw, current, aspect);
+        FovAxis axis = g_profile.zoom_axis;
+        if (seen != FovAxis::Auto && !told_zoom_axis_) {
+            told_zoom_axis_ = true;
+            if (axis == FovAxis::Auto)
+                log("unity: ZoomReference %.1f is %s (the camera's unzoomed %.1f vertical at aspect %.2f); ZoomReferenceAxis= "
+                    "sets it",
+                    raw, seen == FovAxis::Horizontal ? "horizontal" : "vertical", current, aspect);
+            else if (axis != seen)
+                log("unity: ZoomReferenceAxis=%s, but ZoomReference %.1f matches the camera's %.1f vertical as %s at aspect "
+                    "%.2f: check the profile",
+                    fov_axis_name(axis), raw, current, seen == FovAxis::Horizontal ? "horizontal" : "vertical", aspect);
+        }
+        if (axis == FovAxis::Auto) axis = seen;
+        if (axis == FovAxis::Horizontal) return fov::vertical_from_horizontal(raw, aspect);
+        return axis == FovAxis::Vertical ? raw : 0;
+    }
 
     static void tell_once(bool& told, const char* line, const wchar_t* notice) {
         if (told) return;
@@ -715,14 +892,32 @@ private:
         }
     }
 
+    // This frame's pitch, up, in degrees: the float's, or PitchObject's Transform's world pitch.
+    bool read_pitch(double& degrees) {
+        if (!pitch_body_) return read_axis(axes_.pitch, g_profile.pitch_per_degree, degrees);
+        Quaternion q;
+        if (!rotation(pitch_body_, q)) return false;
+        degrees = unity::view_angles(q).pitch;
+        return true;
+    }
+
+    bool turn_object_pitch(double pitch) {
+        Quaternion q;
+        return pitch == 0 || (rotation(pitch_body_, q) && write_rotation(pitch_body_, add_turn(q, pitch, 0)));
+    }
+
     bool turn_body(double yaw) {
         Quaternion body;
-        return yaw == 0 || (rotation(yaw_body_, body) && write_rotation(yaw_body_, add_turn(body, 0, yaw)));
+        if (yaw == 0) return true;
+        if (!rotation(yaw_body_, body)) return false;
+        if (!write_rotation(yaw_body_, add_yaw_about(body, yaw_up_, yaw))) return false;
+        if (body_has_rigidbody(yaw_body_)) g_runtime.invoke(g_api.sync_transforms, nullptr);
+        return true;
     }
 
     // PitchTransform=1: the pitch written to the float, shown on the camera now (after the body's yaw, which it hangs from).
     bool turn_pitch_transform(double pitch) {
-        if (!g_profile.pitch_transform || pitch == 0) return true;
+        if (!g_profile.pitch_transform || pitch_body_ || pitch == 0) return true;
         Quaternion q;
         return camera_ && rotation(camera_, q) && write_rotation(camera_, add_turn(q, pitch, 0));
     }
@@ -752,15 +947,16 @@ private:
 
     // The profile's automatic result goes, and is remembered so the next search doesn't find it again.
     void reject_auto_view(bool pitch_axis) {
-        const std::string what = pitch_axis ? g_profile.object_type + " " + join_path(g_profile.pitch_path)
-                                 : g_profile.yaw_parent > 0
-                                     ? std::format("parent {}", g_profile.yaw_parent)
-                                     : (g_profile.yaw_object_type.empty() ? g_profile.object_type : g_profile.yaw_object_type) + " " +
-                                           join_path(g_profile.yaw_path);
+        const std::string yaw_class = g_profile.yaw_object_type.empty() ? g_profile.object_type : g_profile.yaw_object_type;
+        const std::string what = pitch_axis ? (g_profile.pitch_on_object() ? object_rejection(g_profile.object_type, join_path(g_profile.pitch_object))
+                                                                           : g_profile.object_type + " " + join_path(g_profile.pitch_path))
+                                 : g_profile.yaw_parent > 0  ? std::format("parent {}", g_profile.yaw_parent)
+                                 : g_profile.yaw_on_object() ? object_rejection(yaw_class, join_path(g_profile.yaw_object))
+                                                             : yaw_class + " " + join_path(g_profile.yaw_path);
         log("unity: the camera turned with the stick or mouse but %s didn't: it isn't the look state, looking again", what.c_str());
         const std::wstring& path = settings::profile_path();
         for (const wchar_t* key : {L"ObjectType", L"YawObjectType", L"CameraField", L"PitchPath", L"YawPath", L"PitchPerDegree",
-                                   L"YawPerDegree", L"YawParent", L"PitchTransform", L"Source"})
+                                   L"YawPerDegree", L"YawParent", L"PitchTransform", L"PitchObject", L"YawObject", L"Source"})
             WritePrivateProfileStringW(L"Unity", key, nullptr, path.c_str());
         std::string list = settings::profile_string(L"Unity", L"Rejected");
         list += (list.empty() ? "" : ";") + what;
@@ -946,9 +1142,19 @@ private:
     void* last_camera_ = nullptr;  // the last one seen (only compared): the same one back keeps its verdicts
     void* root_ = nullptr;
     void* yaw_root_ = nullptr;
-    void* yaw_body_ = nullptr;  // YawParent=: this frame's Transform
+    void* yaw_body_ = nullptr;  // YawParent= or YawObject=: this frame's Transform
+    void* yaw_object_body_ = nullptr;  // YawObject=: this frame's Transform
+    void* pitch_body_ = nullptr;       // PitchObject=: this frame's Transform
+    bool look_off_ = false;            // this frame: a Look= condition doesn't hold
+    std::string told_look_;
+    FovAxisVote zoom_vote_;
+    bool told_zoom_axis_ = false;
     Axes axes_;
     double state_pitch_ = 0, state_yaw_ = 0;  // this frame's look state, in degrees
+    void* body_last_object_ = nullptr;        // the yaw body of the last frame, and its rotation then
+    Quaternion body_last_;
+    unity::Vector3 yaw_up_;  // this frame's up of the yaw body's turns (body_up)
+    double body_yaw_ = 0;    // the yaw body's turns added up (state_yaw_ is cleared at the start of each profile frame)
     double last_state_pitch_ = 0, last_state_yaw_ = 0;
     double turn_pitch_ = 0, turn_yaw_ = 0;  // what the mod turned last frame
     ViewAngles last_view_{};

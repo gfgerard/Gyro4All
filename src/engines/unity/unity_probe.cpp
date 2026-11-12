@@ -1,4 +1,5 @@
 #include "unity_probe.hpp"
+#include "fov.hpp"
 
 #include "host.hpp"
 #include "log.hpp"
@@ -8,6 +9,7 @@
 #include "settings.hpp"
 #include "unity_aim.hpp"
 #include "unity_candidates.hpp"
+#include "unity_fov.hpp"
 #include "unity_path.hpp"
 #include "unity_quat.hpp"
 #include "unity_runtime.hpp"
@@ -111,6 +113,8 @@ struct Api {
     void* set_rotation = nullptr;
     void* get_orthographic = nullptr;
     void* get_name = nullptr;
+    void* game_object_transform = nullptr;
+    void* get_fov = nullptr;
     bool ready = false;
 } g_api;
 
@@ -134,7 +138,44 @@ struct Camera {
     uintptr_t handle = 0;
     double yaw = 0, moved = 0;
     double pitch = 0;  // with yaw: where the nudges measure from
+    // Its turn by itself at rest (degrees per second), taken out of what the nudges and the pick see: a camera on a spinning
+    // body turns all the time (Outer Wilds' RemoteViewerCamera on the time-loop ring), and kept the search with no input from
+    // ever settling, and won the pick by drift alone.
+    double drift_yaw = 0, drift_pitch = 0;
+    double last_yaw = 0, last_pitch = 0;  // the previous read, for the drift
+    ULONGLONG last_at = 0, based_at = 0;  // based_at: when yaw/pitch were taken
+    double size = 0;                      // its turn since then, drift taken out (cameras_moved)
+    ULONGLONG unsettled_since = 0;        // turning by itself, beyond its drift, since then (no input)
+    bool restless = false;                // never settles: not watched
 };
+
+constexpr double kMaxDriftChange = 3;     // degrees per second: a read further from the drift is an event, not drift
+constexpr ULONGLONG kRestlessMs = 3000;   // turning by itself beyond its drift this long: restless
+
+// The drift, from reads with no look input and nothing nudged.
+void watch_drift(Camera& camera, const ViewAngles& angles, ULONGLONG now, bool disturbed) {
+    if (!disturbed && camera.last_at && now > camera.last_at && now - camera.last_at < 500) {
+        const double dt = double(now - camera.last_at) / 1000;
+        const double yaw = wrap180(angles.yaw - camera.last_yaw) / dt, pitch = (angles.pitch - camera.last_pitch) / dt;
+        if (std::abs(yaw - camera.drift_yaw) < kMaxDriftChange && std::abs(pitch - camera.drift_pitch) < kMaxDriftChange) {
+            constexpr double k = 0.2;
+            camera.drift_yaw += k * (yaw - camera.drift_yaw);
+            camera.drift_pitch += k * (pitch - camera.drift_pitch);
+        }
+    }
+    camera.last_yaw = angles.yaw, camera.last_pitch = angles.pitch, camera.last_at = now;
+}
+
+// Where a camera is now against its base, its drift since then taken out.
+void turned_since_base(const Camera& camera, const ViewAngles& angles, ULONGLONG now, double& yaw, double& pitch) {
+    const double dt = camera.based_at && now > camera.based_at ? double(now - camera.based_at) / 1000 : 0;
+    yaw = wrap180(angles.yaw - camera.yaw - camera.drift_yaw * dt);
+    pitch = angles.pitch - camera.pitch - camera.drift_pitch * dt;
+}
+
+void rebase(Camera& camera, const ViewAngles& angles, ULONGLONG now) {
+    camera.yaw = angles.yaw, camera.pitch = angles.pitch, camera.based_at = now;
+}
 
 struct NudgeItem {
     uint32_t slot = 0;
@@ -165,6 +206,42 @@ struct BodyTest {
     ULONGLONG at = 0, ok_since = 0, still_since = 0;
 };
 
+// A Transform a scanned script holds in a field (directly or one plain object deep): a look state may be one the game reads
+// back every frame, e.g. its camera rig's local pitch and its body's yaw, with the camera following them (Cinemachine) and
+// not hanging from them (MOUSE: P.I. For Hire). Its turns are compared with the camera's like a float's.
+struct XformRef {
+    uint32_t owner = 0;
+    std::string field;  // the path from the owner script: what PitchObject=/YawObject= get
+};
+
+struct Xform {
+    void* transform = nullptr;
+    uintptr_t handle = 0;  // strong, like the owners'
+    std::vector<XformRef> refs;
+    // > 0: one of the camera's own ancestors, that many levels up (YawParent=), whether a script holds it or not. The yaw
+    // may be turned on a head or pivot between the camera and its body (PowerWash Simulator: PlayerCamera < HeadTurn <
+    // the player's root, whose yaw stays put while the player looks around).
+    int parent = 0;
+    std::string label;  // its GameObject's name, for the log
+    double yaw = 0, pitch = 0;
+    bool have = false;
+    SlotStats yaw_stats, pitch_stats;  // its own yaw and pitch changes against the camera's
+};
+
+// The live test of those Transforms, for the axes no float and no parent of the camera has.
+struct XformTest {
+    enum Stage { Settle, Measure, Back } stage = Settle;
+    bool pitch_stage = false, need_yaw = false, need_pitch = false;
+    std::vector<uint32_t> yaw, pitch;  // candidates, best first
+    size_t index = 0;
+    int found_yaw = -1, found_pitch = -1;  // verified Xforms
+    int yaw_slot = -1, pitch_slot = -1;    // floats verified before
+    int yaw_parent = 0;                    // the body's yaw verified before
+    double base_yaw = 0, base_pitch = 0, asked = 0, last_yaw = 0, last_pitch = 0;
+    bool passed = false;
+    ULONGLONG at = 0, ok_since = 0, still_since = 0;
+};
+
 struct Test {
     enum Stage { Settle, Measure, Back } stage = Settle;
     bool pitch_axis = false;
@@ -175,11 +252,30 @@ struct Test {
     double last_yaw = 0, last_pitch = 0;
     float base_value = 0, written = 0;
     bool passed = false;
-    ULONGLONG at = 0, ok_since = 0, still_since = 0, next_notice = 0;
+    ULONGLONG at = 0, ok_since = 0, still_since = 0;
+};
+
+// A script's Quaternion field: logged when it follows the player's turns, for the next look at a game (not written).
+struct QuatSlot {
+    uintptr_t address = 0;
+    uint32_t owner = 0, path = 0;
+    double yaw = 0, pitch = 0;
+    bool have = false;
+    SlotStats yaw_stats, pitch_stats;
+};
+
+// The body a camera hangs from, and that body's yaw added up: the frame the probe reads the camera's angles in.
+struct CameraBody {
+    void* body = nullptr;  // the body's Transform; null: none, the world
+    ULONGLONG at = 0;      // looked up then (a player body may only appear after the camera)
+};
+struct BodyFrame {
+    Quaternion last;
+    double yaw = 0;
 };
 
 struct State {
-    enum Phase { Off, Scan, Nudging, Pick, Capture, Testing, Body } phase = Off;
+    enum Phase { Off, Scan, Nudging, Pick, Capture, Testing, Body, Xforms } phase = Off;
     bool automatic = false;
     bool discovery = false;  // the search with no input (Nudging)
     bool quiet = false;      // no notices and no asking the player for anything
@@ -194,7 +290,20 @@ struct State {
     Test test;
     Nudge nudge;
     BodyTest body;
+    std::vector<Xform> xforms;
+    std::unordered_map<void*, uint32_t> xform_ids;
+    bool parents_added = false;  // the camera's ancestors are in xforms
+    int body_tested = 0;         // the body's level, once its own test ran: not tested again as a plain ancestor
+    std::vector<QuatSlot> quats;
+    std::unordered_map<void*, CameraBody> camera_bodies;  // read_angles' frame per camera
+    std::unordered_map<void*, BodyFrame> body_frames;     // per body Transform
+    std::unordered_set<void*> bodies;                     // the CharacterControllers' and Rigidbodies' Transforms
+    ULONGLONG bodies_at = 0;
+    XformTest xtest;
+    ULONGLONG notice_at = 0;     // the status notice, refreshed while the probe runs
+    std::wstring notice_text;
 } g;
+
 
 bool g_was_wanted = false, g_start_wanted = false;
 bool g_auto_setting = true;
@@ -230,6 +339,8 @@ bool resolve_api(Runtime& rt) {
     g_api.set_rotation = rt.find_method(transform, "set_rotation", 1);
     g_api.get_orthographic = rt.find_method(g_api.camera_class, "get_orthographic", 0);
     g_api.get_name = rt.find_method(rt.find_class("UnityEngine", "Object"), "get_name", 0);
+    g_api.game_object_transform = rt.find_method(rt.find_class("UnityEngine", "GameObject"), "get_transform", 0);
+    g_api.get_fov = rt.find_method(g_api.camera_class, "get_fieldOfView", 0);
     g_api.ready = g_api.camera_class && g_api.get_transform && g_api.get_rotation;
     return g_api.ready;
 }
@@ -246,6 +357,40 @@ bool open_log() {
 
 bool look_input() { return host::mouse_moving() || (host::right_stick_moving() && !host::stick_hidden()); }
 
+int find_body_parent(Runtime& rt, void* camera);
+void* parent_transform(Runtime& rt, void* camera, int levels);
+
+// The body a camera hangs from (find_body_parent), looked up again after a while; null: none.
+void* camera_body(Runtime& rt, void* camera) {
+    const ULONGLONG now = GetTickCount64();
+    CameraBody& entry = g.camera_bodies[camera];
+    if (!entry.at || now - entry.at > 5000) {
+        entry.at = now;
+        const int level = g_api.get_parent ? find_body_parent(rt, camera) : 0;
+        void* body = level > 0 ? parent_transform(rt, camera, level) : nullptr;
+        if (body != entry.body) g.body_frames.erase(entry.body);
+        entry.body = body;
+    }
+    return entry.body && rt.alive(entry.body) ? entry.body : nullptr;
+}
+
+// A rotation's angles in the frame of a body (angles_in_body), the body's yaw added up here. False: the body can't be read.
+bool body_angles(Runtime& rt, void* body, const Quaternion& rotation, ViewAngles& angles) {
+    NativeQuaternion native{};
+    if (!body || !rt.returned(rt.invoke(g_api.get_rotation, body), native) || !finite(from_native(native))) return false;
+    const Quaternion now = normalize(from_native(native));
+    const auto [entry, fresh] = g.body_frames.try_emplace(body);
+    BodyFrame& frame = entry->second;
+    frame.yaw = fresh ? view_angles(now).yaw : wrap180(frame.yaw + yaw_between_about(frame.last, now, up_of(now)));
+    frame.last = now;
+    angles = angles_in_body(now, frame.yaw, rotation);
+    angles.yaw = wrap180(angles.yaw);
+    return true;
+}
+
+// A camera's view angles, in the frame of the body it hangs from: the player's look, without what moves the body's world
+// (a planet's spin and tilt in Outer Wilds, where world angles drifted at rest and no turn was ever measured). The world's
+// for a camera with no body; for an upright body the same either way.
 bool read_angles(Runtime& rt, void* camera, ViewAngles& angles) {
     if (!rt.alive(camera)) return false;
     void* transform = rt.invoke(g_api.get_transform, camera);
@@ -253,7 +398,7 @@ bool read_angles(Runtime& rt, void* camera, ViewAngles& angles) {
     if (!transform || !rt.returned(rt.invoke(g_api.get_rotation, transform), native)) return false;
     const Quaternion q = from_native(native);
     if (!finite(q)) return false;
-    angles = view_angles(q);
+    if (!body_angles(rt, camera_body(rt, camera), q, angles)) angles = view_angles(q);
     return true;
 }
 
@@ -294,21 +439,71 @@ bool is_unity_object(Runtime& rt, void* klass) {
 struct Scanner {
     std::vector<std::string>* paths = &g.paths;  // where the floats found go: the probe's, or the pitch watch's
     std::vector<Slot>* slots = &g.slots;
+    std::vector<QuatSlot>* quats = nullptr;  // the probe's own scan only
     std::unordered_map<std::string, uint32_t> path_ids;
     std::unordered_set<uintptr_t> seen;
     std::unordered_set<uintptr_t> seen_objects;
 };
 
-// Transforms of the cameras and everything they hang from.
+// The Transform of a live component or GameObject, else null. What a class is, is kept per class.
+void* transform_of(Runtime& rt, void* object) {
+    if (!object || !rt.alive(object)) return nullptr;
+    static std::unordered_map<void*, int> kinds;  // 1 component, 2 GameObject, 0 neither
+    void* klass = rt.object_class(object);
+    auto [it, added] = kinds.try_emplace(klass, 0);
+    if (added)
+        for (void* c = klass; c && !it->second; c = rt.class_parent(c)) {
+            if (std::string(rt.class_namespace(c)) != "UnityEngine") continue;
+            const std::string name = rt.class_name(c);
+            it->second = name == "Component" ? 1 : name == "GameObject" ? 2 : 0;
+        }
+    if (it->second == 1) return rt.invoke(g_api.get_transform, object);
+    if (it->second == 2 && g_api.game_object_transform) return rt.invoke(g_api.game_object_transform, object);
+    return nullptr;
+}
+
+void add_chain(Runtime& rt, void* transform, std::unordered_set<void*>& rig) {
+    for (int depth = 0; transform && depth < 16; ++depth) {
+        rig.insert(transform);
+        transform = g_api.get_parent ? rt.invoke(g_api.get_parent, transform) : nullptr;
+    }
+}
+
+// Cinemachine puts the camera where a virtual camera says, and that one follows a target (the player's head or rig): the
+// camera hangs from nothing of the player's, but those targets own it as much as parents would. Cinemachine 2's
+// m_Follow/m_LookAt, Cinemachine 3's Target.TrackingTarget/LookAtTarget.
+std::vector<void*> cinemachine_targets(Runtime& rt) {
+    std::vector<void*> out;
+    void* array = rt.find_objects_of_type(rt.find_class("UnityEngine", "MonoBehaviour"));
+    const size_t count = rt.array_length(array);
+    for (size_t i = 0; i < count && out.size() < 16; ++i) {
+        void** element = static_cast<void**>(rt.array_element(array, i));
+        void* object = element ? *element : nullptr;
+        void* klass = object ? rt.object_class(object) : nullptr;
+        if (!klass) continue;
+        const std::string name_space = rt.class_namespace(klass);
+        if ((name_space != "Cinemachine" && name_space != "Unity.Cinemachine") || !rt.alive(object)) continue;
+        const uintptr_t base = reinterpret_cast<uintptr_t>(object);
+        const auto add = [&](uintptr_t address) {
+            if (void* t = transform_of(rt, reinterpret_cast<void*>(mem::rdp(address)))) out.push_back(t);
+        };
+        for (const char* field_name : {"m_Follow", "m_LookAt"})
+            if (void* field = rt.find_field(klass, field_name); field && holds_object(rt, rt.field_type(field), rt.field_class(field)))
+                add(base + rt.field_offset(field));
+        void* target = rt.find_field(klass, "Target");
+        if (target && rt.field_type(target) == kTypeValueType)
+            for (const char* field_name : {"TrackingTarget", "LookAtTarget"})
+                if (void* field = rt.find_field(rt.field_class(target), field_name); field && holds_object(rt, rt.field_type(field), rt.field_class(field)))
+                    add(base + rt.field_offset(target) - kObjectHeader + rt.field_offset(field));
+    }
+    return out;
+}
+
+// Transforms of the cameras and everything they hang from, and what Cinemachine has them follow.
 std::unordered_set<void*> camera_rig(Runtime& rt) {
     std::unordered_set<void*> rig;
-    for (const Camera& camera : g.cameras) {
-        void* transform = rt.invoke(g_api.get_transform, camera.object);
-        for (int depth = 0; transform && depth < 16; ++depth) {
-            rig.insert(transform);
-            transform = rt.invoke(g_api.get_parent, transform);
-        }
-    }
+    for (const Camera& camera : g.cameras) add_chain(rt, rt.invoke(g_api.get_transform, camera.object), rig);
+    for (void* target : cinemachine_targets(rt)) add_chain(rt, target, rig);
     return rig;
 }
 
@@ -321,6 +516,7 @@ bool is_rotation_block(Runtime& rt, void* klass) {
 // How far from its script a float is looked for: one object reference for most; a camera's own scripts keep state further
 // away (Risk of Rain 2: rig -> camera mode -> dictionary -> instance data -> pair of floats), and through containers.
 constexpr int kNearDepth = 1, kDeepDepth = 3, kValueDepth = 2;
+constexpr size_t kMaxQuats = 2000;
 
 void add_fields(Runtime& rt, Scanner& scan, uint32_t owner, uintptr_t base, void* klass, const std::string& prefix, int depth, int values,
                 bool deep) {
@@ -345,8 +541,14 @@ void add_fields(Runtime& rt, Scanner& scan, uint32_t owner, uintptr_t base, void
             } else if (type == kTypeValueType && values < kValueDepth) {
                 // A rotation's four numbers aren't four view axes: writing one of them does nothing that lasts.
                 void* value_class = rt.field_class(field);
-                if (!is_rotation_block(rt, value_class))
+                if (!is_rotation_block(rt, value_class)) {
                     add_fields(rt, scan, owner, address - kObjectHeader, value_class, path + ".", depth, values + 1, deep);
+                } else if (scan.quats && scan.quats->size() < kMaxQuats && std::string(rt.class_name(value_class)) == "Quaternion" &&
+                           scan.seen.insert(address).second) {
+                    const auto id = scan.path_ids.try_emplace(path, uint32_t(scan.paths->size()));
+                    if (id.second) scan.paths->push_back(path);
+                    scan.quats->push_back({address, owner, id.first->second});
+                }
             } else if (depth < (deep ? kDeepDepth : kNearDepth) && holds_object(rt, type, rt.field_class(field))) {
                 const uintptr_t object = mem::rdp(address);
                 void* value_class = object ? rt.object_class(reinterpret_cast<void*>(object)) : nullptr;
@@ -371,17 +573,78 @@ void add_fields(Runtime& rt, Scanner& scan, uint32_t owner, uintptr_t base, void
     }
 }
 
+constexpr size_t kMaxXforms = 200, kMaxXformRefs = 4;
+constexpr int kMaxXformCandidates = 6, kMaxXformGuesses = 4;
+
+// A UI element's RectTransform never holds a view: those filled the 200 places in PowerWash Simulator (its menus' grids and
+// glyphs), ahead of the player's own.
+bool is_ui_transform(Runtime& rt, void* transform) {
+    static std::unordered_map<void*, bool> ui;  // per class
+    void* klass = rt.object_class(transform);
+    auto [it, added] = ui.try_emplace(klass, false);
+    if (added) it->second = std::string(rt.class_name(klass)) == "RectTransform";
+    return it->second;
+}
+
+void add_xform_ref(Runtime& rt, void* transform, uint32_t owner, const std::string& field) {
+    const auto found = g.xform_ids.find(transform);
+    if (found != g.xform_ids.end()) {
+        Xform& x = g.xforms[found->second];
+        if (x.refs.size() < kMaxXformRefs) x.refs.push_back({owner, field});
+        return;
+    }
+    if (g.xforms.size() >= kMaxXforms || is_ui_transform(rt, transform)) return;
+    g.xform_ids.emplace(transform, uint32_t(g.xforms.size()));
+    Xform x;
+    x.transform = transform;
+    x.handle = rt.new_handle(transform, false);
+    x.refs.push_back({owner, field});
+    g.xforms.push_back(std::move(x));
+}
+
+// The component and GameObject fields of a script (and of the plain objects it holds directly).
+void collect_xforms(Runtime& rt, uint32_t owner, uintptr_t base, void* klass, const std::string& prefix, int depth) {
+    for (void* c = klass; c; c = rt.class_parent(c)) {
+        const std::string name_space = rt.class_namespace(c);
+        if (name_space.starts_with("System") || name_space.starts_with("UnityEngine")) return;
+        void* iterator = nullptr;
+        while (void* field = rt.next_field(c, &iterator)) {
+            const int type = rt.field_type(field);
+            if (rt.field_is_static(field) || type == kTypeArray || !holds_object(rt, type, rt.field_class(field))) continue;
+            void* object = reinterpret_cast<void*>(mem::rdp(base + rt.field_offset(field)));
+            void* value_class = object ? rt.object_class(object) : nullptr;
+            if (!value_class) continue;
+            const std::string path = prefix + rt.field_name(field);
+            if (is_unity_object(rt, value_class)) {
+                if (void* transform = transform_of(rt, object)) add_xform_ref(rt, transform, owner, path);
+            } else if (depth == 0 && !is_container(rt, value_class) && !skipped_namespace(rt.class_namespace(value_class))) {
+                collect_xforms(rt, owner, reinterpret_cast<uintptr_t>(object), value_class, path + ".", 1);
+            }
+        }
+    }
+}
+
 void clear_scene() {
     g.owners.clear();
     g.paths.clear();
     g.slots.clear();
     g.cameras.clear();
+    g.xforms.clear();
+    g.xform_ids.clear();
+    g.parents_added = false;
+    g.body_tested = 0;
+    g.quats.clear();
+    g.camera_bodies.clear();
+    g.body_frames.clear();
+    g.bodies.clear();
+    g.bodies_at = 0;
     g.camera = nullptr;
 }
 
 void release_scene(Runtime& rt) {
     for (const Owner& owner : g.owners) rt.free_handle(owner.handle);
     for (const Camera& camera : g.cameras) rt.free_handle(camera.handle);
+    for (const Xform& x : g.xforms) rt.free_handle(x.handle);
     clear_scene();
 }
 
@@ -396,13 +659,19 @@ void list_cameras(Runtime& rt) {
         if (g_api.get_orthographic) rt.returned(rt.invoke(g_api.get_orthographic, camera), ortho);
         if (ortho) continue;
         ViewAngles angles;
-        if (read_angles(rt, camera, angles)) g.cameras.push_back({camera, rt.new_handle(camera, false), angles.yaw, 0});
+        if (read_angles(rt, camera, angles)) {
+            Camera entry{camera, rt.new_handle(camera, false)};
+            rebase(entry, angles, GetTickCount64());
+            g.cameras.push_back(entry);
+        }
     }
 }
 
 void scan_scripts(Runtime& rt) {
     Scanner scan;
+    scan.quats = &g.quats;
     std::unordered_map<void*, int> instances;
+    std::vector<uint32_t> later;  // scripts off the camera's rig: their Transforms after the rig's
     const std::unordered_set<void*> rig = camera_rig(rt);
     void* array = rt.find_objects_of_type(rt.find_class("UnityEngine", "MonoBehaviour"));
     const size_t count = rt.array_length(array);
@@ -415,15 +684,22 @@ void scan_scripts(Runtime& rt) {
         g.owners.push_back({object, rt.new_handle(object, false), rt.class_full_name(klass)});
         const bool deep = camera_class_name(g.owners.back().klass) || rig.count(rt.invoke(g_api.get_transform, object)) != 0;
         add_fields(rt, scan, uint32_t(g.owners.size() - 1), reinterpret_cast<uintptr_t>(object), klass, "", 0, 0, deep);
+        if (deep) collect_xforms(rt, uint32_t(g.owners.size() - 1), reinterpret_cast<uintptr_t>(object), klass, "", 0);
+        else later.push_back(uint32_t(g.owners.size() - 1));
     }
-    log("probe: %zu active scripts, %zu of them scanned: %zu floats", count, g.owners.size(), g.slots.size());
-    probe_log("probe: %zu active scripts, %zu of them scanned: %zu floats", count, g.owners.size(), g.slots.size());
+    for (uint32_t owner : later)
+        if (rt.alive(g.owners[owner].object))
+            collect_xforms(rt, owner, reinterpret_cast<uintptr_t>(g.owners[owner].object), rt.object_class(g.owners[owner].object), "", 0);
+    log("probe: %zu active scripts, %zu of them scanned: %zu floats, %zu Transforms they hold", count, g.owners.size(), g.slots.size(),
+        g.xforms.size());
+    probe_log("probe: %zu active scripts, %zu of them scanned: %zu floats, %zu Transforms they hold", count, g.owners.size(),
+              g.slots.size(), g.xforms.size());
 }
 
 bool look_named(const std::string& path) {
     std::string lower(path.size(), '\0');
     std::transform(path.begin(), path.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-    for (const char* needle : {"pitch", "yaw", "look", "aim", "tilt", "pan", "rot", "angle", "euler", "axis", "camera", "view"})
+    for (const char* needle : {"pitch", "yaw", "look", "aim", "tilt", "pan", "rot", "angle", "euler", "axis", "camera", "view", "degree"})
         if (lower.find(needle) != std::string::npos) return true;
     return false;
 }
@@ -463,6 +739,45 @@ void dump(Runtime& rt) {
             ++logged;
         }
     if (logged >= kMaxDumpLines) probe_log("probe: dump capped at %d lines", kMaxDumpLines);
+    // The Transforms the scripts hold whose names say head, rig, body...: PitchObject=/YawObject= candidates.
+    int xlines = 0;
+    for (const Xform& x : g.xforms) {
+        if (xlines >= 40 || !rt.alive(x.transform)) continue;
+        for (const XformRef& ref : x.refs) {
+            const std::string& klass = g.owners[ref.owner].klass;
+            if (!transform_discovery_score(klass, ref.field, true) && !transform_discovery_score(klass, ref.field, false)) continue;
+            ViewAngles angles;
+            NativeQuaternion native{};
+            if (rt.returned(rt.invoke(g_api.get_rotation, x.transform), native)) angles = view_angles(from_native(native));
+            probe_log("xf   %s.%s -> %s (pitch %.1f, yaw %.1f)", klass.c_str(), ref.field.c_str(),
+                      g_api.get_game_object && g_api.get_name ? hierarchy(rt, x.transform).c_str() : "", angles.pitch, angles.yaw);
+            ++xlines;
+            break;
+        }
+    }
+    // Camera.main and what it hangs from: each one's world view and its own turn under its parent (local = parent^-1 * world),
+    // to see which level holds the yaw and the pitch, and how far a head has turned from its body.
+    if (main && g_api.get_parent) {
+        void* transform = rt.invoke(g_api.get_transform, main);
+        for (int level = 0; level <= 8 && transform; ++level) {
+            void* parent = rt.invoke(g_api.get_parent, transform);
+            NativeQuaternion native{}, parent_native{};
+            if (!rt.returned(rt.invoke(g_api.get_rotation, transform), native)) break;
+            const Quaternion world = from_native(native);
+            Quaternion local = world;
+            if (parent && rt.returned(rt.invoke(g_api.get_rotation, parent), parent_native)) {
+                const Quaternion p = from_native(parent_native);
+                local = multiply({-p.x, -p.y, -p.z, p.w}, world);
+            }
+            const ViewAngles w = view_angles(world), l = view_angles(local);
+            const std::string name = g_api.get_game_object && g_api.get_name
+                                         ? narrow_string(rt, rt.invoke(g_api.get_name, rt.invoke(g_api.get_game_object, transform)))
+                                         : "";
+            probe_log("hier  %s %d (%s): world pitch %.2f yaw %.2f | local pitch %.2f yaw %.2f", level ? "parent" : "camera", level,
+                      name.c_str(), w.pitch, w.yaw, l.pitch, l.yaw);
+            transform = parent;
+        }
+    }
     log("probe: the scene's cameras and look-named values written to the probe log");
 }
 
@@ -500,6 +815,154 @@ std::vector<uint32_t> rank(bool pitch_axis) {
         const AxisFit fit = fit_axis(pitch_axis ? stats.value_pitch : stats.value_yaw, stats.value2, pitch_axis ? g.pitch2 : g.yaw2);
         probe_log("%-5s %s %s r=%.3f per degree %.5f", pitch_axis ? "pitch" : "yaw", g.owners[g.slots[s.slot].owner].klass.c_str(),
                   g.paths[g.slots[s.slot].path].c_str(), fit.correlation, fit.per_degree);
+    }
+    return out;
+}
+
+std::string rejected_list();
+bool in_list(const std::string& list, const std::string& what);
+
+// The Transforms' own turns, like sample_slots' floats.
+void sample_xforms(Runtime& rt, double dyaw, double dpitch, bool count) {
+    for (Xform& x : g.xforms) {
+        NativeQuaternion native{};
+        if (!rt.alive(x.transform) || !rt.returned(rt.invoke(g_api.get_rotation, x.transform), native)) {
+            x.have = false;
+            continue;
+        }
+        ViewAngles angles;
+        if (!body_angles(rt, g.camera ? camera_body(rt, g.camera) : nullptr, from_native(native), angles))
+            angles = view_angles(from_native(native));
+        if (x.have && count) {
+            const double yaw = wrap180(angles.yaw - x.yaw), pitch = angles.pitch - x.pitch;
+            x.yaw_stats.add(yaw, dyaw, dpitch);
+            x.pitch_stats.add(pitch, dyaw, dpitch);
+        }
+        x.yaw = angles.yaw, x.pitch = angles.pitch;
+        x.have = true;
+    }
+}
+
+void sample_quats(double dyaw, double dpitch, bool count) {
+    for (QuatSlot& q : g.quats) {
+        NativeQuaternion native{};
+        if (!mem::rd(q.address, native) || !finite(from_native(native)) ||
+            std::abs(native.x * native.x + native.y * native.y + native.z * native.z + native.w * native.w - 1.0f) > 0.05f) {
+            q.have = false;  // not a rotation (yet)
+            continue;
+        }
+        const ViewAngles angles = view_angles(from_native(native));
+        if (q.have && count) {
+            q.yaw_stats.add(wrap180(angles.yaw - q.yaw), dyaw, dpitch);
+            q.pitch_stats.add(angles.pitch - q.pitch, dyaw, dpitch);
+        }
+        q.yaw = angles.yaw, q.pitch = angles.pitch;
+        q.have = true;
+    }
+}
+
+int find_body_parent(Runtime& rt, void* camera);
+
+// The camera's own ancestors, as Transforms to compare and test: the yaw is on the highest one that turns with the camera.
+void add_parents(Runtime& rt) {
+    if (g.parents_added || !g.camera || !g_api.get_parent) return;
+    g.parents_added = true;
+    // Nothing above the body: turning a scene's container turns the camera too, and the player with it.
+    const int body = find_body_parent(rt, g.camera);
+    void* transform = rt.invoke(g_api.get_transform, g.camera);
+    for (int level = 1; level <= (body > 0 ? std::min(body, 8) : 8) && transform; ++level) {
+        transform = rt.invoke(g_api.get_parent, transform);
+        if (!transform || !rt.alive(transform)) break;
+        const std::string label = g_api.get_game_object && g_api.get_name
+                                      ? narrow_string(rt, rt.invoke(g_api.get_name, rt.invoke(g_api.get_game_object, transform)))
+                                      : "";
+        uint32_t index = 0;
+        if (const auto found = g.xform_ids.find(transform); found != g.xform_ids.end()) {
+            index = found->second;
+        } else {
+            g.xform_ids.emplace(transform, uint32_t(g.xforms.size()));
+            Xform x;
+            x.transform = transform;
+            x.handle = rt.new_handle(transform, false);
+            index = uint32_t(g.xforms.size());
+            g.xforms.push_back(std::move(x));
+        }
+        g.xforms[index].parent = level;
+        g.xforms[index].label = label;
+    }
+}
+
+// The reference a profile names a Transform by: a script there is one of (a singleton finds the same object again), then a
+// camera, look or player script, then the first. Only for Transforms a script holds (refs not empty).
+const XformRef& best_ref(const Xform& x) {
+    const XformRef* best = &x.refs.front();
+    int best_rank = -1;
+    for (const XformRef& ref : x.refs) {
+        const std::string& klass = g.owners[ref.owner].klass;
+        const auto same = std::count_if(g.owners.begin(), g.owners.end(), [&](const Owner& o) { return o.klass == klass; });
+        const int rank = (same == 1 ? 2 : 0) + (camera_class_name(klass) ? 1 : 0);
+        if (rank > best_rank) best = &ref, best_rank = rank;
+    }
+    return *best;
+}
+
+std::string xform_name(uint32_t index) {
+    const Xform& x = g.xforms[index];
+    if (x.parent > 0) return std::format("parent {} ({})", x.parent, x.label);
+    const XformRef& ref = best_ref(x);
+    return g.owners[ref.owner].klass + "." + ref.field;
+}
+
+// What the Rejected= list calls a tested Transform.
+std::string xform_rejection(const Xform& x) {
+    if (x.parent > 0) return std::format("parent {}", x.parent);
+    const XformRef& ref = best_ref(x);
+    return object_rejection(g.owners[ref.owner].klass, ref.field);
+}
+
+// The Transforms worth a live test for one axis: those that turned with the camera through the player's turns, by name
+// among equals; with no turns measured (the search with no input), the likeliest few by name alone.
+std::vector<uint32_t> rank_xforms(Runtime& rt, bool pitch_axis, bool log_them) {
+    struct Scored {
+        uint32_t index;
+        double score;
+    };
+    const bool measured = (pitch_axis ? g.pitch2 : g.yaw2) > 0;
+    const std::string not_these = rejected_list();
+    std::vector<Scored> scored, parents;
+    for (size_t i = 0; i < g.xforms.size(); ++i) {
+        const Xform& x = g.xforms[i];
+        if (!rt.alive(x.transform)) continue;
+        // An ancestor is a yaw candidate (YawParent=; a pitch there would turn the whole body), except the body when its own
+        // test already ran.
+        const bool parent = x.parent > 0 && !pitch_axis && x.parent != g.body_tested;
+        if (!parent && x.refs.empty()) continue;
+        if (in_list(not_these, parent ? std::format("parent {}", x.parent) : xform_rejection(x))) continue;
+        const XformRef* ref = x.refs.empty() ? nullptr : &best_ref(x);
+        const int named = parent ? 0 : transform_discovery_score(g.owners[ref->owner].klass, ref->field, pitch_axis);
+        double score = 0;
+        if (measured) {
+            const SlotStats& s = pitch_axis ? x.pitch_stats : x.yaw_stats;
+            const AxisFit axis = pitch_axis ? fit_axis(s.value_pitch, s.value2, g.pitch2) : fit_axis(s.value_yaw, s.value2, g.yaw2);
+            const AxisFit other = pitch_axis ? fit_axis(s.value_yaw, s.value2, g.yaw2) : fit_axis(s.value_pitch, s.value2, g.pitch2);
+            score = transform_score(axis, other, s.moved);
+            // Of the ancestors that turn with the camera, the highest is where the turn is made: everything under it follows.
+            if (score > 0) score += parent ? 0.05 + x.parent / 1000.0 : named / 100.0;
+        } else {
+            score = parent ? 100 + x.parent : named;  // the camera's own hierarchy before what the scripts hold, highest first
+        }
+        if (score > 0) (parent && !measured ? parents : scored).push_back({uint32_t(i), score});
+    }
+    std::stable_sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) { return a.score > b.score; });
+    std::stable_sort(parents.begin(), parents.end(), [](const Scored& a, const Scored& b) { return a.score > b.score; });
+    const size_t cap = size_t(measured ? kMaxXformCandidates : kMaxXformGuesses);
+    if (scored.size() > cap) scored.resize(cap);
+    scored.insert(scored.begin(), parents.begin(), parents.end());  // guesses: every ancestor, then the named few
+    std::vector<uint32_t> out;
+    for (const Scored& s : scored) {
+        out.push_back(s.index);
+        if (log_them) probe_log("%-5s Transform %s score %.3f%s", pitch_axis ? "pitch" : "yaw", xform_name(s.index).c_str(), s.score,
+                                measured ? "" : " (by name)");
     }
     return out;
 }
@@ -565,16 +1028,21 @@ void* parent_transform(Runtime& rt, void* camera, int levels) {
 
 // What the camera hangs from that the game moves as the player's body, levels above it. 0 = nothing.
 int find_body_parent(Runtime& rt, void* camera) {
-    std::unordered_set<void*> bodies;
-    for (const char* type : {"CharacterController", "Rigidbody"}) {
-        void* array = rt.find_objects_of_type(rt.find_class("UnityEngine", type));
-        const size_t count = rt.array_length(array);
-        for (size_t i = 0; i < count; ++i) {
-            void** element = static_cast<void**>(rt.array_element(array, i));
-            void* object = element ? *element : nullptr;
-            if (object && rt.alive(object)) bodies.insert(rt.invoke(g_api.get_transform, object));
+    const ULONGLONG now = GetTickCount64();
+    if (!g.bodies_at || now - g.bodies_at > 5000) {
+        g.bodies_at = now;
+        g.bodies.clear();
+        for (const char* type : {"CharacterController", "Rigidbody"}) {
+            void* array = rt.find_objects_of_type(rt.find_class("UnityEngine", type));
+            const size_t count = rt.array_length(array);
+            for (size_t i = 0; i < count; ++i) {
+                void** element = static_cast<void**>(rt.array_element(array, i));
+                void* object = element ? *element : nullptr;
+                if (object && rt.alive(object)) g.bodies.insert(rt.invoke(g_api.get_transform, object));
+            }
         }
     }
+    const std::unordered_set<void*>& bodies = g.bodies;
     void* transform = rt.invoke(g_api.get_transform, camera);
     for (int level = 1; level <= 16 && transform; ++level) {
         transform = rt.invoke(g_api.get_parent, transform);
@@ -588,7 +1056,78 @@ std::string rejected_list() { return ";" + settings::profile_string(L"Unity", L"
 
 bool in_list(const std::string& list, const std::string& what) { return list.find(";" + what + ";") != std::string::npos; }
 
+// The path from a script to another object it holds: one of its own fields, or one plain object deep. "" if none.
+std::string path_to(Runtime& rt, void* from, void* target, int depth = 0) {
+    for (void* c = rt.object_class(from); c; c = rt.class_parent(c)) {
+        const std::string name_space = rt.class_namespace(c);
+        if (name_space.starts_with("System") || name_space.starts_with("UnityEngine")) break;
+        void* iterator = nullptr;
+        while (void* field = rt.next_field(c, &iterator)) {
+            const int type = rt.field_type(field);
+            if (rt.field_is_static(field) || type == kTypeArray || !holds_object(rt, type, rt.field_class(field))) continue;
+            void* object = reinterpret_cast<void*>(mem::rdp(reinterpret_cast<uintptr_t>(from) + rt.field_offset(field)));
+            if (!object) continue;
+            if (object == target) return rt.field_name(field);
+            void* value_class = rt.object_class(object);
+            if (depth == 0 && value_class && !is_unity_object(rt, value_class) && !is_container(rt, value_class) &&
+                !skipped_namespace(rt.class_namespace(value_class))) {
+                const std::string inner = path_to(rt, object, target, 1);
+                if (!inner.empty()) return std::string(rt.field_name(field)) + "." + inner;
+            }
+        }
+    }
+    return {};
+}
+
+// ZoomReference=: the scripts' float that holds the game's unzoomed FOV (named for one, equal to the camera's FOV now in
+// either axis: the probe ends unzoomed, on the player's own turns), reachable from ObjectType's object. Its axis is what
+// the camera showed it in, whatever its name says.
+void find_zoom_reference(Runtime& rt, ProbeResult& result) {
+    if (result.pitch_class.empty() || !g_api.get_fov || !g.camera || !rt.alive(g.camera)) return;
+    float camera_fov = 0;
+    if (!rt.returned(rt.invoke(g_api.get_fov, g.camera), camera_fov) || !fov::is_valid(camera_fov)) return;
+    const double aspect = fov::game_window_aspect();
+    struct Found {
+        uint32_t slot;
+        FovReferenceMatch match;
+        float value;
+    };
+    std::vector<Found> found;
+    for (uint32_t i = 0; i < g.slots.size(); ++i) {
+        const Slot& slot = g.slots[i];
+        float value = 0;
+        if (!rt.alive(g.owners[slot.owner].object) || !mem::rd(slot.address, value)) continue;
+        if (auto match = fov_reference_match(g.paths[slot.path], value, camera_fov, aspect)) found.push_back({i, *match, value});
+    }
+    std::stable_sort(found.begin(), found.end(), [](const Found& a, const Found& b) { return a.match.score > b.match.score; });
+    for (const Found& f : found) {
+        const Slot& slot = g.slots[f.slot];
+        const Owner& owner = g.owners[slot.owner];
+        std::string path;
+        for (const Owner& root : g.owners) {
+            if (root.klass != result.pitch_class || !rt.alive(root.object)) continue;
+            if (root.object == owner.object) path = g.paths[slot.path];
+            else if (const std::string to = path_to(rt, root.object, owner.object); !to.empty()) path = to + "." + g.paths[slot.path];
+            if (!path.empty()) break;
+        }
+        probe_log("probe: unzoomed FOV? %s.%s = %.2f, %s (camera %.2f vertical, aspect %.3f), score %d%s", owner.klass.c_str(),
+                  g.paths[slot.path].c_str(), f.value, fov_axis_name(f.match.axis), camera_fov, aspect, f.match.score,
+                  path.empty() ? std::format(": not reachable from {}", result.pitch_class).c_str()
+                  : result.zoom_reference.empty() ? " <- ZoomReference"
+                                                  : "");
+        if (!path.empty() && result.zoom_reference.empty()) {
+            result.zoom_reference = path;
+            result.zoom_axis = f.match.axis;
+        }
+    }
+    if (found.empty())
+        probe_log("probe: no script float named for a field of view equals the camera's %.2f vertical (or its horizontal at "
+                  "aspect %.3f): no ZoomReference=",
+                  camera_fov, aspect);
+}
+
 void write_result(Runtime& rt, ProbeResult result) {
+    find_zoom_reference(rt, result);
     // A profile with its own [Unity] section is never overwritten.
     const bool suggested = !settings::profile_string(L"Unity", L"ObjectType").empty();
     const std::wstring dir = settings::mod_dir() + L"\\profiles";
@@ -599,9 +1138,13 @@ void write_result(Runtime& rt, ProbeResult result) {
         written = WritePrivateProfileStringW(L"Unity", widen(key).c_str(), widen(value).c_str(), path.c_str()) != 0 && written;
         probe_log("probe: %s=%s", key.c_str(), value.c_str());
     }
-    log("probe: camera VERIFIED: pitch %s, yaw %s -> %s",
-        result.pitch_class.empty() ? "on the camera's Transform" : (result.pitch_class + "." + result.pitch_path).c_str(),
-        result.yaw_parent > 0 ? std::format("parent {}", result.yaw_parent).c_str() : (result.yaw_class + "." + result.yaw_path).c_str(),
+    const std::string pitch_text = result.pitch_class.empty()      ? "on the camera's Transform"
+                                   : !result.pitch_object.empty() ? result.pitch_class + "." + result.pitch_object + "'s Transform"
+                                                                  : result.pitch_class + "." + result.pitch_path;
+    const std::string yaw_text = result.yaw_parent > 0         ? std::format("parent {}", result.yaw_parent)
+                                 : !result.yaw_object.empty() ? result.yaw_class + "." + result.yaw_object + "'s Transform"
+                                                              : result.yaw_class + "." + result.yaw_path;
+    log("probe: camera VERIFIED: pitch %s, yaw %s -> %s", pitch_text.c_str(), yaw_text.c_str(),
         written ? narrow(path).c_str() : "the profile couldn't be written");
     if (written) probe_off();
     notify::show(!written    ? L"Gyro4All probe: camera found, but the profile couldn't be written.\nSee Gyro4All\\Gyro4All.log."
@@ -628,6 +1171,7 @@ void give_up(Runtime& rt, const char* what) {
 }
 
 bool start_body(Runtime& rt, ULONGLONG now, bool need_pitch);
+bool start_xforms(Runtime& rt, ULONGLONG now, bool need_yaw, bool need_pitch, int yaw_slot, int pitch_slot, int yaw_parent);
 
 void finish(Runtime& rt) {
     const Test& t = g.test;
@@ -640,10 +1184,14 @@ void finish(Runtime& rt) {
         return;
     }
     if (t.found_yaw < 0) {
-        if (start_body(rt, GetTickCount64(), t.found_pitch < 0)) return;
+        if (start_body(rt, tick, t.found_pitch < 0)) return;
+        if (start_xforms(rt, tick, true, t.found_pitch < 0, -1, t.found_pitch, 0)) return;
         return give_up(rt, t.found_pitch >= 0 ? "pitch was found, but nothing turns the yaw" : "nothing turned the camera");
     }
-    if (t.found_pitch < 0) return give_up(rt, "yaw was found, but no float turns the pitch");
+    if (t.found_pitch < 0) {
+        if (start_xforms(rt, tick, false, true, t.found_yaw, -1, 0)) return;
+        return give_up(rt, "yaw was found, but no float turns the pitch");
+    }
     const Slot& yaw = g.slots[size_t(t.found_yaw)];
     const Slot& pitch = g.slots[size_t(t.found_pitch)];
     ProbeResult result;
@@ -698,10 +1246,6 @@ void test_step(Runtime& rt, ULONGLONG now) {
     case Test::Settle: {
         if (touched) {
             t.still_since = now;
-            if (now >= t.next_notice && !g.quiet) {
-                t.next_notice = now + 5000;
-                notify::show(L"Gyro4All probe: testing. DON'T TOUCH THE CONTROLLER OR THE MOUSE.", 4);
-            }
             return;
         }
         if (now - t.still_since < kRestMs) return;
@@ -766,7 +1310,35 @@ void test_step(Runtime& rt, ULONGLONG now) {
     }
 }
 
+// After the player's turns: how the camera's ancestors and the scripts' Quaternions moved with it. Nothing here is written
+// to a profile; it says where to look next when no float or Transform passes (the yaw may be kept as a rotation).
+void log_rotations() {
+    if (g.yaw2 <= 0) return;
+    for (const Xform& x : g.xforms) {
+        if (x.parent <= 0) continue;
+        const AxisFit yaw = fit_axis(x.yaw_stats.value_yaw, x.yaw_stats.value2, g.yaw2);
+        probe_log("hier  parent %d (%s): its yaw against the camera's r=%.3f per degree %.3f, moved in %d samples", x.parent, x.label.c_str(),
+                  yaw.correlation, yaw.per_degree, x.yaw_stats.moved);
+    }
+    int logged = 0;
+    for (const QuatSlot& q : g.quats) {
+        const AxisFit yaw = fit_axis(q.yaw_stats.value_yaw, q.yaw_stats.value2, g.yaw2);
+        const AxisFit yaw_other = fit_axis(q.yaw_stats.value_pitch, q.yaw_stats.value2, g.pitch2);
+        const AxisFit pitch = fit_axis(q.pitch_stats.value_pitch, q.pitch_stats.value2, g.pitch2);
+        const AxisFit pitch_other = fit_axis(q.pitch_stats.value_yaw, q.pitch_stats.value2, g.yaw2);
+        const bool by_yaw = transform_score(yaw, yaw_other, q.yaw_stats.moved) > 0;
+        const bool by_pitch = transform_score(pitch, pitch_other, q.pitch_stats.moved) > 0;
+        if ((!by_yaw && !by_pitch) || logged >= 20) continue;
+        ++logged;
+        probe_log("rot   %s %s (Quaternion) follows the camera's%s%s: yaw r=%.3f per degree %.3f, pitch r=%.3f per degree %.3f",
+                  g.owners[q.owner].klass.c_str(), g.paths[q.path].c_str(), by_yaw ? " yaw" : "", by_pitch ? " pitch" : "",
+                  yaw.correlation, yaw.per_degree, pitch.correlation, pitch.per_degree);
+    }
+    if (!logged) probe_log("rot   no script Quaternion (of %zu) follows the camera", g.quats.size());
+}
+
 void begin_test(Runtime& rt, ULONGLONG now, std::vector<uint32_t> yaw, std::vector<uint32_t> pitch) {
+    log_rotations();
     Test t;
     t.yaw = std::move(yaw);
     t.pitch = std::move(pitch);
@@ -776,14 +1348,14 @@ void begin_test(Runtime& rt, ULONGLONG now, std::vector<uint32_t> yaw, std::vect
     ViewAngles angles;
     if (read_angles(rt, g.camera, angles)) g.test.last_yaw = angles.yaw, g.test.last_pitch = angles.pitch;
     log("probe: %zu yaw and %zu pitch candidates: testing them live", g.test.yaw.size(), g.test.pitch.size());
-    if (!g.quiet)
-        notify::show(L"Gyro4All probe: testing what it found.\nDON'T TOUCH THE CONTROLLER OR THE MOUSE for a few seconds.", 8);
 }
 
 // A yaw with no float (a body's Transform) can still be found once pitch is.
+// With no pitch float after a few more turns than a float needs (a float always comes first), a Transform a script holds
+// that turned with the pitch is enough to start (MOUSE: P.I. For Hire), rather than asking for all kMaxTurns.
 bool start_test(Runtime& rt, ULONGLONG now) {
     std::vector<uint32_t> yaw = rank(false), pitch = rank(true);
-    if (pitch.empty()) return false;
+    if (pitch.empty() && (g.turns < kTurnsForTest + 2 || rank_xforms(rt, true, false).empty())) return false;
     begin_test(rt, now, std::move(yaw), std::move(pitch));
     return true;
 }
@@ -810,6 +1382,11 @@ std::vector<std::vector<uint32_t>> nudge_groups(Runtime& rt) {
     }
     std::stable_sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) { return a.score > b.score; });
     if (scored.size() > kNudgeMaxSlots) scored.resize(kNudgeMaxSlots);
+    for (size_t i = 0; i < std::min<size_t>(scored.size(), 20); ++i) {
+        const Slot& slot = g.slots[scored[i].slot];
+        probe_log("nudge %s %s score %d", g.owners[slot.owner].klass.c_str(), g.paths[slot.path].c_str(), scored[i].score);
+    }
+    if (!scored.empty()) probe_log("nudge ... down to score %d", scored.back().score);
     log("probe: %zu of the floats look like a view angle: nudging them", scored.size());
     probe_log("probe: %zu of the floats look like a view angle: nudging them", scored.size());
     std::vector<std::vector<uint32_t>> groups;
@@ -858,16 +1435,38 @@ struct CameraMoved {
     double yaw = 0, pitch = 0, size = 0;
 };
 
-bool cameras_moved(Runtime& rt, CameraMoved& out, bool rebase) {
+// The cameras' turns since their base, drift taken out; restless ones aren't watched. disturbed: look input or a nudge
+// live (no drift learnt).
+bool cameras_moved(Runtime& rt, CameraMoved& out, bool rebase_them, bool disturbed) {
+    const ULONGLONG now = GetTickCount64();
     for (Camera& camera : g.cameras) {
         ViewAngles angles;
         if (!read_angles(rt, camera.object, angles)) return false;
-        const double yaw = wrap180(angles.yaw - camera.yaw), pitch = angles.pitch - camera.pitch;
-        const double size = std::abs(yaw) + std::abs(pitch);
-        if (!out.camera || size > out.size) out = {&camera, yaw, pitch, size};
-        if (rebase) camera.yaw = angles.yaw, camera.pitch = angles.pitch;
+        watch_drift(camera, angles, now, disturbed);
+        if (camera.restless) continue;
+        double yaw = 0, pitch = 0;
+        turned_since_base(camera, angles, now, yaw, pitch);
+        camera.size = std::abs(yaw) + std::abs(pitch);
+        if (!out.camera || camera.size > out.size) out = {&camera, yaw, pitch, camera.size};
+        if (rebase_them) rebase(camera, angles, now);
     }
     return !g.cameras.empty();
+}
+
+// With no input and nothing nudged: a camera that won't settle beyond its drift is left out of the search.
+void mark_restless(Runtime& rt, ULONGLONG now) {
+    for (Camera& camera : g.cameras) {
+        if (camera.restless) continue;
+        if (camera.size <= kNudgeStill) {
+            camera.unsettled_since = 0;
+            continue;
+        }
+        if (!camera.unsettled_since) camera.unsettled_since = now;
+        if (now - camera.unsettled_since < kRestlessMs) continue;
+        camera.restless = true;
+        probe_log("probe: a camera turns by itself and never settles: left out of the search (%s)",
+                  g_api.get_game_object && g_api.get_name ? hierarchy(rt, camera.object).c_str() : "");
+    }
 }
 
 void nudge_step(Runtime& rt, ULONGLONG now) {
@@ -877,14 +1476,15 @@ void nudge_step(Runtime& rt, ULONGLONG now) {
     if (n.stage == Nudge::Settle && (enough || n.groups.empty() || now >= n.deadline)) return nudge_done(rt, now);
     const bool touched = look_input();
     CameraMoved moved;
-    if (!cameras_moved(rt, moved, false)) {
+    if (!cameras_moved(rt, moved, false, touched || n.stage == Nudge::Watch)) {
         nudge_restore();
         return restart_scan(rt, "a camera went away");
     }
     if (n.stage == Nudge::Settle) {
+        if (!touched) mark_restless(rt, now);
         if (touched || moved.size > kNudgeStill) {
             CameraMoved ignored;
-            cameras_moved(rt, ignored, true);
+            cameras_moved(rt, ignored, true, true);
             n.still_since = now;
             return;
         }
@@ -957,7 +1557,16 @@ void nudge_step(Runtime& rt, ULONGLONG now) {
 bool turn_transform(Runtime& rt, void* transform, double pitch_up, double yaw_right) {
     NativeQuaternion native{};
     if (!transform || !g_api.set_rotation || !rt.returned(rt.invoke(g_api.get_rotation, transform), native)) return false;
-    const Quaternion turned = add_turn(from_native(native), pitch_up, yaw_right);
+    // The yaw around the up the engine turns a YawParent or YawObject body around: its parent's (when the body leans from it
+    // by a pitch alone), or its own.
+    const Quaternion rotated = add_turn(from_native(native), pitch_up, 0);
+    Vector3 up = up_of(rotated);
+    void* parent = g_api.get_parent ? rt.invoke(g_api.get_parent, transform) : nullptr;
+    NativeQuaternion frame{};
+    if (parent && rt.returned(rt.invoke(g_api.get_rotation, parent), frame) && finite(from_native(frame)) &&
+        yaw_up_from_parent(rotated, from_native(frame)))
+        up = up_of(from_native(frame));
+    const Quaternion turned = add_yaw_about(rotated, up, yaw_right);
     if (!finite(turned)) return false;
     NativeQuaternion value = to_native(turned);
     void* arguments[] = {&value};
@@ -970,6 +1579,24 @@ bool start_body(Runtime& rt, ULONGLONG now, bool need_pitch) {
     const int parent = find_body_parent(rt, g.camera);
     probe_log("probe: yaw has no float; the camera's body: %s", parent ? std::format("{} level(s) above it", parent).c_str() : "none");
     if (!parent || in_list(rejected_list(), std::format("parent {}", parent))) return false;
+    // The player's turns already say whether the body turns with the camera. One that stays put only carries it: a turn of it
+    // turns the camera too and passes the test, but the player's own look goes elsewhere (PowerWash Simulator's root), and the
+    // engine took that view back at the first stick turn.
+    if (g.yaw2 > 0) {
+        add_parents(rt);
+        for (const Xform& x : g.xforms) {
+            if (x.parent != parent) continue;
+            const AxisFit yaw = fit_axis(x.yaw_stats.value_yaw, x.yaw_stats.value2, g.yaw2);
+            const AxisFit pitch = fit_axis(x.yaw_stats.value_pitch, x.yaw_stats.value2, g.pitch2);
+            if (transform_score(yaw, pitch, x.yaw_stats.moved) > 0) break;
+            probe_log("probe: the body didn't turn with the player's turns (%d of the samples moved it, %.2f per degree): its yaw "
+                      "isn't the look state, the camera's other ancestors are tried",
+                      x.yaw_stats.moved, yaw.per_degree);
+            g.body_tested = parent;
+            return false;
+        }
+    }
+    g.body_tested = parent;
     BodyTest b;
     b.parent = parent;
     b.need_pitch = need_pitch;
@@ -1046,7 +1673,13 @@ void body_step(Runtime& rt, ULONGLONG now) {
         return;
     case BodyTest::Back:
         if (now - b.at < kRestMs) return;
-        if (!b.passed) return give_up(rt, b.pitch_stage ? "the game rewrites the camera's pitch" : "the game rewrites its body's yaw");
+        if (!b.passed) {
+            // The Transforms the scripts hold may have what the camera's own didn't.
+            if (b.pitch_stage ? start_xforms(rt, now, false, true, -1, -1, b.parent)
+                              : start_xforms(rt, now, true, b.need_pitch, -1, b.pitch_slot, 0))
+                return;
+            return give_up(rt, b.pitch_stage ? "the game rewrites the camera's pitch" : "the game rewrites its body's yaw");
+        }
         if (b.need_pitch && !b.pitch_stage) {
             b.pitch_stage = true;
             b.stage = BodyTest::Settle;
@@ -1054,6 +1687,156 @@ void body_step(Runtime& rt, ULONGLONG now) {
             return;
         }
         return body_write(rt);
+    }
+}
+
+// --- The Transforms the scripts hold, tested live (PitchObject=, YawObject=) ---
+
+void* xform_target() {
+    const XformTest& x = g.xtest;
+    const std::vector<uint32_t>& list = x.pitch_stage ? x.pitch : x.yaw;
+    return x.index < list.size() ? g.xforms[list[x.index]].transform : nullptr;
+}
+
+void xform_turn(Runtime& rt, double size) {
+    turn_transform(rt, xform_target(), g.xtest.pitch_stage ? size : 0, g.xtest.pitch_stage ? 0 : size);
+}
+
+void xform_undo(Runtime& rt) { xform_turn(rt, -g.xtest.asked); }
+
+void xform_write(Runtime& rt) {
+    const XformTest& x = g.xtest;
+    ProbeResult result;
+    result.automatic = g.quiet;
+    // One script for both, when one holds both: the profile then names a single object.
+    const Xform* pitch = x.found_pitch >= 0 ? &g.xforms[size_t(x.found_pitch)] : nullptr;
+    const Xform* yaw = x.found_yaw >= 0 ? &g.xforms[size_t(x.found_yaw)] : nullptr;
+    const XformRef* pitch_ref = pitch ? &best_ref(*pitch) : nullptr;
+    const int yaw_level = yaw && yaw->parent > 0 ? yaw->parent : 0;  // an ancestor of the camera: YawParent=
+    const XformRef* yaw_ref = yaw && !yaw_level ? &best_ref(*yaw) : nullptr;
+    if (pitch && yaw_ref)
+        for (const XformRef& p : pitch->refs)
+            for (const XformRef& y : yaw->refs)
+                if (p.owner == y.owner) pitch_ref = &p, yaw_ref = &y;
+    if (pitch_ref) {
+        result.pitch_class = g.owners[pitch_ref->owner].klass;
+        result.pitch_object = pitch_ref->field;
+        result.camera_field = camera_field(rt, g.owners[pitch_ref->owner].object, g.camera);
+    } else if (x.pitch_slot >= 0) {
+        const Slot& slot = g.slots[size_t(x.pitch_slot)];
+        result.pitch_class = g.owners[slot.owner].klass;
+        result.pitch_path = g.paths[slot.path];
+        result.pitch_per_degree = slot_per_degree(uint32_t(x.pitch_slot), true);
+        result.camera_field = camera_field(rt, g.owners[slot.owner].object, g.camera);
+    }
+    if (yaw_level) {
+        result.yaw_parent = yaw_level;
+    } else if (yaw_ref) {
+        result.yaw_class = g.owners[yaw_ref->owner].klass;
+        result.yaw_object = yaw_ref->field;
+    } else if (x.yaw_parent > 0) {
+        result.yaw_parent = x.yaw_parent;
+    } else if (x.yaw_slot >= 0) {
+        const Slot& slot = g.slots[size_t(x.yaw_slot)];
+        result.yaw_class = g.owners[slot.owner].klass;
+        result.yaw_path = g.paths[slot.path];
+        result.yaw_per_degree = slot_per_degree(uint32_t(x.yaw_slot), false);
+    }
+    if (result.pitch_class.empty()) return give_up(rt, "only the yaw was found");  // no profile can turn the pitch alone
+    // Transforms alone, guessed by name with no turn of the player's behind them, prove only that nothing rewrites them: a
+    // title or menu camera passes (Outer Wilds' title scene: OWCamera._mainCamera and its "Scene" ancestor were written as a
+    // profile before the menu). A float found by a nudge, or the player's own turns, is needed.
+    if (result.pitch_path.empty() && result.yaw_path.empty() && g.yaw2 == 0 && g.pitch2 == 0)
+        return give_up(rt, "only Transforms guessed by name, with no turn of the player's to back them");
+    write_result(rt, std::move(result));
+}
+
+void xform_begin_stage(ULONGLONG now) {
+    XformTest& x = g.xtest;
+    x.index = 0;
+    x.stage = XformTest::Settle;
+    x.still_since = now;
+}
+
+// need_*: the axes still missing; what was verified before comes along, for the profile.
+bool start_xforms(Runtime& rt, ULONGLONG now, bool need_yaw, bool need_pitch, int yaw_slot, int pitch_slot, int yaw_parent) {
+    if (!g.camera || !g_api.set_rotation || (!need_yaw && !need_pitch)) return false;
+    add_parents(rt);
+    XformTest x;
+    x.need_yaw = need_yaw, x.need_pitch = need_pitch;
+    x.yaw_slot = yaw_slot, x.pitch_slot = pitch_slot, x.yaw_parent = yaw_parent;
+    if (need_yaw) x.yaw = rank_xforms(rt, false, true);
+    if (need_pitch) x.pitch = rank_xforms(rt, true, true);
+    probe_log("probe: the Transforms the scripts hold: %zu to test for the yaw, %zu for the pitch", x.yaw.size(), x.pitch.size());
+    if ((need_yaw && x.yaw.empty()) || (need_pitch && x.pitch.empty())) return false;
+    x.pitch_stage = !need_yaw;
+    g.xtest = std::move(x);
+    xform_begin_stage(now);
+    g.phase = State::Xforms;
+    log("probe: testing %zu yaw and %zu pitch Transform(s) the scripts hold", g.xtest.yaw.size(), g.xtest.pitch.size());
+    return true;
+}
+
+void xform_step(Runtime& rt, ULONGLONG now) {
+    XformTest& x = g.xtest;
+    const std::vector<uint32_t>& list = x.pitch_stage ? x.pitch : x.yaw;
+    if (x.index >= list.size())
+        return give_up(rt, x.pitch_stage ? "no Transform the scripts hold turns the pitch" : "no Transform the scripts hold turns the yaw");
+    ViewAngles angles;
+    if (!read_angles(rt, g.camera, angles)) return give_up(rt, "the camera went away during the live test");
+    if (std::abs(wrap180(angles.yaw - x.last_yaw)) + std::abs(angles.pitch - x.last_pitch) > kNudgeStill) x.still_since = now;
+    x.last_yaw = angles.yaw, x.last_pitch = angles.pitch;
+    const double yaw = wrap180(angles.yaw - x.base_yaw), pitch = angles.pitch - x.base_pitch;
+    const double moved = x.pitch_stage ? pitch : yaw, other = x.pitch_stage ? yaw : pitch;
+    const uint32_t index = list[x.index];
+    const auto next = [&] {
+        ++x.index;
+        x.stage = XformTest::Settle;
+        x.still_since = now;
+    };
+    switch (x.stage) {
+    case XformTest::Settle: {
+        if (look_input()) x.still_since = now;
+        if (now - x.still_since < kRestMs) return;
+        if (!rt.alive(g.xforms[index].transform)) return next();
+        x.base_yaw = angles.yaw, x.base_pitch = angles.pitch;
+        x.asked = x.pitch_stage && angles.pitch > 0 ? -kTestTurn : kTestTurn;  // toward the horizon: away from the limits
+        if (!turn_transform(rt, g.xforms[index].transform, x.pitch_stage ? x.asked : 0, x.pitch_stage ? 0 : x.asked)) return next();
+        x.stage = XformTest::Measure;
+        x.at = now, x.ok_since = 0, x.passed = false;
+        return;
+    }
+    case XformTest::Measure:
+        if (look_input()) {
+            xform_undo(rt);
+            x.stage = XformTest::Settle;
+            x.still_since = now;
+            return;
+        }
+        if (turn_followed(x.asked, moved, other)) {
+            if (!x.ok_since) x.ok_since = now;
+            if (now - x.ok_since >= 200) x.passed = true;
+        } else {
+            x.ok_since = 0;
+        }
+        if (x.passed || now - x.at >= 1000) {
+            probe_log("probe: test %s on Transform %s: asked %.1f, the camera moved %.1f (other axis %.1f): %s",
+                      x.pitch_stage ? "pitch" : "yaw", xform_name(index).c_str(), x.asked, moved, other, x.passed ? "kept" : "failed");
+            if (x.passed) xform_undo(rt);  // one the game undid has nothing to undo
+            x.stage = XformTest::Back;
+            x.at = now;
+        }
+        return;
+    case XformTest::Back:
+        if (now - x.at < kRestMs) return;
+        if (!x.passed) return next();
+        probe_log("probe: verified %s: Transform %s", x.pitch_stage ? "pitch" : "yaw", xform_name(index).c_str());
+        (x.pitch_stage ? x.found_pitch : x.found_yaw) = int(index);
+        if (!x.pitch_stage && x.need_pitch) {
+            x.pitch_stage = true;
+            return xform_begin_stage(now);
+        }
+        return xform_write(rt);
     }
 }
 
@@ -1075,7 +1858,7 @@ void scan_step(Runtime& rt, ULONGLONG now) {
     list_cameras(rt);
     for (Camera& camera : g.cameras) {
         ViewAngles angles;
-        if (read_angles(rt, camera.object, angles)) camera.yaw = angles.yaw, camera.pitch = angles.pitch;
+        if (read_angles(rt, camera.object, angles)) rebase(camera, angles, now);
     }
     if (g.cameras.empty()) {
         constexpr int kScanTries = 5;
@@ -1098,14 +1881,6 @@ void scan_step(Runtime& rt, ULONGLONG now) {
     }
     g.phase = State::Pick;
     g.last_tick = now;
-    if (g.quiet) return;
-    notify::show(g.automatic ? L"Gyro4All: this camera doesn't answer the gyro. To teach it to Gyro4All, turn the camera with the "
-                               L"RIGHT STICK or MOUSE (more than 30°, also up and down), then stop. Repeat 3 times.\nThen don't "
-                               L"touch the controller for a few seconds."
-                             : L"Gyro4All probe ready to find the camera. Turn it with the RIGHT STICK or MOUSE (more than 30°, "
-                               L"also up and down), then stop. Repeat 3 times.\nThen don't touch the controller while the probe "
-                               L"tests what it found.",
-                 20);
 }
 
 void pick_step(Runtime& rt, ULONGLONG now) {
@@ -1118,10 +1893,18 @@ void pick_step(Runtime& rt, ULONGLONG now) {
     for (Camera& camera : g.cameras) {
         ViewAngles angles;
         if (!read_angles(rt, camera.object, angles)) return restart_scan(rt, "a camera went away");
-        if (look) camera.moved += std::abs(wrap180(angles.yaw - camera.yaw));
-        camera.yaw = angles.yaw;
+        watch_drift(camera, angles, now, look);
+        double yaw = 0, pitch = 0;
+        turned_since_base(camera, angles, now, yaw, pitch);
+        if (look) camera.moved += std::abs(yaw);
+        rebase(camera, angles, now);
         if (!best || camera.moved > best->moved) best = &camera;
     }
+    // Another camera may copy the player's view (Outer Wilds' RemoteViewerCamera turned as much as PlayerCamera and won by
+    // its place in the list): Camera.main, when it turned nearly as much.
+    void* main = rt.invoke(g_api.get_main, nullptr);
+    for (Camera& camera : g.cameras)
+        if (best && camera.object == main && &camera != best && camera.moved >= 0.7 * best->moved) best = &camera;
     if (best && best->moved >= kPickDegrees) {
         g.camera = best->object;
         ViewAngles angles;
@@ -1129,7 +1912,10 @@ void pick_step(Runtime& rt, ULONGLONG now) {
         g.yaw = angles.yaw, g.pitch = angles.pitch;
         g.still_since = now;
         g.phase = State::Capture;
+        add_parents(rt);
         sample_slots(0, 0, false);  // the changes since the scan aren't this turn's
+        sample_xforms(rt, 0, 0, false);
+        sample_quats(0, 0, false);
         const std::string name = g_api.get_game_object && g_api.get_name ? hierarchy(rt, g.camera) : "";
         log("probe: the camera that turns with the stick or mouse: %s", name.c_str());
         probe_log("probe: the camera that turns with the stick or mouse: %s", name.c_str());
@@ -1164,7 +1950,11 @@ void capture_step(Runtime& rt, ULONGLONG now) {
         g.pitch_total += std::abs(dpitch);
     }
     sample_slots(dyaw, dpitch, count);
-    if (g.turned < kTurnDegrees || now - g.still_since < kRestMs) return;
+    sample_xforms(rt, dyaw, dpitch, count);
+    sample_quats(dyaw, dpitch, count);
+    // Stopped: the camera still, or the player let go a while ago. A camera on a spinning planet (Outer Wilds) never stands
+    // still in world space: waiting for that alone never ended turn 1.
+    if (g.turned < kTurnDegrees || (now - g.still_since < kRestMs && now - g.last_look < kLookHoldMs + kRestMs)) return;
     ++g.turns;
     g.turned = 0;
     log("probe: turn %d captured", g.turns);
@@ -1172,19 +1962,10 @@ void capture_step(Runtime& rt, ULONGLONG now) {
     if (g.turns >= kTurnsForTest && g.pitch_total >= kMinPitchDegrees && start_test(rt, now)) return;
     if (g.turns >= kMaxTurns) {
         if (start_test(rt, now)) return;
+        log_rotations();
         g.test = {};
         return finish(rt);
     }
-    if (g.quiet) return;
-    notify::show(g.turns >= kTurnsForTest && g.pitch_total < kMinPitchDegrees
-                     ? L"Gyro4All probe: now also turn the camera UP AND DOWN, then stop."
-                 : g.turns < kTurnsForTest ? std::format(L"Gyro4All probe: turn {} of {} done.\nTurn the camera again with the RIGHT "
-                                                         L"STICK or MOUSE (more than 30°, also up and down), then stop.",
-                                                         g.turns, kTurnsForTest)
-                                           : std::format(L"Gyro4All probe: turn {} done, nothing to test yet.\nTurn the camera again "
-                                                         L"with the RIGHT STICK or MOUSE (more than 30°, also up and down), then stop.",
-                                                         g.turns),
-                 10);
 }
 
 bool start(Runtime& rt, bool automatic, const char* why) {
@@ -1201,7 +1982,6 @@ bool start(Runtime& rt, bool automatic, const char* why) {
     g.started_at = GetTickCount64();
     log("probe: started (%s)", why);
     probe_log("probe: started (%s)", why);
-    if (!automatic) notify::show(L"Gyro4All probe started: looking for the scene's cameras.\nIt needs gameplay: it waits while a menu is open.", 6);
     return true;
 }
 
@@ -1216,6 +1996,7 @@ void keys(Runtime& rt) {
             }
             if (g.phase == State::Nudging) nudge_restore();
             if (g.phase == State::Body && g.body.stage == BodyTest::Measure) body_undo(rt);
+            if (g.phase == State::Xforms && g.xtest.stage == XformTest::Measure) xform_undo(rt);
             end(rt, "probe key");
         }
         if (!running || background) {
@@ -1235,6 +2016,7 @@ void keys(Runtime& rt) {
             dump(rt);
         }
         notify::show(L"Gyro4All: the scene's cameras written to Gyro4All\\Gyro4All-probe.log.", 4);
+        g.notice_at = GetTickCount64() + 3000, g.notice_text.clear();
     }
     g_f7_down = f7;
 }
@@ -1323,6 +2105,74 @@ void pitch_found(Runtime& rt, int yaw_parent) {
     write_result(rt, std::move(result));
 }
 
+
+// --- The status notice ---
+
+// While the probe runs, a notice on screen always says what it is doing and what the player should (or shouldn't) do, so
+// nobody turns the camera in the middle of a test, or waits for a test that needs another turn first. Refreshed every second;
+// it fades a few seconds after the probe ends, unless the probe's own result replaces it.
+std::wstring status_text(bool gameplay) {
+    const std::wstring dont = L"DON'T TOUCH THE CONTROLLER OR THE MOUSE.";
+    const bool touched = look_input();
+    const std::wstring wait = touched ? L"LET GO of the controller: the test waits until it is still.\n" : L"";
+    if (!gameplay || (g.quiet && g_menu_on_screen))
+        return L"Gyro4All probe: paused (menu, pause, loading or mouse cursor).\nIt goes on by itself back in gameplay.";
+    const auto axis = [](bool pitch) { return pitch ? L"pitch (up/down)" : L"yaw (left/right)"; };
+    switch (g.phase) {
+    case State::Scan: return L"Gyro4All probe: reading the scene's cameras and scripts...";
+    case State::Nudging:
+        return wait + std::format(L"Gyro4All probe: trying the game's values by itself ({} group(s) left).\n{}", g.nudge.groups.size(), dont);
+    case State::Pick:
+        return g.quiet ? L"Gyro4All probe: learning this camera from your own turns.\nTurn it with the RIGHT STICK or MOUSE "
+                         L"(more than 30°, also up and down), then stop."
+                       : L"Gyro4All probe: turn the camera with the RIGHT STICK or MOUSE (more than 30°, also up and down), then "
+                         L"stop. Turn 1 of 3.\nThe gyro is paused meanwhile.";
+    case State::Capture: {
+        const std::wstring head = g.quiet ? L"Gyro4All probe: learning this camera from your turns. " : L"Gyro4All probe: ";
+        if (g.turned >= kTurnDegrees) return head + std::format(L"turn {} done: STOP and keep the camera still.", g.turns + 1);
+        if (g.turns >= kTurnsForTest && g.pitch_total < kMinPitchDegrees)
+            return head + std::format(L"now turn the camera UP AND DOWN ({:.0f} of {:.0f}°), then stop.", g.pitch_total, kMinPitchDegrees);
+        if (g.turns >= kTurnsForTest)
+            return head + std::format(L"turn {} (up to {}): nothing to test yet.\nTurn again with the RIGHT STICK or MOUSE, "
+                                      L"also up and down ({:.0f} of 30°), then stop.",
+                                      g.turns + 1, kMaxTurns, g.turned);
+        return head + std::format(L"turn {} of {}: {:.0f} of 30°.\nTurn with the RIGHT STICK or MOUSE, also up and down "
+                                  L"(so far {:.0f}° up/down), then stop.",
+                                  g.turns + 1, kTurnsForTest, g.turned, g.pitch_total);
+    }
+    case State::Testing: {
+        const Test& t = g.test;
+        const size_t count = t.pitch_axis ? t.pitch.size() : t.yaw.size();
+        return wait + std::format(L"Gyro4All probe: testing {} value {} of {}.\n{}", axis(t.pitch_axis), std::min(t.index + 1, count),
+                                  count, dont);
+    }
+    case State::Body:
+        return wait + std::format(L"Gyro4All probe: testing the {} on {}.\n{}", axis(g.body.pitch_stage),
+                                  g.body.pitch_stage ? std::wstring(L"the camera") : std::format(L"the body (parent {})", g.body.parent),
+                                  dont);
+    case State::Xforms: {
+        const XformTest& x = g.xtest;
+        const size_t count = x.pitch_stage ? x.pitch.size() : x.yaw.size();
+        return wait + std::format(L"Gyro4All probe: testing the {} on Transform {} of {}.\n{}", axis(x.pitch_stage),
+                                  std::min(x.index + 1, count), count, dont);
+    }
+    case State::Off: break;
+    }
+    return {};
+}
+
+void show_status(bool gameplay, ULONGLONG now) {
+    if (g.phase == State::Off || now < g.notice_at) return;
+    std::wstring text = status_text(gameplay);
+    if (text.empty()) return;
+    if (!g_key.name.empty()) text += L"\n" + widen(g_key.name) + L": cancel the probe.";
+    // Every second while it changes; the same text again only to keep it on screen.
+    if (text == g.notice_text && now < g.notice_at + 2000) return;
+    g.notice_text = text;
+    g.notice_at = now + 1000;
+    notify::show(text, 4);
+}
+
 }  // namespace
 
 const char* probe_default_settings() { return kSettings; }
@@ -1377,7 +2227,9 @@ void probe_frame(Runtime& rt, bool gameplay) {
     }
     if (g.phase == State::Off) return;
     const ULONGLONG now = GetTickCount64();
-    if (g.automatic && !g.discovery && g.phase != State::Testing && g.phase != State::Body && g.turns == 0 &&
+    show_status(gameplay, now);
+    if (g.automatic && !g.discovery && g.phase != State::Testing && g.phase != State::Body && g.phase != State::Xforms &&
+        g.turns == 0 &&
         now - g.started_at > (g.quiet ? kQuietGiveUpMs : kAutoGiveUpMs)) {
         end(rt, "AutoProbe: no camera turn with the stick or mouse in time");
         if (!g.quiet) notify::show(L"Gyro4All: stopped looking for the camera (no turn with the stick or mouse).", 6);
@@ -1402,6 +2254,11 @@ void probe_frame(Runtime& rt, bool gameplay) {
             g.body.stage = BodyTest::Settle;
         }
         if (g.phase == State::Body) g.body.still_since = now;
+        if (g.phase == State::Xforms && g.xtest.stage != XformTest::Settle) {
+            if (g.xtest.stage == XformTest::Measure) xform_undo(rt);
+            g.xtest.stage = XformTest::Settle;
+        }
+        if (g.phase == State::Xforms) g.xtest.still_since = now;
         g.last_tick = now;
         return;
     }
@@ -1409,6 +2266,7 @@ void probe_frame(Runtime& rt, bool gameplay) {
     case State::Scan: return scan_step(rt, now);
     case State::Nudging: return nudge_step(rt, now);
     case State::Body: return body_step(rt, now);
+    case State::Xforms: return xform_step(rt, now);
     case State::Pick: return pick_step(rt, now);
     case State::Capture: return capture_step(rt, now);
     case State::Testing: return test_step(rt, now);
@@ -1419,7 +2277,8 @@ void probe_frame(Runtime& rt, bool gameplay) {
 bool probe_active() { return g.phase != State::Off; }
 
 bool probe_holds_gyro() {
-    return g.phase != State::Off && (!g.automatic || g.discovery || g.phase == State::Testing || g.phase == State::Body);
+    return g.phase != State::Off && (!g.automatic || g.discovery || g.phase == State::Testing || g.phase == State::Body ||
+                                     g.phase == State::Xforms);
 }
 
 bool probe_watching_quietly() {
@@ -1537,8 +2396,10 @@ void probe_discover(Runtime& rt, void* camera, bool allowed) {
     if (!resolve_api(rt) || !read_angles(rt, camera, view)) return;
     // A camera that never settles (a long pan, a strong sway) is searched anyway after a while: finding nothing costs little.
     if (!g_discover_view.add(now, view.yaw, view.pitch, kDiscoverStableMs) && now - g_discover_since < kDiscoverPatienceMs) return;
-    // Turns already captured on this camera are worth more than looking again.
-    if (probe_watching_quietly() && (!again || g.turns == 0)) end(rt, again ? "looking again" : "a new camera");
+    // Turns already captured on this camera are worth more than looking again. A camera that never settles reaches here by
+    // patience alone, in the middle of the player's turns: those it keeps.
+    if (probe_watching_quietly() && (g.turns == 0 || (!again && camera != g.camera)))
+        end(rt, again ? "looking again" : "a new camera");
     if (g.phase != State::Off) return;
     if (again) g_discover_retried = camera;
     g_discover_tried = camera;

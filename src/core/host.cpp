@@ -1258,6 +1258,7 @@ void host_configure(Engine& engine) {
     xs.touchpad_back = settings::get(L"XInputTouchpadBack", 1) != 0;
     xs.trace = settings::get(L"XInputTrace", 0) != 0;
     xs.export_hooks = engine.managed_input();
+    xs.refuse_wgi = engine.wgi_falls_back_to_xinput();
     xs.window_class = engine.window_class();
     xs.controllers_changed = [] { g_engine->controllers_changed(); };
     xinput::install(xs);

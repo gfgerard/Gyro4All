@@ -53,7 +53,7 @@
 | Metro 2033 Redux | ✅ Works (tested on the Steam version) | 4A Engine | Install next to `metro.exe` in the game's main folder. |
 | Metro Exodus Enhanced Edition | ✅ Works (tested on the Steam version) | 4A Engine | Install next to `MetroExodus.exe` in the game's main folder. |
 | Metro: Last Light Redux | ✅ Works (tested on the Epic Games Store version) | 4A Engine | Install next to `metro.exe` in the game's main folder. |
-| Monster Hunter Wilds | ⚠️ Partially tested | RE Engine | Game seems to implement only Steam Input for controller support. Functionality should be already covered by Steam. |
+| MOUSE: P.I. For Hire | ✅ Works | Unity 6 (Mono) | Install next to `MOUSE.exe` in the game's main folder. Gyro off in menus, dialogue and cutscenes; not in the boss cannon sequence. |
 | Mortal Shell | ✅ Works | Unreal Engine 4.25.0 | `F10` panel works (DX11). The game's own PlayStation support only knows the DualShock 4: its profile makes Gyro4All show your DualSense (USB or Bluetooth) to it as one, with PlayStation icons, rumble and light bar. |
 | Onimusha: Way of the Sword | ✅ Works (tested on the demo) | RE Engine | Install next to the game's exe in its main folder. The gyro turns off during lock-on. Needs REFramework installed.|
 | Out of sight | ✅ Works | Unreal Engine 5.5.4 | |

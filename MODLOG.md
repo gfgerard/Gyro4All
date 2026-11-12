@@ -5,6 +5,243 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-12 **Outer Wilds (Steam, Unity Mono, `OuterWilds.exe`): the probe looped and never got past turn 1 of 3; hand-made
+  profile from the game's code** (built, 1207 checks pass; **not run in game yet**).
+  - **User's run (1.11.0, DualSense, Steam Input not on the pad):** the search with no input nudged 600 floats for 15 s and
+    found none, the body test (`Player_Body`, parent 1) failed ("asked 3.0, moved 0.7, other axis 0.7"), 4 Transform guesses
+    failed with "moved -0.6" each; the quiet watch picked `PlayerCamera < Player_Body` but captured no turn, and 20 s later the
+    discovery's patience ended it ("a new camera") and searched again: a loop. The stick fallback took over (the game rewrites
+    `Camera.main`'s rotation every frame).
+  - **Why:** the player stands on a spinning planet, and Unity's world is the solar system: the camera's world angles drift by
+    about 0.5 degrees/s and never stand still, and the body's up isn't the world's (`Player_Body` world pitch 39-73 degrees).
+    The nudges' settle (0.02 degrees cumulative over 150 ms) never settled, so nothing was nudged; a turn ends only on a still
+    camera, so turn 1 never ended; the body test yawed around the world's up, a tilt on a planet, and the drift (-0.6 in each
+    test) was all it measured.
+  - **The game's look (decompiled locally, Assembly-CSharp):** pitch `PlayerCameraController._degreesY` (degrees, positive up;
+    `UpdateRotation` writes `_playerCamera.transform.localRotation = AngleAxis(_degreesX, up) * AngleAxis(_degreesY, -right)`
+    every frame, clamped -80..80; `_degreesX` is 0 except ship free look). Yaw: no float;
+    `PlayerCharacterController.UpdateTurning` (FixedUpdate) does `_transform.rotation = AngleAxis(input, _transform.up) *
+    AngleAxis(planet spin, _transform.up) * _transform.rotation` on `Player_Body`. `_degreesY` wasn't nudged at all (above).
+  - **Changes:** a YawParent/YawObject body now yaws around its own up (`add_local_yaw`, engine `turn_body` and the probe's
+    `turn_transform`; the same as before for an upright body, unit-tested). Probe: a captured turn also ends once the player
+    has let go of the stick for 0.8 s (a drifting camera); a quiet capture with turns isn't ended by the discovery's patience
+    unless the camera changed. `profiles/OuterWilds.ini`: `ObjectType=PlayerCameraController`, `PitchPath=_degreesY`,
+    `PitchPerDegree=1`, `YawParent=1`, `Look=!_isSnapping, !_isLockedOn`.
+  - **First run with the profile (user, same pad):** the profile object was found and the gyro wrote, but after 2 s the stick
+    fallback took over ("the game undid the gyro's camera writes 8 frames in a row"), and saved `StickFallbackLearned=` into
+    the profile. The undo check judges the yaw, which for a YawParent body was its **world** Euler yaw: on a body standing on
+    a planet's side a local yaw barely moves it. Now the body's yaw is added up frame to frame as its twist around its own up
+    (`local_yaw_between`, unit-tested); whether the body's yaw really sticks is still to be seen.
+  - **Second run (user):** no stick fallback; gyro on with both axes applied. Seated at the ship's flight console the right
+    stick doesn't look (the game takes look input only in Character mode, or holding free look; the stick turns the ship),
+    but the gyro still pitched `_degreesY`: `Look=` gets `!_shipController._playerAtFlightConsole`
+    (`ShipCockpitController._playerAtFlightConsole`; `AllowFreeLook()` = at the console, not in the landing camera). The
+    profile reloaded live and logged `gameplay view off: !_shipController._playerAtFlightConsole is false` in the seat. Ship
+    free look (`_degreesX`/`_degreesY` while free look is held) isn't covered.
+  - **Regression in PowerWash Simulator (user, same day):** with the body's own up, the gyro's yaw on `HeadTurn` (YawParent=1)
+    flipped the stick fallback on and off every 1-3 s ("the game undid the gyro's camera writes"); the pitch was confirmed.
+    HeadTurn hangs from an upright root and seems to carry the look's pitch too, so its own up is tilted. Now the yaw turns
+    around the up of the body's **parent**, and around its own only at the root (Outer Wilds' `Player_Body` has no parent):
+    `up_of`, `add_yaw_about`, `yaw_between_about` in `unity_quat.hpp`, engine `body_up`, the probe's `turn_transform`; tests
+    for a pitched head under an upright parent and a body on a planet's side. Not rerun in either game yet.
+  - **Then Outer Wilds fell back to the stick again** (flapping every 0.5-5 s, right after load) with the parent's up, though
+    the earlier run with the body's own up had none: `Player_Body` most likely hangs from some frame there (a sector or an
+    attach point; not confirmed). Rule now (`yaw_up_from_parent`): the parent's up only when the body leans from it by a
+    pitch alone (its right level in the parent's frame, |right . parent up| < 0.1), else its own up. The engine logs
+    `unity: the yaw body turns around ...` when the choice changes, to confirm which one each game takes.
+  - **Next run:** `the yaw body turns around its own up (no parent)` (so Player_Body is a root, and the parent theory above
+    was wrong), and the stick fallback still flipped on and off every 0.5-5 s. The measure is right now, so the game really
+    puts the yaw back: Player_Body is a Rigidbody, and physics sets an interpolated body's Transform from the Rigidbody's pose
+    every frame; a Transform write sticks only when a physics step follows it before the next render (the game itself turns it
+    in FixedUpdate). Now the engine also writes `Rigidbody.rotation` when the yaw body has a Rigidbody (`body_rigidbody`,
+    found once per body, logged). The probe's body test doesn't yet.
+  - **Decision (user):** the first fix worked in Outer Wilds; the later ones (the parent's up, the pitch-only rule, also writing
+    `Rigidbody.rotation`, a temporary yaw diagnostic) didn't, and are gone. The own-up yaw is now opt-in per profile:
+    `YawAxis=Own` (`UnityProfile::yaw_own_axis`), with the first fix's `add_local_yaw` and `local_yaw_between`; every other
+    YawParent/YawObject profile (PowerWash Simulator, The Planet Crafter) and the probe's tests are back to the world yaw and
+    world-Euler yaw measure they had before 2026-11-12. `profiles/OuterWilds.ini` has `YawAxis=Own`. Note: for a root body
+    the later "own up" version was the same math as the first fix (unit-tested before it was removed), so the fallback seen
+    with it may be timing (frame rate against physics steps) rather than the code; to be watched.
+  - **The first fix restored (`YawAxis=Own`) fell back too:** the stick fallback flipped on and off every 0.5-2 s right after
+    load, as with every later version. So the earlier run without fallback was luck or a different situation, not that code.
+    **Decision (user):** `YawAxis` removed again; back to the yaw around the parent's up when the body leans from it by a
+    pitch alone, else its own (`body_up`, `yaw_up_from_parent`), the `Rigidbody.rotation` write (`body_rigidbody`), and the
+    probe's `turn_transform` with the same up. Decompiled facts: `PlayerCharacterController.UpdateTurning` (FixedUpdate)
+    turns `_transform.rotation` (so it starts from our write); `AlignPlayerWithForce`/`AlignWithDirection` align the body
+    to gravity through angular velocity (`SetAngularVelocity(0)` + `AddAngularVelocityChange`); `OWRigidbody.GetRotation`
+    reads `_rigidbody.rotation`. Temporary diagnostic (`g_yaw_debug`, first 120 yaw writes): what the Transform and the
+    Rigidbody read back at once, and next frame how far the body turned against the write and whether a physics step
+    (`Time.fixedTime` changed) ran in between. Remove it once the cause is known.
+  - **Cause found (diagnostic run):** the game keeps every yaw write. Next frame the body had turned exactly what was written
+    (to 0.001 deg), with a physics step in between every time, and Transform and Rigidbody read back the same at once. The
+    bug was ours: the profile frame clears `state_yaw_` (with `state_pitch_`) before reading the scene, so the "accumulated"
+    body yaw was only that frame's turn. With steady gyro motion, each frame's yaw equalled the previous write's base, and
+    the stick fallback judged every write undone. A fallback probe write after a pause looked kept, hence the flapping.
+    This was in every version since the frame-to-frame yaw measure, including the first fix, and likely is PowerWash's
+    regression too (its HeadTurn uses the same measure). Fixed: the sum lives in its own member `body_yaw_`. The
+    `Rigidbody.rotation` write is removed (not needed); the diagnostic stays for one more run.
+  - **User verdict: works** (no stick fallback in the log, standing on a planet). The diagnostic is removed.
+  - **Zero-g with the suit (user):** the gyro turns the view, the right stick doesn't. Decompiled: there the game takes no
+    look input on the camera (`PlayerCameraController.UpdateInput` skips when `PlayerState.InZeroG() &&
+    IsWearingSuit()`); the right stick goes to `JetpackThrusterController.ReadRotationalInput` (`InputLibrary.yaw`/`pitch`),
+    which `ThrusterModel.FireRotationalThrusters` turns into angular acceleration of the body. Not yet known whether the stick
+    fails there without Gyro4All too, or because the gyro's Transform writes to Player_Body every frame cancel that rotation.
+    **User test:** with the gyro paused the stick turns, so the gyro's writes cancel it. The player's thrusters likely rotate
+    by hand (`_usePhysicsToRotate` false: `UpdateManualAngularVelocity` -> `OWRigidbody.AddRotation` ->
+    `_rigidbody.MoveRotation(delta * _rigidbody.rotation)` in FixedUpdate); a Transform written outside physics is synced
+    only at the next simulation step, which most likely drops that MoveRotation. Now, when the yaw body has a Rigidbody
+    (`body_has_rigidbody`, looked up once per body, logged), the engine calls `Physics.SyncTransforms()` right after the
+    write. Not yet tested in game.
+  - **User verdict: all good** (the stick and the gyro both turn in zero-g; standing on a planet works). The log shows
+    `the yaw body has a Rigidbody: physics takes the gyro's yaw at once`. Still open: 5 short stick-fallback spells
+    (0.5-2 s each) within about a minute of that session, after 7 minutes without any. Not known where the player was; likely
+    zero-g, where the thrusters' spin carries on after the stick is released (rotational inertia), which the fallback's
+    verdict doesn't allow for (it only skips frames while the stick is deflected).
+  - **User, same day:** PowerWash Simulator works again (so its regression was the yaw-accumulation bug too); in Outer Wilds
+    the gyro works standing in the ship.
+  - **Probe: angles in the body's frame (user asked to try).** `read_angles` now reads a camera's angles in the frame of the
+    body it hangs from (`find_body_parent`: nearest ancestor with a CharacterController or Rigidbody; cached per camera,
+    looked up again every 5 s, the bodies listed once per 5 s instead of per call). Pitch and yaw are taken relative to the
+    body, plus the body's own yaw summed frame to frame around its up (`angles_in_body` in `unity_quat.hpp`, `body_angles`
+    in the probe). `sample_xforms` compares the Transforms in the same frame. For an upright body this equals the world
+    angles (unit-tested), so other games should see no change; with no body, still the world's. Tests: upright equals
+    world; tilted bodies give the look's own angles; a body yaw adds to the yaw. Not yet run in game: to check, the probe
+    finding Outer Wilds' view with no profile, and a game it already handled (PowerWash Simulator) still found.
+  - **First probe run with it (user, profile set aside as .bak):** better (the watched turns now got past turn 1: 6 captured),
+    but no profile. Two causes. (1) The search with no input never nudged anything ("nudges: 0 value(s)", no nudge line in
+    15 s): it waits for every camera of the scene to be still, and 16 cameras there sit on bodies that turn by themselves.
+    (2) The pick chose `RemoteViewerCamera < Prefab_NOM_RemoteViewer < Interactibles_TimeLoopRing < TimeLoopRing_Body` over
+    `PlayerCamera < Player_Body`, by its drift. `PlayerCameraController._degreesY` scores as a candidate (camera class, on
+    the camera rig, word "y"). Fix: each watched camera learns its drift at rest (degrees per second, from reads with no
+    look input and nothing nudged; a read more than 3 deg/s off is an event, not drift) and the nudges and the pick see its
+    turn with the drift taken out (`watch_drift`, `turned_since_base`). A camera still turning by itself beyond its drift
+    for 3 s with no input is left out of the search, logged (`mark_restless`). Not yet run in game.
+  - **Next run (user): the probe wrote a profile at the title screen, before the menu** (`ObjectType=OWCamera`,
+    `PitchObject=_mainCamera`, `YawParent=3`, Source=auto): the search with no input found no float, so it guessed
+    Transforms by name (the camera, its ancestors `CameraSocket`/`Background`/`Scene`), and a 3-degree turn of each stayed
+    put on the title camera, which nothing rewrites. The same tests ran at the title in the run before and failed (the
+    camera has no body, so neither change above touches that path; likely luck then). Fix: a result of Transforms alone,
+    with no float and no player turns measured (`yaw2`, `pitch2` both 0), isn't written (`xforms_write` gives up). None of
+    the six Source=auto profiles in `profiles/` is Transforms-only.
+  - **Next run (user):** the title screen wrote nothing (fixed). In gameplay the search with no input still nudged 600 floats
+    with no camera moving (no `probe: nudge` line, no camera marked restless), and the pick again chose RemoteViewerCamera,
+    which really turns with the player's look (it copies the view) and won by its place in the list. Likely `_degreesY`
+    wasn't among the 600 of about 22,400 floats: its name scored on "y" alone (score 9). Fixes: "degrees"/"degree" are
+    look words for `discovery_score` (now 12) and `look_named`; the pick takes Camera.main when it turned at least 0.7 of
+    the best camera's turn; the probe log lists the 20 floats nudged first and the lowest score nudged (diagnostic). Not
+    yet run in game.
+  - **Probe found it (user's run, no profile):** at the title the Transform guesses passed again and were not written
+    (fixed). In gameplay the search with no input verified the yaw on parent 1 but no pitch: `_degreesY` was 80 at the wake-up
+    (looking up, at the game's clamp), so a +0.25 nudge was clamped back. The pick took `PlayerCamera < Player_Body` on the
+    third watched search (Camera.main preference), and the player's turns verified `PlayerCameraController._degreesY` (asked
+    3.0, moved 3.0) and yaw on parent 1. Written: `ObjectType=PlayerCameraController`, `PitchPath=_degreesY`,
+    `PitchPerDegree=1`, `YawParent=1` (the hand-made profile's keys exactly), plus `ZoomReference=_playerCamera._viewmodelFOV`
+    (`Vertical`), and no `Look=` (the probe can't find those). The ZoomReference is doubtful: it is the viewmodel's FOV (70),
+    not the game's look reference `_initFOV`, so it may be off when the player's FOV setting isn't 70. Open: a nudge at a
+    clamp could also try the other way.
+  - **Still open:** the probe can't find this kind of view by itself: its angles are world Euler angles, and a drifting, tilted
+    frame needs them relative to the body's up with the drift subtracted. To check in game: the body yaw sticks (Player_Body is
+    an OWRigidbody; the game itself writes its Transform), seated in the ship, zero-g, the map. Zoom: the game scales its own
+    look by `fieldOfView / _initFOV`; Camera.main's FOV is read by `ZoomSource=Auto`.
+
+- 2026-11-12 **PowerWash Simulator (Unity IL2CPP, no profile): the probe found a view, lost it, and found nothing again;
+  probe notices now stay on screen; the camera's ancestors are candidates** (built, 1205 checks pass; not run in game yet).
+  - **The game's look** (probe log, user's run, DualSense, Steam Input not on the pad): camera `PlayerCamera < HeadTurn <
+    PlayerCharacter_Default(Clone)` (Camera.main; also `Third Person Camera`, `UIClearCamera(Clone)`, `TimeLapseCamera`).
+    Pitch: `PWS.PlayerCameraController <VerticalLookRotation>k__BackingField` (degrees, -1 per degree up; test kept and
+    turned 3 of 3). Yaw: `PWS.PlayerCameraController <HorizontalLookRotation>k__BackingField`, `<ThirdPersonHorizontalLook>`,
+    `PWS.CharacterVisuals.m_prevHorizontalRotation`, `PWS.CharacterVisualsThirdPerson.m_facingAngleTarget` follow the camera
+    1:1 (r=1.000) but the game rewrites all of them: copies. They hold the yaw **relative to the root**: the root's yaw stays
+    141.0 while the camera goes 141 -> 146.2 with HorizontalLook 5.15, so the turn is made on `HeadTurn` (parent 1) or below.
+    `PWS.PlayerInput <LookRaw>k__BackingField.x/.y` (and `PWS.CursorInput`'s) are the look input: a 0.25 nudge turned the
+    camera 4.5-4.65 degrees and kept turning (a rate, not an angle; Rewired namespace skipped). XInput not shown (the game
+    reads the pad over HID), so the stick fallback turned nothing.
+  - **Why it "disconnected":** an earlier search's body test turned the root (parent 2, the Rigidbody) 3 degrees: the camera
+    hangs from it, so it passed and went into the profile as `YawParent=2`; the first stick turns didn't move the root and
+    the engine took it back (`Rejected=parent 2`, the profile's only line now). After that no search had a yaw: the body is
+    rejected, the Transforms the scripts hold were 200 of the cap (`kMaxXforms`) filled by UI RectTransforms (inventory grids,
+    glyphs; the discovery guesses by name were `ContentViewBase.m_contentRoot` and VFX roots) and HeadTurn wasn't among
+    them. The last probe-key run captured 4 turns and never tested: most likely under 15 degrees of pitch in total, and the
+    "turn up and down" notice is shown for 10 s only.
+  - **Probe changes (`unity_probe.cpp`):** (1) a status notice refreshed every second for the whole run, quiet searches
+    included: the phase, what to do or not to touch, turn k of 3 with degrees so far, pitch so far against 15, "STOP",
+    "LET GO of the controller" while a test waits, "paused" in menus, and the probe key to cancel; the one-off notices it
+    replaces are gone (results, cancel and "can't run" remain). (2) The camera's ancestors up to its body are Transforms to
+    compare and test for the yaw (`Xform::parent`, result `YawParent=N`, rejection `parent N`): with the player's turns the
+    highest one that turns with the camera ranks first; with no turns every ancestor is tried highest first, after the body's
+    own test, and a rejected body is skipped, so PowerWash's next search tries HeadTurn. (3) With the player's turns, a body
+    whose yaw didn't follow them isn't tested (it only carries the camera). (4) UI RectTransforms are left out and the camera
+    rig's scripts' Transforms are collected first. (5) Logged only: `hier` lines (each ancestor's yaw against the camera's)
+    and `rot` lines (scripts' Quaternion fields that follow the camera), for where to look if HeadTurn is rewritten too.
+  - **Rerun (user, same pad/connection):** the search with no input found it in 17 s: pitch `VerticalLookRotation` (nudge, test
+    3 of 3), yaw `YawParent=1` (HeadTurn, the first ancestor guess, test 3 of 3); profile `ObjectType=PWS.PlayerCameraController`,
+    `CameraField=m_camera`, `PitchPerDegree=-1`, `Source=auto`; both axes confirmed by the stick (`the stick or mouse turns
+    the yaw/pitch that was found: confirmed`). `PWS.PlayerCameraController.m_horizontalLook` is a Transform field holding
+    HeadTurn (`m_rigTransform` -> `Rig_PlayerArms < RigOffset < PlayerCamera`). **Bug (user): after a while the game's own
+    right stick turns the camera extremely slowly, even at maximum sensitivity, and stays slow with the gyro off; once the
+    camera shot up while level with almost no motion.** Not explained by the log (no probe or engine event at that time;
+    the user was also changing GyroLib settings: `gyrolib.ini` reloads, bias reset). Guess: HeadTurn is the head's offset
+    from the body, and the gyro's yaw on it pushes that offset where the game slows its look (`m_cameraBounds` 30/15,
+    `m_RigRotationRange` 32.5/18, `m_staticLookSpeedFactor`). Diagnostic added: F7's dump now has `hier` lines for
+    Camera.main and each ancestor (world pitch/yaw and local pitch/yaw under its parent). Asked for F7 dumps while the stick
+    is normal and while it is slow.
+  - Next: rerun PowerWash with the probe key (turns with clear up/down); see whether parent 1 (HeadTurn) passes and stays
+    confirmed by the stick. If HeadTurn is rewritten as well, the `rot` lines or a write to `LookRaw` (an input route) are the
+    leads.
+- 2026-11-11 **Unity: what PR 32 (MOUSE: P.I. For Hire, external contributor) found, ported onto the existing Unity module;
+  the probe now tests Transforms the scripts hold** (built, 1057 checks pass; not run in game: neither MOUSE nor the existing
+  Unity games were retested). The PR had been written before the Unity module and replaced it, so it wasn't merged; its
+  findings, from the contributor's tests (GameSir Cyclone 2 in DS4 mode, no Steam Input; `XInput=1` and `XInput=2`):
+  - **MOUSE's camera** (Unity 6000.3.13f1, Mono, `Mouse.dll`): `Mouse.CharacterMovement.PlayerRotationBehaviour.Update` reads
+    the camera rig's `localEulerAngles.x` (`Player.cameraRigController`'s Transform) and the body's `eulerAngles.y`
+    (`Player.characterController`, a serialized `MouseCharacterController`) every frame, adds stick/mouse in degrees, clamps
+    the pitch to `RotationBehaviourSettings.MinPitch/MaxPitch` (-90/90) and writes both back. No float holds the angles, and
+    the camera follows the rig through Cinemachine, so neither `Camera.main`'s Transform nor `YawParent` reach them. Gates:
+    `Time.timeScale` 0 (pause); the game's `InputManager` disables the whole Player action map in menus, dialogue and
+    cutscenes, so `Player.inputs._controls.m_Player_Look.enabled` is its own "can look"; the hub is a car with `Player`'s
+    GameObject inactive. Zoom: `SecondaryWeaponAbilityScope` sets the virtual camera's vertical FOV,
+    `CameraFOVController._baseVerticalFOV` is the unzoomed one. Not turned: the boss cannon (`CannonViewfinder`) and noclip.
+  - **`Cursor.visible` has no getter in that build** (managed code stripping keeps the setter only): `read_gate` gave no cursor
+    at all, so a profiled game turned in menus. Now, only when that getter is missing, `Cursor.lockState` None counts as a
+    menu's cursor (Confined doesn't); games that have the getter read exactly as before.
+  - **Unity 6 reads gamepads through Windows.Gaming.Input** (`Player.log`: `Using Windows.Gaming.Input`; `RoGetActivationFactory`
+    of `Windows.Gaming.Input.Gamepad`/`RawGameController`, imported from `api-ms-win-core-winrt-l1-1-0.dll`) and loads
+    `XInput1_4/1_3/9_1_0` only when that fails, so with `XInput=2` the game had no controller (WGI doesn't see the shown
+    one). New `Engine::wgi_falls_back_to_xinput()` (Unity only): with `XInput=2`, `RoGetActivationFactory`/`RoActivateInstance`
+    in the game modules answer `REGDB_E_CLASSNOTREG` for `Windows.Gaming.Input.*` (log `the game's Windows.Gaming.Input class
+    ... refused`); then `Player.log` says `fallback to XInput` and the game reads the shown controller. The PR's
+    `GetProcAddress` translation of XInput wasn't taken: `managed_input()`'s export hooks on the XInput DLLs already catch
+    calls through run-time lookups.
+  - **Profile keys** (`unity_profile.cpp`, unit-tested): `PitchObject=`/`YawObject=` (a path to a component or GameObject whose
+    Transform holds the angle; turned with the same world-yaw / local-pitch quaternion turn as `YawParent`; used only when the
+    axis has no float or parent, so existing profiles read as before), `Look=` (bool conditions, `!` negates; view off with
+    `unity: gameplay view off: <condition> is false`), `ZoomReference=` (path or number; axis below). Paths: a name with no field
+    is read through `get_<name>` (fields first, so paths that worked resolve the same way). `CameraField=` now also takes such a
+    property. `profiles/MOUSE.ini` written in this format from the PR's findings (ObjectType=Player); untested.
+  - **Probe** (`unity_probe.cpp`): the scan also lists the Transforms the scripts hold (component/GameObject fields, one plain
+    object deep, up to 200, `xf` lines in `Gyro4All-probe.log`); the capture correlates their own yaw/pitch with the camera's
+    (`transform_score`: about 1 degree per degree, same direction); they get a live 3-degree test (phase `Xforms`) only for an
+    axis that no float and no camera parent passed: after the float tests, after a failed body test, and with no pitch float
+    after 5 turns (floats keep their 3). With no turns measured (the search with no input) the likeliest 4 by field name
+    (`transform_discovery_score`: rig/head/camera for pitch, body/character/controller for yaw). Result keys PitchObject/YawObject,
+    YawObjectType when the yaw's script differs; rejections are `<class> @<path>`. Cinemachine 2/3 virtual cameras' follow and
+    look-at targets now count as the camera's rig (deeper float scan, nudge order).
+  - Limits: a Transform the game doesn't read back but the camera hangs from (a holder under the body) also passes the live test;
+    its yaw would drift from the body's walking direction. `Source=auto` results are still confirmed by the first real turns.
+  - **In game (MOUSE, user, DualSense USB, `XInput=1`, Steam Input not on the pad):** profile read, gyro turns the view, `Look=`
+    toggles in menus and the hub; `Cursor.visible` getter missing as expected (`cursor 0, lock state 1`). **Bug: Adapt to Zoom at
+    x0.563 on foot**: `the game's field of view 72.5, unzoomed 105.0 (vertical degrees)`. `Camera.fieldOfView` is vertical (72.5),
+    but `_baseVerticalFOV`, despite its name, holds the in-game FOV option in horizontal degrees (105 horizontal = 72.45 vertical
+    at 16:9); the PR's own code took it as vertical too. Fix: `ZoomReferenceAxis=Vertical|Horizontal` (`unity_fov.hpp`,
+    unit-tested); empty = told from the camera (`FovAxisVote`: 30 unzoomed frames where the camera's FOV equals the value in one
+    axis, 4x the other's; no compensation until then), and an explicit key the camera contradicts is logged. MOUSE.ini now has
+    `ZoomReferenceAxis=Horizontal`. The probe, with a verified camera, now picks `ZoomReference=` itself
+    (`fov_reference_match`: a float named fov/fieldofview, not zoom/aim/current/min/max/speed/..., equal to the camera's FOV in
+    either axis, base/default/normal names first, reached from ObjectType's object directly or through one of its fields) and
+    writes the axis it matched. 1205 checks; not rerun in game yet.
+  - Next: rerun MOUSE (on foot x1.0, scope below 1), once without the profile to see the probe find the view and the FOV, and
+    recheck one existing Unity game (The Planet Crafter or Subnautica) for no change.
+
 - 2026-11-10 **RAGE (2011, id Tech 5, Steam 9200, `Rage64.exe`): detection.** Gyro4All 1.11.0 loaded (winmm.dll, OpenGL pump thread, panel,
   DualSense samples) but took it for id Tech 6: RAGE has DOOM's `base\gameresources.resources` marker, not TNO's `master.index`/`chunk0.resources`.
   Type info 2856 classes, none of the player's fields; RTTI `idGameLocal` exe+0x1973AB8, `idPlayer` exe+0x19A4D38, `idPhysics_Player` exe+0x1C06E58;

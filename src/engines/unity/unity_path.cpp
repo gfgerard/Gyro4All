@@ -4,6 +4,7 @@
 #include "mem.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <string_view>
 
 namespace gyro4all::unity {
@@ -96,7 +97,8 @@ bool ManagedPath::resolve(Runtime& runtime, void* root, FieldValue& out) {
         const bool last = i + 1 == parts_.size();
         Step& step = steps_[i];
         const bool method = part.ends_with("(@)");
-        const size_t bracket = !method && part.ends_with("]") ? part.find('[') : std::string::npos;
+        const bool call = !method && part.ends_with("()");  // a method with no arguments, read like a getter
+        const size_t bracket = !method && !call && part.ends_with("]") ? part.find('[') : std::string::npos;
         const std::string field_name = bracket == std::string::npos ? part : part.substr(0, bracket);
         if (step.klass != klass) {
             step = {};
@@ -107,12 +109,26 @@ bool ManagedPath::resolve(Runtime& runtime, void* root, FieldValue& out) {
                     complain("method " + name + " not found on " + runtime.class_full_name(klass));
                     return false;
                 }
+            } else if (call) {
+                const std::string name = part.substr(0, part.size() - 2);
+                step.member = runtime.find_method(klass, name.c_str(), 0);
+                step.getter = step.member != nullptr;
+                if (!step.member) {
+                    complain("method " + name + "() not found on " + runtime.class_full_name(klass));
+                    return false;
+                }
             } else {
                 step.member = runtime.find_field(klass, field_name.c_str());
+                if (!step.member && bracket == std::string::npos) {
+                    step.member = runtime.find_method(klass, ("get_" + field_name).c_str(), 0);
+                    step.getter = step.member != nullptr;
+                }
                 if (!step.member) {
                     complain("field " + field_name + " not found on " + runtime.class_full_name(klass));
                     return false;
                 }
+            }
+            if (!method && !step.getter) {
                 if (runtime.field_is_static(step.member)) {
                     complain("field " + field_name + " of " + runtime.class_full_name(klass) + " is static (not supported)");
                     return false;
@@ -132,6 +148,24 @@ bool ManagedPath::resolve(Runtime& runtime, void* root, FieldValue& out) {
             void* result = runtime.invoke(step.member, reinterpret_cast<void*>(base), arguments);
             if (!result) return false;
             base = reinterpret_cast<uintptr_t>(result);
+            klass = runtime.object_class(result);
+            if (runtime.class_is_value_type(klass)) copy = true;
+            continue;
+        }
+        if (step.getter) {
+            if (inline_value) {
+                complain("property " + part + " read on a value type field (not supported)");
+                return false;
+            }
+            void* result = runtime.invoke(step.member, reinterpret_cast<void*>(base));
+            if (!result) return false;
+            if (last) {
+                out = {};
+                out.copy = out.called = true;
+                out.returned = result;
+                return true;
+            }
+            base = reinterpret_cast<uintptr_t>(result);  // a boxed value type keeps its header: field offsets still fit
             klass = runtime.object_class(result);
             if (runtime.class_is_value_type(klass)) copy = true;
             continue;
@@ -175,6 +209,59 @@ bool ManagedPath::resolve(Runtime& runtime, void* root, FieldValue& out) {
         }
     }
     return false;
+}
+
+namespace {
+constexpr int kTypeBoolean = 0x02, kTypeI4 = 0x08, kTypeR8 = 0x0d;
+}
+
+bool ManagedPath::read_bool(Runtime& runtime, void* root, bool& value) {
+    FieldValue v;
+    if (!resolve(runtime, root, v)) return false;
+    uint8_t byte = 0;
+    if (v.called) {
+        if (!runtime.returned(v.returned, byte)) return false;
+    } else if (v.type != kTypeBoolean || !mem::rd(v.address, byte)) {
+        if (v.type != kTypeBoolean) complain("a Look= condition must end at a bool");
+        return false;
+    }
+    value = byte != 0;
+    return true;
+}
+
+bool ManagedPath::read_number(Runtime& runtime, void* root, double& value) {
+    FieldValue v;
+    if (!resolve(runtime, root, v)) return false;
+    if (v.called) {
+        float f = 0;
+        if (!runtime.returned(v.returned, f)) return false;
+        value = f;
+    } else if (v.type == kTypeR4) {
+        float f = 0;
+        if (!mem::rd(v.address, f)) return false;
+        value = f;
+    } else if (v.type == kTypeR8) {
+        if (!mem::rd(v.address, value)) return false;
+    } else if (v.type == kTypeI4) {
+        int32_t i = 0;
+        if (!mem::rd(v.address, i)) return false;
+        value = i;
+    } else {
+        complain("a number path must end at a float, double or int");
+        return false;
+    }
+    return std::isfinite(value);
+}
+
+void* ManagedPath::read_object(Runtime& runtime, void* root) {
+    FieldValue v;
+    if (!resolve(runtime, root, v)) return nullptr;
+    if (v.called) return runtime.class_is_value_type(runtime.object_class(v.returned)) ? nullptr : v.returned;
+    if (!holds_object(runtime, v.type, v.klass)) {
+        complain("an object path must end at a field holding an object");
+        return nullptr;
+    }
+    return reinterpret_cast<void*>(mem::rdp(v.address));
 }
 
 }  // namespace gyro4all::unity

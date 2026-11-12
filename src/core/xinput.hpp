@@ -20,6 +20,7 @@ struct Settings {
     bool touchpad_back = true;     // touchpad click also presses View (Back), like the Create/Share button
     bool trace = false;            // XInputTrace: log every module that calls XInput (inline hooks on the system DLLs)
     bool export_hooks = false;     // Engine::managed_input: also hook the XInput DLLs' exports (no import table to patch)
+    bool refuse_wgi = false;       // Engine::wgi_falls_back_to_xinput: with XInput=2, Windows.Gaming.Input classes refused
     const wchar_t* window_class = nullptr;  // the game's windows (Engine::window_class), nullptr = every top-level one
     void (*controllers_changed)() = nullptr;  // Engine::controllers_changed, after the WM_DEVICECHANGE (game thread)
 };

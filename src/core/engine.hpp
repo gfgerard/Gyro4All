@@ -72,6 +72,11 @@ public:
     virtual bool inline_hooks() const { return false; }
     // The engine's games call controller APIs from managed code, resolved at run time: no import table shows those calls.
     virtual bool managed_input() const { return false; }
+    // The game reads gamepads through Windows.Gaming.Input first and loads XInput only when its classes can't be
+    // activated (Unity 6's player). With XInput=2 they are refused in the game modules, so the game reads the Xbox
+    // controller Gyro4All shows (Windows.Gaming.Input sees real devices only). Off by default: a game without that
+    // fallback would lose every gamepad.
+    virtual bool wgi_falls_back_to_xinput() const { return false; }
     // Window class of the game's windows, which get WM_DEVICECHANGE when the virtual Xbox controller comes or goes
     // (nullptr = every top-level window of the game thread).
     virtual const wchar_t* window_class() const { return nullptr; }

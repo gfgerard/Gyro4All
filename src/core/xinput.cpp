@@ -834,6 +834,50 @@ void announce_device_change() {
     log("xinput: WM_DEVICECHANGE posted to %d game window(s)%s", posted.first, posted.second ? " of the process" : "");
 }
 
+// XInput=2 for games that read gamepads through Windows.Gaming.Input first (Settings::refuse_wgi, Unity 6's player):
+// activating one of its classes fails as if the API weren't there, so the game falls back to XInput and reads the Xbox
+// controller shown to it (MODLOG 2026-11-11). Only the game modules' imports are patched; other Windows Runtime classes
+// pass.
+using RoGetActivationFactory_t = HRESULT(WINAPI*)(void* class_id, REFIID iid, void** factory);
+using RoActivateInstance_t = HRESULT(WINAPI*)(void* class_id, void** instance);
+using WindowsGetStringRawBuffer_t = PCWSTR(WINAPI*)(void* string, UINT32* length);
+RoGetActivationFactory_t g_ro_get_factory = nullptr;
+RoActivateInstance_t g_ro_activate = nullptr;
+constexpr HRESULT kClassNotRegistered = HRESULT(0x80040154);  // REGDB_E_CLASSNOTREG
+
+bool refused_class(void* class_id) {
+    // combase.dll is loaded by then: the game is activating a Windows Runtime class through it.
+    static const auto raw = [] {
+        HMODULE combase = GetModuleHandleW(L"combase.dll");
+        return combase ? reinterpret_cast<WindowsGetStringRawBuffer_t>(GetProcAddress(combase, "WindowsGetStringRawBuffer")) : nullptr;
+    }();
+    if (!raw || !class_id) return false;
+    UINT32 length = 0;
+    const PCWSTR text = raw(class_id, &length);
+    constexpr wchar_t kPrefix[] = L"Windows.Gaming.Input.";
+    constexpr UINT32 kLength = UINT32(std::size(kPrefix) - 1);
+    if (!text || length < kLength || wcsncmp(text, kPrefix, kLength) != 0) return false;
+    static std::atomic<int> logs{0};
+    if (logs.fetch_add(1) < 4) log("xinput: XInput=2: the game's Windows.Gaming.Input class %ls refused (it falls back to XInput)", text);
+    return true;
+}
+
+HRESULT WINAPI hk_ro_get_factory(void* class_id, REFIID iid, void** factory) {
+    if (refused_class(class_id)) {
+        if (factory) *factory = nullptr;
+        return kClassNotRegistered;
+    }
+    return g_ro_get_factory ? g_ro_get_factory(class_id, iid, factory) : kClassNotRegistered;
+}
+
+HRESULT WINAPI hk_ro_activate(void* class_id, void** instance) {
+    if (refused_class(class_id)) {
+        if (instance) *instance = nullptr;
+        return kClassNotRegistered;
+    }
+    return g_ro_activate ? g_ro_activate(class_id, instance) : kClassNotRegistered;
+}
+
 void install(const Settings& settings) {
     g_settings = settings;
     const char* modes[] = {"off", "auto", "always"};
@@ -909,6 +953,12 @@ void install(const Settings& settings) {
     dinputpad::refuse_pads(g_settings.mode == Always);
     if (g_settings.mode == Always)
         log("xinput: XInput=2: the game's own access to PlayStation/Nintendo controllers is refused; it only gets the Xbox controller");
+    if (g_settings.mode == Always && g_settings.refuse_wgi) {
+        hooks::add(nullptr, "RoGetActivationFactory", reinterpret_cast<void*>(&hk_ro_get_factory),
+                   reinterpret_cast<void**>(&g_ro_get_factory));
+        hooks::add(nullptr, "RoActivateInstance", reinterpret_cast<void*>(&hk_ro_activate), reinterpret_cast<void**>(&g_ro_activate));
+        log("xinput: XInput=2: the game's Windows.Gaming.Input classes will be refused (it falls back to XInput)");
+    }
     if (g_settings.mode == Auto) {
         dinputpad::on_read(&di_read);
         check_imports();

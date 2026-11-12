@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "unity_fov.hpp"
+
 namespace gyro4all::unity {
 
 // How a value moved against the camera over the samples taken while the player turned it.
@@ -103,7 +105,8 @@ inline int discovery_score(const std::string& class_name, const std::string& pat
                                     "ratio",    "semitone",    "intensity"};
     constexpr const char* kStrong[] = {"pitch", "yaw"};
     constexpr const char* kLook[] = {"rot",  "rotation", "angle", "angles", "heading", "elevation", "azimuth", "tilt",
-                                     "pan",  "axis",     "horizontal", "vertical", "look", "aim",   "euler",   "orbit"};
+                                     "pan",  "axis",     "horizontal", "vertical", "look", "aim",   "euler",   "orbit",
+                                     "degrees", "degree"};  // Outer Wilds' PlayerCameraController._degreesY
     constexpr const char* kWeak[] = {"x", "y", "view", "mouse"};
     const auto has = [](const std::vector<std::string>& words, const auto& list) {
         for (const std::string& w : words)
@@ -146,12 +149,49 @@ inline bool turn_followed(double asked, double moved, double moved_other) {
     return std::abs(moved - asked) <= kTolerance && std::abs(moved_other) <= kTolerance;
 }
 
+// A look state on a Transform a script holds (PitchObject=/YawObject=): how its own turn compares with the camera's over
+// the player's turns. It is in degrees by nature, so only about one degree per degree, the same way, qualifies; anything the
+// camera hangs from or follows does, which the live test sorts out (the game must read it back and keep a turn).
+inline double transform_score(const AxisFit& axis, const AxisFit& other, int moved) {
+    if (axis.per_degree < 0.8 || axis.per_degree > 1.25) return 0;
+    return candidate_score(axis, other, moved);
+}
+
+// Which of the Transforms the scene's scripts hold are worth a live test with no player input, by the name of the field
+// that holds them and its script's class: likeliest first, 0 = not tried. Pitch lives on a head or camera rig, yaw on the
+// body (MOUSE: P.I. For Hire's Player.cameraRigController and Player.characterController).
+inline int transform_discovery_score(const std::string& class_name, const std::string& field, bool pitch_axis) {
+    constexpr const char* kNot[] = {"weapon", "gun", "hand", "hands", "arm", "arms", "target", "enemy", "spawn", "muzzle", "ui",
+                                    "canvas", "hud", "icon", "door", "item", "pickup", "light", "effect", "fx", "audio", "sound",
+                                    "foot", "feet", "ground", "last", "prev", "previous", "old", "start", "default", "original"};
+    constexpr const char* kPitch[] = {"head", "rig", "pivot", "neck", "pitch", "camera", "cam", "eye", "eyes", "look", "view", "aim"};
+    constexpr const char* kYaw[] = {"body", "character", "controller", "player", "root", "yaw", "pawn", "avatar"};
+    const auto has = [](const std::vector<std::string>& words, const auto& list) {
+        for (const std::string& w : words)
+            for (const char* item : list)
+                if (w == item) return true;
+        return false;
+    };
+    const std::vector<std::string> words = name_words(field);
+    if (words.empty() || has(words, kNot)) return 0;
+    // A head turns with the body, and a game that writes only its pitch back would keep a yaw put on it: a body comes first.
+    const int name = pitch_axis ? (has(words, kPitch) ? 8 : 0) : (has(words, kYaw) ? (has(words, kPitch) ? 2 : 8) : 0);
+    if (name == 0) return 0;
+    return name + (camera_class_name(class_name) ? 4 : 0);
+}
+
+// The Rejected= entry of an object path: "<class> @<path>".
+inline std::string object_rejection(const std::string& class_name, const std::string& path) { return class_name + " @" + path; }
+
 struct ProbeResult {
     std::string pitch_class, pitch_path, yaw_class, yaw_path, camera_field;  // pitch_class "": pitch on the camera's Transform
     double pitch_per_degree = 0, yaw_per_degree = 0;
     int yaw_parent = 0;      // > 0: yaw on that ancestor's Transform (the body), levels above the camera; no yaw float
     bool automatic = false;  // found with no player input: to be confirmed by the first real stick or mouse turn
     bool pitch_transform = false;  // the game copies the pitch float to the camera only on look input: turn both
+    std::string pitch_object, yaw_object;  // a path to a component or GameObject whose Transform has it, instead of a float
+    std::string zoom_reference;            // ZoomReference=: a float path from ObjectType's object to the unzoomed FOV
+    FovAxis zoom_axis = FovAxis::Auto;     // the axis it matched the camera's FOV in
 };
 
 // The [Unity] keys of a verified result.
@@ -159,17 +199,27 @@ inline std::vector<std::pair<std::string, std::string>> profile_keys(const Probe
     std::vector<std::pair<std::string, std::string>> keys;
     if (!r.pitch_class.empty()) {
         keys.emplace_back("ObjectType", r.pitch_class);
-        if (!r.yaw_parent && r.yaw_class != r.pitch_class) keys.emplace_back("YawObjectType", r.yaw_class);
+        if (!r.yaw_parent && !r.yaw_class.empty() && r.yaw_class != r.pitch_class) keys.emplace_back("YawObjectType", r.yaw_class);
         if (!r.camera_field.empty()) keys.emplace_back("CameraField", r.camera_field);
-        keys.emplace_back("PitchPath", r.pitch_path);
-        keys.emplace_back("PitchPerDegree", std::format("{:.7g}", snap_per_degree(r.pitch_per_degree)));
-        if (r.pitch_transform) keys.emplace_back("PitchTransform", "1");
+        if (!r.pitch_object.empty()) {
+            keys.emplace_back("PitchObject", r.pitch_object);
+        } else {
+            keys.emplace_back("PitchPath", r.pitch_path);
+            keys.emplace_back("PitchPerDegree", std::format("{:.7g}", snap_per_degree(r.pitch_per_degree)));
+            if (r.pitch_transform) keys.emplace_back("PitchTransform", "1");
+        }
     }
     if (r.yaw_parent > 0) {
         keys.emplace_back("YawParent", std::to_string(r.yaw_parent));
+    } else if (!r.yaw_object.empty()) {
+        keys.emplace_back("YawObject", r.yaw_object);
     } else {
         keys.emplace_back("YawPath", r.yaw_path);
         keys.emplace_back("YawPerDegree", std::format("{:.7g}", snap_per_degree(r.yaw_per_degree)));
+    }
+    if (!r.pitch_class.empty() && !r.zoom_reference.empty()) {
+        keys.emplace_back("ZoomReference", r.zoom_reference);
+        if (r.zoom_axis != FovAxis::Auto) keys.emplace_back("ZoomReferenceAxis", fov_axis_name(r.zoom_axis));
     }
     if (r.automatic) keys.emplace_back("Source", "auto");
     return keys;
