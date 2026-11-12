@@ -2867,4 +2867,7 @@ Afterburner running.
   Built (all unit checks pass). Tested in game by the contributor of PR 33 (MOUSE, D3D11, RTSS running): the OSD stays after the game
   loads, while the panel is open and after closing it; the panel opens with F10 and the game's image is unchanged.
   Also tested by them in Metro: Last Light Redux: works as expected.
-  Merged locally 2026-11-12; validation here pending (RTSS with a D3D11 game, HDR scRGB/HDR10 panel, ReShade).
+  Merged 2026-11-12 (1.11.0, no version bump). Validated by the user with RTSS running, works as expected: Firewatch
+  (Unity, D3D11, SDR) and Days Gone (UE4, D3D11 through ReShade `d3d11.dll`/`dxgi.dll` with RenoDX, OptiScaler as
+  `version.dll`; panel drawn as HDR10, 3840x2160, colour space 12). With ReShade the Present chain line reads `called
+  from d3d11.dll+0x72908; slot 8 d3d11.dll+0x59B20`: the slot holds ReShade's swapchain proxy, not our hook.
