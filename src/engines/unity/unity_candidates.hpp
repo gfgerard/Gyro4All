@@ -189,10 +189,25 @@ struct ProbeResult {
     int yaw_parent = 0;      // > 0: yaw on that ancestor's Transform (the body), levels above the camera; no yaw float
     bool automatic = false;  // found with no player input: to be confirmed by the first real stick or mouse turn
     bool pitch_transform = false;  // the game copies the pitch float to the camera only on look input: turn both
+    bool yaw_from_camera = false;  // the yaw float is relative to a body that catches up with it (YawFromCamera=1)
     std::string pitch_object, yaw_object;  // a path to a component or GameObject whose Transform has it, instead of a float
     std::string zoom_reference;            // ZoomReference=: a float path from ObjectType's object to the unzoomed FOV
     FovAxis zoom_axis = FovAxis::Auto;     // the axis it matched the camera's FOV in
 };
+
+// The other components of the value type holding a verified pitch ("modes[Mode].offset.y" -> ".x" and ".z"): the yaw is
+// often its neighbour, even when its own changes don't follow the camera's (a yaw relative to a body that catches up
+// with it, as Firewatch's camera mode offset). Empty when the pitch isn't a component of x/y/z.
+inline std::vector<std::string> sibling_components(const std::string& pitch_path) {
+    const size_t dot = pitch_path.rfind('.');
+    if (dot == std::string::npos || dot + 2 != pitch_path.size()) return {};
+    const char last = pitch_path[dot + 1];
+    if (last != 'x' && last != 'y' && last != 'z') return {};
+    std::vector<std::string> out;
+    for (const char c : {'x', 'y', 'z'})
+        if (c != last) out.push_back(pitch_path.substr(0, dot + 1) + c);
+    return out;
+}
 
 // The [Unity] keys of a verified result.
 inline std::vector<std::pair<std::string, std::string>> profile_keys(const ProbeResult& r) {
@@ -216,6 +231,7 @@ inline std::vector<std::pair<std::string, std::string>> profile_keys(const Probe
     } else {
         keys.emplace_back("YawPath", r.yaw_path);
         keys.emplace_back("YawPerDegree", std::format("{:.7g}", snap_per_degree(r.yaw_per_degree)));
+        if (r.yaw_from_camera) keys.emplace_back("YawFromCamera", "1");
     }
     if (!r.pitch_class.empty() && !r.zoom_reference.empty()) {
         keys.emplace_back("ZoomReference", r.zoom_reference);

@@ -24,7 +24,8 @@ struct FieldValue {
 
 // A field holding an object, whatever its declared type says about it.
 bool holds_object(Runtime& runtime, int type, void* value_class);
-// The objects in an array, a List<> or a Dictionary<,>'s values, at most max. Empty for anything else, or a value type's.
+// The objects in an array, a List<>, a LinkedList<> (first to last) or a Dictionary<,>'s values, at most max. Empty for
+// anything else, or a value type's.
 bool is_container(Runtime& runtime, void* klass);
 std::vector<void*> container_objects(Runtime& runtime, void* container, size_t max);
 
@@ -35,7 +36,7 @@ public:
     bool empty() const { return parts_.empty(); }
     // The last part must be a field or getter. A "name()" part calls a method with no arguments, like a getter. A "method(@)" part calls a one-argument method on the object reached so far with
     // the root as its argument (methods and fields are found on base classes too). A "name[Class]" part is a field holding
-    // an array, List<> or Dictionary<,>, and goes on with the first object of that class in it (its values, for a
+    // an array, List<>, LinkedList<> or Dictionary<,>, and goes on with the first object of that class in it (its values, for a
     // dictionary). Quietly false while a step's object is null; a wrong name is logged once.
     // A name with no field of its own is read through its property's getter (get_<name>, no arguments) when the class has
     // one (gameObject, activeInHierarchy, InputAction.enabled): it goes on with what the getter returns, and at the end

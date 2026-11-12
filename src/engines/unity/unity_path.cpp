@@ -16,13 +16,14 @@ bool holds_object(Runtime& runtime, int type, void* value_class) {
 
 namespace {
 
-enum class Container { None, Array, List, Dictionary };
+enum class Container { None, Array, List, Dictionary, LinkedList };
 
 Container container_kind(Runtime& runtime, void* klass) {
     if (!klass) return Container::None;
     const std::string_view name = runtime.class_name(klass), space = runtime.class_namespace(klass);
     if (name.ends_with("[]")) return Container::Array;
     if (space != "System.Collections.Generic") return Container::None;
+    if (name == "LinkedList`1") return Container::LinkedList;
     return name == "List`1" ? Container::List : name == "Dictionary`2" ? Container::Dictionary : Container::None;
 }
 
@@ -42,6 +43,27 @@ std::vector<void*> container_objects(Runtime& runtime, void* container, size_t m
     void* klass = runtime.object_class(container);
     const Container kind = container_kind(runtime, klass);
     if (kind == Container::None) return out;
+    if (kind == Container::LinkedList) {
+        // A ring of nodes from the first (Firewatch's camera mode stack, newest first). Old Mono names its fields first,
+        // forward and count; the .NET class library head, next and count. Both rings close on the first node.
+        void* first = either_field(runtime, klass, "head", "first");
+        void* size = either_field(runtime, klass, "count", "_count");
+        int stored = 0;
+        if (!first || !size || !mem::rd(reinterpret_cast<uintptr_t>(container) + runtime.field_offset(size), stored) || stored <= 0) return out;
+        const uintptr_t head = mem::rdp(reinterpret_cast<uintptr_t>(container) + runtime.field_offset(first));
+        void* node_class = head ? runtime.object_class(reinterpret_cast<void*>(head)) : nullptr;
+        void* item = node_class ? runtime.find_field(node_class, "item") : nullptr;
+        void* next = node_class ? either_field(runtime, node_class, "next", "forward") : nullptr;
+        if (!item || !next || !holds_object(runtime, runtime.field_type(item), runtime.field_class(item))) return out;
+        uintptr_t node = head;
+        for (int i = 0; i < stored && node && out.size() < max; ++i) {
+            const uintptr_t object = mem::rdp(node + runtime.field_offset(item));
+            if (object) out.push_back(reinterpret_cast<void*>(object));
+            node = mem::rdp(node + runtime.field_offset(next));
+            if (node == head) break;
+        }
+        return out;
+    }
     void* array = container;
     size_t count = 0;
     if (kind == Container::List) {

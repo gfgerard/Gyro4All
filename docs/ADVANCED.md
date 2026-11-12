@@ -477,12 +477,13 @@ YawPath=_state.yaw
 | `ZoomReference` | Optional unzoomed FOV for zoom compensation: a path to the game's own float (`cameraFovController._baseVerticalFOV`) or a number. Default: `ZoomReferenceFOV=` (horizontal) from `[Gyro4All]`. |
 | `ZoomReferenceAxis` | `Vertical` or `Horizontal`: which axis `ZoomReference` is in (`Camera.fieldOfView` is always vertical; a game may keep its own FOV horizontal whatever the field's name, as MOUSE's `_baseVerticalFOV` does: 105 horizontal, 72.5 vertical at 16:9). Empty: told from the camera while you play unzoomed (about 30 frames where the camera's FOV equals it in one axis; no zoom compensation until then). The log says `unity: ZoomReference 105.0 is horizontal ...`, or `... check the profile` when this key contradicts what the camera shows. |
 | `PitchTransform` | `1`: the gyro turns the camera's own Transform along with `PitchPath`. For games that copy their pitch float to the camera only when you look around yourself (The Planet Crafter): without it the gyro's pitch shows only after the next stick or mouse turn, and with `PitchPath` missing the next stick turn puts the camera back where the stick left it. |
+| `YawFromCamera` | `1`: `YawPath` is the view's yaw relative to a body the game turns toward it by itself, so the value shrinks back while the body catches up (Firewatch's camera mode offset). The camera's own world yaw then tells whether the game keeps the gyro's turns, so the shrinking value doesn't count as an undone write. |
 | `Source` | `auto`: found with no player input. The first real stick or mouse turn confirms it, or takes it out of the profile and looks again. |
 | `Rejected` | What the player's turns showed isn't the look state (`Class path;parent N`), not to be found again. |
 
 A path walks instance fields, through objects and value types, and base classes' fields count. A `method(@)` part calls a
 one-argument method on the object reached so far, passing the starting object. A `name[Class]` part goes through an array,
-`List<>` or `Dictionary<,>` field to the first object of that class in it (`modes[LookState].pitch`). The value's type is checked: a path
+`List<>`, `LinkedList<>` or `Dictionary<,>` field to the first object of that class in it (`modes[LookState].pitch`). The value's type is checked: a path
 ending at anything else is refused and logged. A name with no field of that name is read through its property's getter
 (`gameObject`, `activeInHierarchy`, an `InputAction`'s `enabled`); fields always come first. The section is read again
 whenever the file changes.
@@ -507,6 +508,9 @@ hands off the controller (it refreshes every second; `Notices=0` turns it off):
   copies it to the camera only when you look around (The Planet Crafter) no longer undoes the gyro's pitch on your next
   stick turn. It needs a few turns up and down over at least 10 degrees, and stops for that camera once found or once no
   float can match.
+- A pitch found but no yaw float, and the pitch is one component of a vector (`offset.y`): its other components get the
+  live test as the yaw first, judged by the camera alone. A value the game takes back while the camera keeps the turn (a
+  yaw relative to a body that catches up with it, as in Firewatch) passes, and goes into the profile with `YawFromCamera=1`.
 - Still no axis: the camera's own ancestors up to its body (highest first, for the yaw: `YawParent=`), then the Transforms
   the game's scripts hold in their fields (a camera rig, a head, a character controller; UI elements left out), likeliest
   names first, get the same live test, turned the way a profile would (`PitchObject=`, `YawObject=`). A body the engine

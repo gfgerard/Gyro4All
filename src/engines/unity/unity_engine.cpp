@@ -707,6 +707,10 @@ public:
         if (g_profile.enabled()) {
             if (look_off_ || !read_pitch(pitch)) return false;
             if (yaw_body_) yaw = state_yaw_;
+            else if (g_profile.yaw_from_camera) {
+                if (!camera_) return false;
+                yaw = unity::view_angles(rotation_).yaw;
+            }
             else if (!read_axis(axes_.yaw, g_profile.yaw_per_degree, yaw)) return false;
             camera = reinterpret_cast<uintptr_t>(root_);
             return true;
@@ -937,7 +941,9 @@ private:
         have_state_ = true;
         if (!have || !gameplay_ || !look_now() || std::abs(turn_yaw) > 0.05 || std::abs(turn_pitch) > 0.05) return;
         const bool has_pitch = g_profile.enabled();
-        const auto yaw = auto_yaw_.add(camera_yaw, state_yaw);
+        // YawFromCamera=1: the yaw float is relative to a body that catches up with it, so its change never equals the
+        // camera's; the live test that found it was its check.
+        const auto yaw = g_profile.yaw_from_camera ? LookStateCheck::Verdict::None : auto_yaw_.add(camera_yaw, state_yaw);
         const auto pitch = has_pitch ? auto_pitch_.add(camera_pitch, state_pitch) : LookStateCheck::Verdict::None;
         if (yaw == LookStateCheck::Verdict::Follows) log("unity: the stick or mouse turns the yaw that was found: confirmed");
         if (pitch == LookStateCheck::Verdict::Follows) log("unity: the stick or mouse turns the pitch that was found: confirmed");
@@ -956,7 +962,8 @@ private:
         log("unity: the camera turned with the stick or mouse but %s didn't: it isn't the look state, looking again", what.c_str());
         const std::wstring& path = settings::profile_path();
         for (const wchar_t* key : {L"ObjectType", L"YawObjectType", L"CameraField", L"PitchPath", L"YawPath", L"PitchPerDegree",
-                                   L"YawPerDegree", L"YawParent", L"PitchTransform", L"PitchObject", L"YawObject", L"Source"})
+                                   L"YawPerDegree", L"YawParent", L"PitchTransform", L"PitchObject", L"YawObject", L"YawFromCamera",
+                                   L"Source"})
             WritePrivateProfileStringW(L"Unity", key, nullptr, path.c_str());
         std::string list = settings::profile_string(L"Unity", L"Rejected");
         list += (list.empty() ? "" : ";") + what;

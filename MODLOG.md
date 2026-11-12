@@ -5,6 +5,46 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-12 **Firewatch (Steam, Unity Mono, `Firewatch.exe`): the probe found no pitch; the look state is a camera mode in
+  a `LinkedList`, now reachable by Unity paths; hand-made profile** (1.11.0 build, unit tests pass; **works in game, smooth,
+  user's run with a DualSense**; connection and Steam Input state not recorded).
+  - **Probe runs (auto and 2 by hand):** yaw verified on `Player Prefab` / `vgPlayerFirefinderController.playerFSM`
+    (`PlayerModel`), but every pitch candidate failed: `PlayerCamera`, `vgCameraController.eyeTransform` (`Camera001` in the
+    head bone) and the 1:1 correlated floats `vgCameraController.bodyLocalDelta.y`, `bodyLocalOffset.y`,
+    `bodyOffsetToApplyToModel.y`, `lastFrameRotation.y` (all recomputed every frame), `AkAudioListener m_Front.y`. Stick
+    fallback: "the stick turns nothing": input is Rewired (`Rewired_Core.dll`), which reads the DualSense over HID itself.
+  - **The game's look (decompiled locally, Assembly-CSharp):** `vgCameraController.cameraModeStack` is a
+    `LinkedList<vgCameraModeInstance>` (newest first, `PushCameraMode` does `AddFirst`). `UpdateCameraStack` (Update) calls
+    `vgCameraModeInstance.UpdateMode`, which adds the input delta (`vgCameraTargetSource.UpdateFromInput`,
+    `tsMouseInput`, from `vgInputHandler.cameraHorizontalInput/cameraVerticalInput`) to its persistent `localOffset`
+    (Vector3, x = yaw, y = pitch, degrees, pitch up: `CalculateCameraRotation` uses `AngleAxis(pitch, Vector3.left)`), sums
+    the modes' offsets into `bodyLocalOffset` and sets `PlayerCamera`'s rotation from the player model's. With `rotateModel`,
+    `FaceModelToCamera` turns `playerGameObject` toward the camera (`modelRotationSpeed` 100 deg/s) and subtracts that
+    (`appliedBodyYaw`) from `localOffset.x`: the yaw float is relative to the body and shrinks back by itself. FOV:
+    `baseFOV` + `fovAdjust` (the FOV option, prefs `fovAdjust` / 100); zooms set `goalFOV` (`zoomFOV`, `itemZoomFOV`,
+    `mapZoomFOV`, `compassZoomFOV`). Old Mono `LinkedList`1` fields: `first`, `count`; node `item`, `forward` (a ring).
+  - **Changes:** `container_objects` (`unity_path.cpp`) walks `LinkedList<>` (`head`/`first`, `next`/`forward`, `count`), for
+    profile paths (`name[Class]`) and the probe's deep scan alike. New `[Unity]` key `YawFromCamera=1`: the stick fallback's
+    verdict reads the camera's world yaw instead of a yaw float the game turns back toward the body. `profiles/Firewatch.ini`:
+    `ObjectType=vgCameraController`, `PitchPath`/`YawPath=cameraModeStack[vgCameraModeInstance].localOffset.y/.x`, both
+    `PerDegree=1`, `YawFromCamera=1`, `ZoomReference=baseFOV` (vertical; off by `fovAdjust` when the FOV option isn't 0).
+  - **First run with the profile:** the gyro turned both axes, but the stick fallback switched on and off 22 times in a minute
+    ("the game undid the gyro's camera writes"): the camera moved a little, froze, moved again. With `YawFromCamera=1`:
+    smooth (user).
+  - **Probe, measured (profile set aside):** with only the LinkedList support, the probe verified the pitch
+    `cameraModeStack[vgCameraModeInstance].localOffset.y` (asked -3.0, moved -3.0, kept) but not `localOffset.x`: no
+    candidate (its per-sample change is the input minus the body's catch-up, far from r 0.9), so the yaw went to
+    `YawObject=playerFSM` (`PlayerModel`'s Transform), which played with one stick fallback and the body's up switching
+    between its own and its parent's.
+  - **Probe change:** a verified pitch that is one component of a vector (`offset.y`, `sibling_components`) has its other
+    components live-tested as the yaw first, before bodies and Transforms, judged by the camera alone (either sign; the
+    value may be taken back; undone by subtracting the test's turn). Passing writes `YawFromCamera=1`. `Source=auto`'s
+    confirmation leaves such a yaw out (its change never equals the camera's); a rejection also clears `YawFromCamera`.
+    Caveat: an input accumulator the game consumes passes the same way (it works for the gyro too). Measured: the probe
+    found `localOffset.x` this way ("asked 3.0, the camera moved 3.0, value rewritten by the game: turned") and wrote the
+    same view as the hand-made profile; no stick fallback in the play that followed.
+  - **Not tested yet:** modes the game pushes itself (examining items, map, compass, zoom, look-at and animated camera modes):
+    the path takes the first (newest) instance of the stack, whatever its source.
 - 2026-11-12 **Outer Wilds (Steam, Unity Mono, `OuterWilds.exe`): the probe looped and never got past turn 1 of 3; hand-made
   profile from the game's code** (built, 1207 checks pass; **not run in game yet**).
   - **User's run (1.11.0, DualSense, Steam Input not on the pad):** the search with no input nudged 600 floats for 15 s and

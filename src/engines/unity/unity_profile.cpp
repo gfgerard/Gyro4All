@@ -102,6 +102,8 @@ UnityProfile load_unity_profile(const std::wstring& path) {
     if (parent >= 1 && parent <= 16) profile.yaw_parent = parent;
     const std::string pitch_transform = setting(path, L"PitchTransform");
     profile.pitch_transform = pitch_transform == "1" || pitch_transform == "true";
+    const std::string yaw_from_camera = setting(path, L"YawFromCamera");
+    profile.yaw_from_camera = yaw_from_camera == "1" || yaw_from_camera == "true";
     profile.auto_found = setting(path, L"Source") == "auto";
     const std::string probe = setting(path, L"Probe");
     profile.probe = probe == "1" || probe == "true";

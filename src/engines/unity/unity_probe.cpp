@@ -252,6 +252,9 @@ struct Test {
     double last_yaw = 0, last_pitch = 0;
     float base_value = 0, written = 0;
     bool passed = false;
+    // The verified pitch's neighbours tested as the yaw, judged by the camera alone (the game may take the value back
+    // while the camera keeps the turn: a yaw relative to a body that catches up with it). Found that way: YawFromCamera=1.
+    bool relative = false, siblings_tried = false, yaw_relative = false;
     ULONGLONG at = 0, ok_since = 0, still_since = 0;
 };
 
@@ -1173,6 +1176,28 @@ void give_up(Runtime& rt, const char* what) {
 bool start_body(Runtime& rt, ULONGLONG now, bool need_pitch);
 bool start_xforms(Runtime& rt, ULONGLONG now, bool need_yaw, bool need_pitch, int yaw_slot, int pitch_slot, int yaw_parent);
 
+// Pitch verified, no yaw float: the pitch value's other components get a relative live test, before any body or Transform.
+bool start_sibling_yaw() {
+    Test& t = g.test;
+    if (t.siblings_tried || t.found_pitch < 0 || t.found_yaw >= 0) return false;
+    t.siblings_tried = true;
+    const Slot& pitch = g.slots[size_t(t.found_pitch)];
+    std::vector<uint32_t> list;
+    for (const std::string& path : sibling_components(g.paths[pitch.path]))
+        for (size_t i = 0; i < g.slots.size(); ++i)
+            if (g.slots[i].owner == pitch.owner && g.paths[g.slots[i].path] == path) list.push_back(uint32_t(i));
+    if (list.empty()) return false;
+    probe_log("probe: testing the pitch's %zu neighbour(s) as the yaw, judged by the camera alone", list.size());
+    t.yaw = std::move(list);
+    t.pitch_axis = false;
+    t.relative = true;
+    t.index = 0;
+    t.stage = Test::Settle;
+    t.still_since = GetTickCount64();
+    g.phase = State::Testing;
+    return true;
+}
+
 void finish(Runtime& rt) {
     const Test& t = g.test;
     const ULONGLONG tick = GetTickCount64();
@@ -1184,6 +1209,7 @@ void finish(Runtime& rt) {
         return;
     }
     if (t.found_yaw < 0) {
+        if (start_sibling_yaw()) return;
         if (start_body(rt, tick, t.found_pitch < 0)) return;
         if (start_xforms(rt, tick, true, t.found_pitch < 0, -1, t.found_pitch, 0)) return;
         return give_up(rt, t.found_pitch >= 0 ? "pitch was found, but nothing turns the yaw" : "nothing turned the camera");
@@ -1201,6 +1227,7 @@ void finish(Runtime& rt) {
     result.yaw_path = g.paths[yaw.path];
     result.pitch_per_degree = slot_per_degree(uint32_t(t.found_pitch), true);
     result.yaw_per_degree = slot_per_degree(uint32_t(t.found_yaw), false);
+    result.yaw_from_camera = t.yaw_relative;
     result.camera_field = camera_field(rt, g.owners[pitch.owner].object, g.camera);
     result.automatic = g.quiet;
     write_result(rt, std::move(result));
@@ -1217,10 +1244,24 @@ void restore_value(const Slot& slot) {
         mem::guarded_store(slot.address, &g.test.base_value, sizeof(float));
 }
 
+// A relative candidate is put back by taking the test's turn out of what the game left, not by restoring the original.
+void restore_relative(const Slot& slot) {
+    float value = 0;
+    if (!mem::rd(slot.address, value) || !std::isfinite(value)) return;
+    const float back = float(double(value) - (double(g.test.written) - g.test.base_value));
+    mem::guarded_store(slot.address, &back, sizeof(float));
+}
+
+void finish(Runtime& rt);
+
 void next_candidate(Runtime& rt) {
     Test& t = g.test;
     ++t.index;
     t.stage = Test::Settle;
+    if (t.relative && t.index >= t.yaw.size()) {
+        t.relative = false;
+        return finish(rt);
+    }
     if (t.index >= (t.pitch_axis ? t.pitch.size() : t.yaw.size())) {
         if (t.pitch_axis) return finish(rt);
         t.pitch_axis = true;
@@ -1254,6 +1295,8 @@ void test_step(Runtime& rt, ULONGLONG now) {
         t.base_yaw = angles.yaw, t.base_pitch = angles.pitch;
         t.asked = t.pitch_axis && angles.pitch > 0 ? -kTestTurn : kTestTurn;  // toward the horizon: away from the limits
         t.per_degree = slot_per_degree(index, t.pitch_axis);
+        // A neighbour of the pitch has no measure of its own: the pitch's units, counting right.
+        if (t.relative) t.per_degree = std::abs(slot_per_degree(uint32_t(t.found_pitch), true));
         t.base_value = value;
         t.written = float(double(value) + t.per_degree * t.asked);
         mem::guarded_store(slot.address, &t.written, sizeof(float));
@@ -1263,7 +1306,7 @@ void test_step(Runtime& rt, ULONGLONG now) {
     }
     case Test::Measure: {
         if (touched) {
-            restore_value(slot);
+            t.relative ? restore_relative(slot) : restore_value(slot);
             t.stage = Test::Settle;
             t.still_since = now;
             return;
@@ -1271,7 +1314,9 @@ void test_step(Runtime& rt, ULONGLONG now) {
         float value = 0;
         // The game keeps the value (an input accumulator it resets would turn the camera once and be gone).
         const bool kept = mem::rd(slot.address, value) && std::abs(double(value) - t.written) <= std::abs(t.per_degree);
-        if (kept && turn_followed(t.asked, moved, other)) {
+        // Relative: the camera's turn is the check, either way round (the scale's sign is measured below).
+        const bool followed = turn_followed(t.asked, moved, other) || (t.relative && turn_followed(-t.asked, moved, other));
+        if ((kept || t.relative) && followed) {
             if (!t.ok_since) t.ok_since = now;
             if (now - t.ok_since >= 200) t.passed = true;
         } else {
@@ -1282,10 +1327,11 @@ void test_step(Runtime& rt, ULONGLONG now) {
         if (t.passed && std::abs(moved) > 0.5)
             (t.pitch_axis ? g.slots[index].tested_pitch : g.slots[index].tested_yaw) = (double(t.written) - t.base_value) / moved;
         if (t.passed || now - t.at >= 1000) {
-            probe_log("probe: test %s %s %s: asked %.1f, the camera moved %.1f (other axis %.1f), value %s: %s",
-                      t.pitch_axis ? "pitch" : "yaw", g.owners[slot.owner].klass.c_str(), g.paths[slot.path].c_str(), t.asked, moved,
-                      other, kept ? "kept" : "rewritten by the game", t.passed ? "turned" : "failed");
-            restore_value(slot);
+            probe_log("probe: test %s%s %s %s: asked %.1f, the camera moved %.1f (other axis %.1f), value %s: %s",
+                      t.pitch_axis ? "pitch" : "yaw", t.relative ? " (the pitch's neighbour, judged by the camera)" : "",
+                      g.owners[slot.owner].klass.c_str(), g.paths[slot.path].c_str(), t.asked, moved, other,
+                      kept ? "kept" : "rewritten by the game", t.passed ? "turned" : "failed");
+            t.relative ? restore_relative(slot) : restore_value(slot);
             t.stage = Test::Back;
             t.at = now;
         }
@@ -1298,6 +1344,11 @@ void test_step(Runtime& rt, ULONGLONG now) {
             probe_log("probe: verified %s: %s %s", t.pitch_axis ? "pitch" : "yaw", g.owners[slot.owner].klass.c_str(),
                       g.paths[slot.path].c_str());
             (t.pitch_axis ? t.found_pitch : t.found_yaw) = int(index);
+            if (t.relative) {
+                t.relative = false;
+                t.yaw_relative = true;
+                return finish(rt);
+            }
             if (t.pitch_axis) return finish(rt);
             t.pitch_axis = true;
             t.index = 0;

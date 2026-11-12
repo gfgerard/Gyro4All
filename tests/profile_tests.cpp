@@ -1571,7 +1571,13 @@ void test_unity_profile() {
     CHECK(separate.pitch_path.size() == 1 && separate.yaw_path.size() == 2 && separate.yaw_path[1] == "yaw");
     CHECK(std::abs(separate.pitch_per_degree - 0.0174533) < 1e-9 && separate.yaw_per_degree == -1);
     CHECK(!(separate == profile) && load_unity_profile(floats) == separate);
-    CHECK(!separate.pitch_transform);
+    CHECK(!separate.pitch_transform && !separate.yaw_from_camera);
+    // A yaw relative to a body the game turns itself, through a LinkedList (Firewatch's camera mode stack).
+    write_file(floats, "[Unity]\r\nObjectType=vgCameraController\r\nPitchPath=cameraModeStack[vgCameraModeInstance].localOffset.y\r\n"
+                       "PitchPerDegree=1\r\nYawPath=cameraModeStack[vgCameraModeInstance].localOffset.x\r\nYawFromCamera=1\r\n");
+    const auto relative = load_unity_profile(floats);
+    CHECK(relative.enabled() && relative.yaw_from_camera && relative.yaw_path.size() == 3 &&
+          relative.yaw_path[0] == "cameraModeStack[vgCameraModeInstance]");
     // The body's yaw with a pitch float the game copies to the camera only on look input (The Planet Crafter).
     write_file(floats, "[Unity]\r\nObjectType=SpaceCraft.PlayerLookable\r\nPitchPath=_pitch\r\nYawParent=1\r\n"
                        "PitchTransform=1\r\nPitchLimit=80\r\n");
@@ -1761,6 +1767,20 @@ void test_unity_discovery() {
     body.pitch_transform = true;
     keys = profile_keys(body);
     CHECK(std::any_of(keys.begin(), keys.end(), [](const auto& k) { return k.first == "PitchTransform" && k.second == "1"; }));
+    // The pitch's neighbours (Firewatch's camera mode offset), and a yaw found relative to the body.
+    const auto siblings = sibling_components("cameraModeStack[vgCameraModeInstance].localOffset.y");
+    CHECK(siblings.size() == 2 && siblings[0] == "cameraModeStack[vgCameraModeInstance].localOffset.x" &&
+          siblings[1] == "cameraModeStack[vgCameraModeInstance].localOffset.z");
+    CHECK(sibling_components("_pitch").empty() && sibling_components("look.w").empty() && sibling_components("a.yy").empty());
+    ProbeResult relative_yaw;
+    relative_yaw.pitch_class = relative_yaw.yaw_class = "vgCameraController";
+    relative_yaw.pitch_path = "offset.y", relative_yaw.yaw_path = "offset.x";
+    relative_yaw.pitch_per_degree = relative_yaw.yaw_per_degree = 1;
+    keys = profile_keys(relative_yaw);
+    CHECK(std::none_of(keys.begin(), keys.end(), [](const auto& k) { return k.first == "YawFromCamera"; }));
+    relative_yaw.yaw_from_camera = true;
+    keys = profile_keys(relative_yaw);
+    CHECK(std::any_of(keys.begin(), keys.end(), [](const auto& k) { return k.first == "YawFromCamera" && k.second == "1"; }));
     // A search waits for a camera nobody is turning.
     ViewStillness pan;  // the title shot of Risk of Rain 2: under a degree a second
     bool settled = false;

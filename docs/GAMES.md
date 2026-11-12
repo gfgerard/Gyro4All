@@ -57,10 +57,12 @@
 | Mortal Shell | ✅ Works | Unreal Engine 4.25.0 | `F10` panel works (DX11). The game's own PlayStation support only knows the DualShock 4: its profile makes Gyro4All show your DualSense (USB or Bluetooth) to it as one, with PlayStation icons, rumble and light bar. |
 | Onimusha: Way of the Sword | ✅ Works (tested on the demo) | RE Engine | Install next to the game's exe in its main folder. The gyro turns off during lock-on. Needs REFramework installed.|
 | Out of sight | ✅ Works | Unreal Engine 5.5.4 | |
+| Firewatch | ✅ Works | Unity (Mono) | Install next to `Firewatch.exe` in the game's main folder. |
 | The Outer Worlds: Spacer's Choice Edition | ✅ Works | Unreal Engine 4.27.2 | Native DualSense support: Gyro4All leaves the controller to the game. |
 | Pacific Drive | ✅ Works | Unreal Engine 4.27 | Gyro on foot **and** in the car. |
 | PAYDAY 3 | ✅ Works | Unreal Engine 5.5.4 | ✅⚠️ **Always-online co-op game: use at your own risk**, in private or solo lobbies only. Its profile lets the gyro follow the camera during actions that take it over. |
 | The Planet Crafter | ✅ Works (tested on the demo) | Unity (Mono) | Install next to `Planet Crafter.exe` in the game's main folder. |
+| PowerWash Simulator | ✅ Works | Unity (IL2CPP) | Install next to `PowerWashSimulator.exe` in the game's main folder. |
 | Pragmata | ✅ Works, **with [REFramework](https://github.com/praydog/REFramework)** | RE Engine | Install next to `PRAGMATA.exe` in the game's main folder, **together with a recent REFramework**: the game has Capcom's anti-tamper, which crashes the game about 30 s after start without it (an older REFramework build crashed it too). **Turn off the game's own gyro option** (it works while aiming with L2): Gyro4All's gyro also works while aiming, and the two would add up. |
 | RAGE (2011) | ✅ Works (tested on the Steam version) | id Tech 5 | Install next to `Rage64.exe` in the game's main folder. 64-bit only (`Rage.exe` not supported). Gyro off in vehicles. |
 | Red Dead Redemption 2 | ✅ Works (tested on the Rockstar launcher version) | RAGE | Install next to `RDR2.exe` in the game's main folder. Story mode only: never play Red Dead Online with it. Binoculars turn through the right stick (less precise). |

@@ -45,6 +45,10 @@ struct UnityProfile {
     // PitchTransform=1: the game copies PitchPath to the camera's Transform only when it turns the view itself (The Planet
     // Crafter's PlayerLookable, on look input only): the gyro turns both, or the next stick turn would undo its pitch.
     bool pitch_transform = false;
+    // YawFromCamera=1: YawPath is the view's yaw relative to a body the game turns toward it by itself (Firewatch's camera
+    // mode offset, which shrinks as the player model catches up): the view's yaw, for judging whether the game keeps the
+    // gyro's writes, is the camera's world yaw, not the value.
+    bool yaw_from_camera = false;
     bool auto_found = false;  // Source=auto: found with no player input, confirmed or rejected by the first real turn
     bool probe = false;      // Probe=1 in [Unity]: run the camera probe (like Probe=1 in [Gyro4All])
 
