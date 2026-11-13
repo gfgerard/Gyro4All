@@ -70,7 +70,8 @@ play.
   camera and the zoom-compensation FOV, edited live and saved to `Gyro4All.ini` (what needs a restart or a
   save says so). The same window appears in the panel of non-DX12 games (drawn by `gyro4all.dll`). Gyro4All declares `GL_HOST_MENU_STATE` to GyroLib, plus native right-stick
   suppression while it translates the controller to XInput or while the game reads a PlayStation controller itself
-  through a checked HID or Raw Input report layout (`NativeFlickStick`), and long-press blocking (`GL_HOST_LONG_PRESS_BLOCKING`)
+  through a known HID or Raw Input report layout (`NativeFlickStick`, applied on save; the right stick is checked against SDL
+  whenever it moves, and a mismatch withdraws it), and long-press blocking (`GL_HOST_LONG_PRESS_BLOCKING`)
   wherever it can change the buttons the game reads (the controller shown as XInput, a real XInput controller, or
   the game's own PlayStation controller reports once their buttons were checked); no touchpad suppression (see
   [Current scope](../README.md#current-scope)). The recenter step callback (`gl_set_recenter_step_callback`) is
@@ -199,7 +200,9 @@ All diagnostics go to `Gyro4All\Gyro4All.log` (probe results, if enabled, to `Gy
 | `xinput: ... shown as XInput controller N` | The controller is translated to an Xbox controller in slot N. |
 | `xinput: ... not shown: <reason>` | Why it isn't: an Xbox/Steam Input/remapper controller is connected, or the game reads pads itself (Sony's pad library, its own SDL, Raw Input for gamepads, the controller's HID device, a DirectInput game controller it reads). `XInput=2` overrides the last group. |
 | `nativepad: the game reads 054C:0CE6 (...): N bytes, first byte 0x31, report 0x31 (DualSense, Bluetooth)` | The game reads the controller itself (Sony's pad library). `unknown layout, left alone` means a report Gyro4All doesn't know: no native flick stick for it. |
-| `nativepad: ... matches SDL` / `native right-stick suppression available` | The right stick in the game's reports agreed with SDL while you moved it: GyroLib's flick options are offered. `doesn't match SDL` or `CRC isn't the expected one`: Gyro4All leaves the reports alone (report it with the log). |
+| `nativepad: native right-stick suppression available` | The game reads the selected controller through a known report layout: GyroLib's flick options are offered at once (`the stick is checked against SDL when it moves` until the check below passes). |
+| `nativepad: ... matches SDL` / `doesn't match SDL` | The right stick in the game's reports agreed with SDL while you moved it (the check passed). `doesn't match SDL` or `CRC isn't the expected one`: Gyro4All leaves the reports alone and the flick options disappear (report it with the log). |
+| `settings: NativeFlickStick=N (applied without a restart)` | The setting changed in a saved `Gyro4All.ini` or profile; turning it off hides the flick options again. |
 | `dualsense: the game's own PlayStation support closed the DualSense unread ...` | The game's Sony library only knows the DualShock 4. `DualSenseAsDualShock4=1` (and `DualSenseAsDualShock4Learned=1`, which says Gyro4All wrote it) was written to its profile (`Gyro4All\profiles\<exe>.ini`, created if needed); the DualSense is an Xbox controller until the game restarts. Not done when the profile already has a `DualSenseAsDualShock4` value. |
 | `dualsense: the game rejected the DualSense shown as a DualShock 4 too ...` | The DualShock 4 identity Gyro4All had learned didn't work either (the game opened the controller and closed it unread): the game doesn't use PlayStation controllers this way (Resident Evil 7 only takes a real DualShock 4 it finds through DirectInput). The DualSense is an Xbox controller from then on, and `DualSenseAsDualShock4=0` is written to the profile so it isn't learned again. |
 | `nativepad: DualSense 054C:0CE6 (version ...) shown to the game as a DualShock 4` | `DualSenseAsDualShock4=1` in the game's profile: the game asked who the controller is and got a DualShock 4. Then `feature report 0x.. asked by the game: answered with ...` lists what it checked, and `output report 0x05 -> DualSense report 0x02/0x31` its rumble and light bar. `opened ... Bluetooth, shown to it as a USB DualShock 4` and `Bluetooth, ... reads, converted` for a Bluetooth DualSense. If the game opens the controller and closes it for good right after the identity line, it rejected the emulation: when Gyro4All had learned it, it takes it back by itself (`dualsense: the game rejected ...`); when you or a shipped profile set it, report it with the log. |
@@ -291,9 +294,11 @@ DualSense --HID--> SDL3 (inside gyrolib.dll)
   reading (`CloseHandle` ends that) and, when a read completes, notes the right stick in every report it returned
   (one read can hold several, of the device's `InputReportByteLength`): report `0x01` (USB, bytes
   3-4), `0x31` (DualSense Bluetooth, bytes 4-5) or `0x11` (DualShock 4 Bluetooth, bytes 5-6); Bluetooth reports
-  must carry the expected CRC32 (0xA1 + report). Once that stick agrees with SDL's while it is held away from the
-  centre, Gyro4All declares native stick suppression to GyroLib; while GyroLib then asks for it, the stick bytes in the
-  game's copy are set to 128 (and the CRC recomputed). The controller and GyroLib's own SDL reading are untouched.
+  must carry the expected CRC32 (0xA1 + report). As soon as the game reads the selected controller through one of these
+  layouts, Gyro4All declares native stick suppression to GyroLib (so its flick stick settings show without touching the
+  stick); while GyroLib then asks for it, the stick bytes in the game's copy are set to 128 (and the CRC recomputed).
+  Whenever the stick is held away from the centre, the game's raw stick bytes are still compared with SDL's: a clear
+  mismatch withdraws the suppression for that controller. `NativeFlickStick` applies when the INI is saved. The controller and GyroLib's own SDL reading are untouched.
 - DualSense as a DualShock 4 (`nativepad.cpp`), for games whose Sony library predates the DualSense. Detection: the
   game's Sony library opens every controller it finds; one it supports stays open and is read at once, one it doesn't
   is closed unread. A DualSense opened, closed unread and not open 5 s later (with a Sony library among the game's

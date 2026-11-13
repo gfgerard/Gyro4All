@@ -494,7 +494,7 @@ void widgets(float s) {
     checkbox("Flick stick with the game's own PlayStation support", "NativeFlickStick");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("NativeFlickStick: flick stick (F10 panel) also in games with their own DualSense/DualShock\n"
-                          "support, keeping PlayStation prompts. Restart the game to apply.");
+                          "support, keeping PlayStation prompts. Applies on save.");
 
     section("Stick camera", s);
     checkbox("Stick camera (right stick turns the camera itself)", "StickCamera");

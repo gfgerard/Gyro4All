@@ -26,6 +26,10 @@ namespace gyro4all::nativepad {
 // it (DualSenseAsDualShock4Learned=1 next to it), so it may take it back (learned_ds4_rejected).
 void install(bool suppression, bool dualsense_as_ds4, bool learned);
 
+// Game thread: NativeFlickStick (or StickCamera) turned on or off in a saved Gyro4All.ini or profile, no restart needed:
+// the read hooks are always installed and Sony controllers always followed; this only arms the right-stick check.
+void set_suppression(bool suppression);
+
 // The game opened a DualSense, closed it again unread and has none open 5 s later (30 s when hid.dll among the imports
 // is the only sign of Sony's library): its own PlayStation support doesn't take the DualSense (only the DualShock 4).
 // False with dualsense_as_ds4 or once the game read a DualSense.
@@ -59,8 +63,11 @@ uint16_t hid_path_id(const wchar_t* path, const wchar_t* key);
 bool opened_vendor(uint16_t vendor);
 
 // Game thread, once per frame: pad = GyroLib's selected controller (null if none), suppress = GyroLib's
-// suppress_native_right_stick for it. Returns true while the game reads that controller itself through a checked
-// report layout, i.e. native right-stick suppression works (declare GL_HOST_NATIVE_STICK_SUPPRESSION then).
+// suppress_native_right_stick for it. Returns true while suppression is armed and the game reads that controller
+// itself through a known report layout (CRC checked), i.e. native right-stick suppression works (declare
+// GL_HOST_NATIVE_STICK_SUPPRESSION then). Offered at once, without waiting for stick movement, so GyroLib's flick
+// stick settings show right away; the stick bytes are still compared with SDL whenever the stick moves (raw values,
+// before centring) and a clear mismatch withdraws it for that controller.
 bool frame(SDL_Gamepad* pad, bool suppress);
 
 }  // namespace gyro4all::nativepad

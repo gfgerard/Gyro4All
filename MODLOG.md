@@ -5,6 +5,23 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-13 **NativeFlickStick: no restart, and the flick stick settings show without touching the stick** (builds,
+  1410 checks pass; **verified in game by the user**).
+  - Before: GyroLib's panel shows its flick stick settings only while the host declares `GL_HOST_NATIVE_STICK_SUPPRESSION`,
+    and `nativepad::frame` declared it only after 15 samples of the right stick held past 12000 agreed with SDL. A user
+    who restarted and opened the panel without moving the stick found no flick settings. `NativeFlickStick` itself was
+    read once in `host_configure`.
+  - Now `nativepad::frame` declares it as soon as the game reads the selected controller through a known report layout
+    (`layout_of`: `0x01` USB, `0x31`/`0x11` Bluetooth with a valid CRC) and no mismatch was seen. The stick check keeps
+    running on the raw bytes (`handle_report` returns the stick before centring), so it still verifies (logged) or, on a
+    clear mismatch, withdraws the capability for that controller.
+  - The read hooks were already installed unconditionally and Sony controllers always followed (`hk_create_file`), so
+    `NativeFlickStick` now applies on save: `check_settings_file` re-reads it and calls `nativepad::set_suppression`
+    (`g_suppression` is now atomic). `StickCamera` still needs a restart.
+  - To check in game: a game with its own PlayStation support (`XInput=1`), DualSense USB and BT, Steam Input off; tick
+    the setting in the Gyro4All settings window, then open F10 without moving the stick and look for the flick options;
+    the first flick must not also turn the game's camera.
+
 - 2026-11-13 **1.11.1** (MSVC 14.51, 1410 checks pass; `Gyro4All-v1.11.1.zip`). Since the last 1.11.0 zip: Unity
   `ObjectName=`/`YawObjectName=` for pitch and yaw in two instances of one class (Neon White), and the Unity AutoProbe
   waits for gameplay (`PlayerTurnGate`, 45 s fallback); both below, not yet verified in game. The zip also carries the

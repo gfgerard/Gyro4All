@@ -64,7 +64,7 @@ F original(F& slot, const char* function, const char* fallback_dll) {
 constexpr uint16_t kSony = 0x054C;
 constexpr uint16_t kNintendo = 0x057E;
 
-bool g_suppression = false;            // NativeFlickStick: the read hooks are installed
+std::atomic<bool> g_suppression{false};  // NativeFlickStick or StickCamera: right-stick suppression armed
 bool g_as_ds4 = false;                 // DualSenseAsDualShock4: a DualSense is shown to the game as a USB DualShock 4
 bool g_as_ds4_learned = false;         // ...and Gyro4All wrote it to the profile itself (DualSenseAsDualShock4Learned)
 // Does the game's own PlayStation support take a DualSense? Its Sony library opens every controller it finds; one it
@@ -1314,6 +1314,11 @@ void install(bool suppression, bool dualsense_as_ds4, bool learned) {
         g_as_ds4_learned ? ", learned by Gyro4All in an earlier session" : "");
 }
 
+void set_suppression(bool suppression) {
+    if (g_suppression.exchange(suppression) == suppression) return;
+    log("settings: NativeFlickStick=%d (applied without a restart)", suppression ? 1 : 0);
+}
+
 void refuse_pads(bool refuse) { g_refuse = refuse; }
 
 void set_neutral(bool neutral) {
@@ -1459,11 +1464,17 @@ bool frame(SDL_Gamepad* pad, bool suppress) {
             }
         }
     }
-    const bool now_available = reading && verified;
+    // Offered as soon as the game reads the controller through a known layout (not after the first stick movement):
+    // GyroLib shows its flick stick settings only while it is declared. The check above goes on in the background.
+    const bool now_available = g_suppression && ids && reading && !mismatch;
     if (now_available != available) {
         available = now_available;
-        log(available ? "nativepad: native right-stick suppression available (flick stick with the game's own support)"
-                      : "nativepad: native right-stick suppression unavailable: the game stopped reading the controller");
+        log(available ? (verified ? "nativepad: native right-stick suppression available (flick stick with the game's own support)"
+                                  : "nativepad: native right-stick suppression available (flick stick with the game's own "
+                                    "support; known report layout, the stick is checked against SDL when it moves)")
+            : mismatch ? "nativepad: native right-stick suppression unavailable: the stick in the game's reports doesn't match"
+            : !g_suppression ? "nativepad: native right-stick suppression unavailable: NativeFlickStick turned off"
+                             : "nativepad: native right-stick suppression unavailable: the game stopped reading the controller");
     }
     const bool want = suppress && available;
     if (want != g_suppress.load()) {

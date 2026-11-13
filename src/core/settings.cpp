@@ -54,7 +54,7 @@ const char kCoreSettings[] =
     "\r\n"
     "; 1 = GyroLib's flick stick (F10 panel) also in games with their own PlayStation controller support: Gyro4All centres\r\n"
     ";     the right stick in what the game reads while flick stick is on, keeping PlayStation icons, haptics and\r\n"
-    ";     adaptive triggers. Offered after you move the right stick once in game. Needs XInput=1 (with XInput=2 the\r\n"
+    ";     adaptive triggers. Applies on save. Needs XInput=1 (with XInput=2 the\r\n"
     ";     game doesn't read the controller itself; flick stick then works through the Xbox controller). 0 = off.\r\n"
     "NativeFlickStick=0\r\n"
     "\r\n"

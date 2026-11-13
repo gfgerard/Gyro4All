@@ -642,6 +642,10 @@ void check_settings_file() {
         const char* why = mod ? "Gyro4All.ini saved" : "the game's profile saved";
         if (mod || profile) load_pacer(why, false);
         if (g_stick_camera_on && (mod || profile)) load_stick_camera(why);
+        if (mod || profile) {  // NativeFlickStick applies on save (StickCamera itself still needs a restart)
+            g_native_flick = settings::get(L"NativeFlickStick", 0) != 0;
+            nativepad::set_suppression(g_native_flick || g_stick_camera_on);
+        }
         if (mod || profile) {
             const bool manual = manual_zoom();
             load_zoom(why);
