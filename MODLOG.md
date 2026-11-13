@@ -5,6 +5,34 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-13 **1.11.1** (MSVC 14.51, 1410 checks pass; `Gyro4All-v1.11.1.zip`). Since the last 1.11.0 zip: Unity
+  `ObjectName=`/`YawObjectName=` for pitch and yaw in two instances of one class (Neon White), and the Unity AutoProbe
+  waits for gameplay (`PlayerTurnGate`, 45 s fallback); both below, not yet verified in game. The zip also carries the
+  uncommitted Glacier look changes and the untracked `PowerWash Simulator 2.ini` (a probe-learned profile) from the
+  working tree.
+
+- 2026-11-13 **Neon White (Unity Mono, `Neon White.exe`): the probe's profile turned only the yaw; pitch and yaw are in two
+  instances of one class** (fix builds, unit tests pass; **not yet verified in game**).
+  - The game has two `MouseLook` components (the classic per-axis script): one turns the yaw (`rotationX`, its
+    `rotationY` stays put; `FirstPersonDrifter.mouseLookX` points at `Player`), the other the camera's pitch (`rotationY`).
+    The probe verified each axis on its own instance (`pitch MouseLook.rotationY, yaw MouseLook.rotationX`, both 1 per
+    degree), but wrote only `ObjectType=MouseLook`; the runtime took the first instance for both axes, so the gyro's pitch
+    went to the yaw instance's unused `rotationY`. The first stick turn then rejected it ("MouseLook rotationY didn't").
+  - **Fix:** new `[Unity]` keys `ObjectName=`/`YawObjectName=` (the GameObject's name each instance sits on). The probe
+    writes them, with `YawObjectType=` repeating the class, when pitch and yaw are in two instances of one class whose
+    GameObjects have different names (logged: "pitch and yaw are in two ... instances"); `ProfileObject` picks only an
+    instance on that GameObject. Other probe results (Transforms a script holds) don't record instances yet.
+  - **Unity AutoProbe started on splash/loading screens:** in Neon White the search by itself started 7 s after launch on a
+    splash camera (cursor locked, `lockState=1`, no UI focus), 13 s before the first level; such runs use up searches
+    (`kMaxDiscoveries`) and the 120 s window of "play". **Change (builds, unit tests pass, not yet verified in game):** a
+    camera counts as gameplay's for the search by itself only once the player has turned it with the stick or mouse
+    (`PlayerTurnGate`, `unity_aim.hpp`: 5 degrees during look input, at least twice as fast as the camera turns without it,
+    after 1 s of seeing it without input), or after 45 s of gameplay frames on it (`kGameplayFallbackMs`). The 120 s window
+    counts from the first camera that passed, and the gyro waits for a pending search (`probe_discovery_pending`) only on a
+    camera that passed; before that it runs as without AutoProbe. Log: `probe: ...: gameplay, the camera may be searched by
+    itself`. A fixed 30-60 s delay was considered: it waits too little in games with long menus, too long in quick ones,
+    and still searches a 3D title camera with a locked cursor.
+
 - 2026-11-13 **User confirmations (1.11.0):** Cyberpunk 2077 sitting on a chair (workspot) works with the gyro; RAGE's
   vehicle gate (gyro off while the command stays away from the input angles) works in game. `docs/GAMES.md` rows added for
   Outer Wilds and Routine (Routine's profile was learned by the probe, see 2026-11-11; its engine version is not recorded).

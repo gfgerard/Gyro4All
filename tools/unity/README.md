@@ -25,7 +25,9 @@ Play and look at `Gyro4All\Gyro4All.log`:
 | `gyro off: no gameplay view (target fixed scene camera)` | The camera doesn't answer the stick or mouse. Nothing to find here, unless it is wrong: then step 2 says which camera turns. |
 | The view turns, but around the wrong axis (the world seems tilted) | Yaw is written around the world's up axis, which is wrong under a rotated rig: step 2. |
 
-A game with no `[Unity]` section looks for its own camera in gameplay, with no input (`AutoProbe=1`): `probe: N of the floats
+A game with no `[Unity]` section looks for its own camera in gameplay, with no input (`AutoProbe=1`), once the player has
+turned that camera with the stick or mouse or after 45 s on it (`probe: ...: gameplay, the camera may be searched by itself`;
+splash and loading screens lock the cursor too): `probe: N of the floats
 look like a view angle: nudging them`, then `probe: nudge ...` for each value that turned a camera, the usual `probe: test`
 lines, and `probe: camera VERIFIED`. A profile written that way has `Source=auto`, and the first real stick or mouse turn
 logs `the stick or mouse turns the yaw that was found: confirmed`, or takes it out (`it isn't the look state`, and `Rejected=`).

@@ -11,9 +11,12 @@
 // position at +0x10; exe+0x538560): the aim camera ignores its orbit angles and keeps the point (rotating it turns the
 // view 1:1), the normal ones keep the point but follow their orbit angles. So with such a camera the gyro turns both:
 // each kind of camera ignores the other half. The aim ray's point is at about 1e8 m when it hits nothing.
-// L2's zoom (and other cuts) runs on a short-lived transition camera without an orbit state (entity 0x11E, a new
-// generation each time) that blends the orbit cameras around it, which the orbit update keeps integrating (the stick
-// keeps turning them): while one is active the gyro turns every orbit camera of the update's list.
+// L2's zoom (and other cuts) runs on a short-lived transition camera (entity 0x11E, a new generation each time; the entity
+// changes) that blends the orbit cameras around it, which the orbit update keeps integrating (the stick keeps turning
+// them): while one is active the gyro turns every orbit camera of the update's list. Most have no orbit state, but the
+// component arrays appear to keep their values when an entity is freed, so a transition camera on an entity an orbit
+// camera used before finds that camera's old state, which looks valid and which nothing reads. So the state alone
+// doesn't tell: the update's list does (MODLOG 2026-11-05).
 // When gameplay runs: an inline hook on the orbit update (exe+0x52DDE0, the function around its loop, from the exe's
 // unwind table), called every frame while an orbit camera is updated, not in menus, loads or the pause menu (the
 // player's locomotion update, used before, stops indoors). The view's angles for the status line: the derived view component of the Gameplay World (+0x88: +0x10C yaw, +0x110 pitch, radians; up negative).
@@ -30,6 +33,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <vector>
 
 namespace gyro4all::glacier::look {
 
@@ -148,11 +152,13 @@ Point turn_point(uintptr_t point, uintptr_t position, double pitch, double yaw, 
 
 // Game thread only (the gyro frame and the updates run there).
 uint32_t g_camera = 0;  // the active camera's handle at the last turn
-uint16_t g_logged[64] = {};  // the orbit cameras logged so far, each once (by entity: the generation changes on each switch)
+uint16_t g_logged[256] = {};  // the orbit cameras logged so far, each once (by entity: the generation changes on each switch)
 ULONGLONG g_last_update = 0;
 // The orbit update's argument: +8/+0x10 the begin and end of the 16-bit entities of every orbit camera, which it
 // integrates every frame, active or not.
 uintptr_t g_cameras = 0;
+int g_cameras_changes = 0;  // how often the update was called with another argument than the last
+constexpr int kCamerasChangeLines = 20;
 constexpr size_t kMaxCameras = 65536;  // every 16-bit entity: no list the game can make is longer
 
 uintptr_t component(uintptr_t world_global, uintptr_t kind, uint32_t entity) {  // see the declaration above
@@ -195,7 +201,13 @@ uintptr_t active_orbit(Limits& limits, uint32_t& handle) {
 
 uintptr_t hooked_update(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d) {
     g_last_update = GetTickCount64();
-    g_cameras = a;
+    if (a != g_cameras) {
+        if (g_cameras && g_cameras_changes < kCamerasChangeLines)
+            log("glacier: the orbit update's list object changed: %s -> %s", mem::module_offset(g_cameras).c_str(),
+                mem::module_offset(a).c_str());
+        g_cameras_changes += g_cameras != 0;
+        g_cameras = a;
+    }
     return g_update(a, b, c, d);
 }
 
@@ -276,52 +288,266 @@ double turn_camera(uint32_t handle, uintptr_t orbit, const Limits& limits, doubl
     return (angles[1] - o.pitch) / (kPitchSense * kRad);
 }
 
-// The log line on each of the first transitions, and on any whose gyro frames didn't all turn the cameras (up to
-// kFailedTransitionLines): how long, the gyro's turns during it, and the size of the orbit update's camera list.
+// The orbit update's list as it is now. known: false when it can't be read or is empty (a load): the list then says
+// nothing about the active camera.
+struct CameraList {
+    const uint16_t* entities = nullptr;
+    size_t n = 0;
+    bool known = false;
+    bool has(uint32_t handle) const { return known && std::find(entities, entities + n, uint16_t(handle)) != entities + n; }
+};
+
+std::string list_text(const CameraList& list) {
+    if (!list.known) return "camera list unreadable or empty";
+    std::string text = std::format("{} cameras in the list:", list.n);
+    for (size_t i = 0; i < std::min<size_t>(list.n, 16); ++i) text += std::format(" {:04X}", list.entities[i]);
+    if (list.n > 16) text += std::format(" +{} more", list.n - 16);
+    return text;
+}
+
+// A line for each set of cameras the list has not held before (it changes with the camera rig the game runs).
+void list_log(const CameraList& list) {
+    static std::vector<uint16_t> last;
+    if (list.n == last.size() && std::equal(last.begin(), last.end(), list.entities)) return;
+    last.assign(list.entities, list.entities + list.n);
+    std::vector<uint16_t> sorted = last;
+    std::sort(sorted.begin(), sorted.end());
+    uint64_t hash = 14695981039346656037ull;
+    for (const uint16_t entity : sorted) hash = (hash ^ entity) * 1099511628211ull;
+    static std::vector<uint64_t> seen;
+    constexpr size_t kListLines = 300;
+    if (seen.size() >= kListLines || std::find(seen.begin(), seen.end(), hash) != seen.end()) return;
+    seen.push_back(hash);
+    log("glacier: orbit update's list, new set: %s", list_text(list).c_str());
+    if (seen.size() == kListLines) log("glacier: further sets of the orbit update's list not logged");
+}
+
+CameraList camera_list() {
+    static uint16_t entities[kMaxCameras];  // game thread only
+    uintptr_t range[2] = {};
+    if (!g_cameras || !mem::guarded_copy(range, g_cameras + 8, sizeof range) || range[1] < range[0] ||
+        range[1] - range[0] > kMaxCameras * 2)
+        return {};
+    const size_t n = (range[1] - range[0]) / 2;
+    if (!n || !mem::guarded_copy(entities, range[0], n * 2)) return {};
+    const CameraList list{entities, n, true};
+    list_log(list);
+    return list;
+}
+
+constexpr ULONGLONG kAimGapMs = 500, kPairMs = 100;  // a stretch ends after kAimGapMs without a turn
+constexpr double kJudgeDeg = 2;                      // turns asked below this (in all) aren't judged,
+constexpr int kJudgePairs = 10;                      // nor stretches shorter than this (the derived view lags)
+
+struct ViewSample {
+    bool ok = false;
+    double pitch = 0, yaw = 0;
+};
+
+// Whether the view follows the gyro over a stretch: the derived view's movement between consecutive gyro frames (at most
+// kPairMs apart) against the turn of the frame before. The right stick moves it too.
+struct Follow {
+    bool have = false;
+    ULONGLONG last = 0;
+    double prev_yaw = 0, prev_pitch = 0, pending_yaw = 0, pending_pitch = 0;
+    double asked_yaw = 0, asked_pitch = 0, view_yaw = 0, view_pitch = 0;
+    int pairs = 0;
+
+    // Before the frame's turn.
+    void frame(ULONGLONG now, const ViewSample& v) {
+        if (v.ok && have && now - last <= kPairMs) {
+            view_yaw += std::remainder(v.yaw - prev_yaw, 360.0);
+            view_pitch += v.pitch - prev_pitch;
+            asked_yaw += pending_yaw;
+            asked_pitch += pending_pitch;
+            ++pairs;
+        }
+        have = v.ok;
+        prev_yaw = v.yaw;
+        prev_pitch = v.pitch;
+        last = now;
+    }
+    void turning(double pitch, double yaw) {
+        pending_yaw = yaw;
+        pending_pitch = pitch;
+    }
+    // The share of the turns asked that the view followed, NAN with too little to judge.
+    double ratio() const {
+        const double asked = std::hypot(asked_yaw, asked_pitch);
+        return asked >= kJudgeDeg && pairs >= kJudgePairs ? (view_yaw * asked_yaw + view_pitch * asked_pitch) / (asked * asked)
+                                                          : NAN;
+    }
+    bool stuck() const {
+        const double r = ratio();
+        return !std::isnan(r) && r < 0.5;
+    }
+    std::string text() const {
+        const double r = ratio();
+        const std::string verdict = std::isnan(r) ? std::string("too little turn to judge")
+                                    : r < 0.5     ? std::format("NOT FOLLOWED ({:.0f}%)", r * 100)
+                                                  : std::format("followed ({:.0f}%)", r * 100);
+        return std::format("asked yaw {:.2f} pitch {:.2f}, view moved yaw {:.2f} pitch {:.2f} over {} frame pairs: {}", asked_yaw,
+                           asked_pitch, view_yaw, view_pitch, pairs, verdict);
+    }
+};
+
+// Since the last status line (every 30 s): what the gyro's frames were turning, and the view's response.
+struct Interval {
+    int orbit = 0, transition = 0, old_state = 0;
+    double asked = 0, moved = 0;  // degrees, |yaw| + |pitch| summed over the frames
+    int presses = 0, slow_presses = 0;
+};
+Interval g_interval;
+int g_list_length = -1;  // at the last turn, -1 if unknown
+
+// One press of the gyro: from a turn after kPressGapMs without one to the last turn before the next such gap (with
+// trigger activation, a press of L2 or L1). The reported symptom in numbers, whatever its cause: how long the view took
+// to respond once kPressAskDeg had been asked, and the cameras it went through. The first presses are logged and any
+// with a dead time of kPressSlowMs or more (a stick or a cut moves the view too, so it can only read shorter).
+constexpr ULONGLONG kPressGapMs = 150, kPressSlowMs = 250;
+constexpr double kPressAskDeg = 0.5;
+constexpr int kPressLines = 20, kSlowPressLines = 300;
+enum class CameraKind { Orbit, NoState, OldState };
+const char* kind_name(CameraKind kind) {
+    return kind == CameraKind::Orbit ? "orbit" : kind == CameraKind::NoState ? "no state" : "old state";
+}
+struct Press {
+    ULONGLONG start = 0, last = 0, asked_at = 0, response_at = 0;
+    double asked = 0, moved = 0, pending = 0, prev_yaw = 0, prev_pitch = 0;
+    bool have = false;
+    int frames = 0, cameras = 0;
+    struct Camera {
+        uint32_t handle;
+        CameraKind kind;
+        ULONGLONG since;
+    } camera[8] = {};
+};
+Press g_press;
+int g_press_lines = 0, g_slow_press_lines = 0;
+
+void press_end() {
+    Press& p = g_press;
+    if (!p.start) return;
+    const bool judged = p.asked_at != 0;
+    const ULONGLONG dead = !judged ? 0 : (p.response_at ? p.response_at : p.last) - p.asked_at;
+    const bool slow = dead >= kPressSlowMs;
+    ++g_interval.presses;
+    g_interval.slow_presses += slow;
+    if (slow ? g_slow_press_lines < kSlowPressLines : g_press_lines < kPressLines) {
+        ++(slow ? g_slow_press_lines : g_press_lines);
+        std::string cameras;
+        for (int i = 0; i < p.cameras; ++i) {
+            const Press::Camera& c = p.camera[i];
+            cameras += std::format(" {:08X} {} {} ms", c.handle, kind_name(c.kind),
+                                   (i + 1 < p.cameras ? p.camera[i + 1].since : p.last) - c.since);
+        }
+        const std::string response =
+            !judged         ? std::format("less than {} deg asked", kPressAskDeg)
+            : p.response_at ? std::format("view responded {} ms after the first {} deg asked", dead, kPressAskDeg)
+                            : std::format("view never responded in the {} ms after the first {} deg asked", dead, kPressAskDeg);
+        log("glacier: gyro press for %llu ms (ended %llu ms ago): %d gyro frames, asked %.1f deg, view moved %.1f deg; %s; cameras%s",
+            p.last - p.start, GetTickCount64() - p.last, p.frames, p.asked, p.moved, response.c_str(), cameras.c_str());
+        if (slow && g_slow_press_lines == kSlowPressLines) log("glacier: further slow gyro presses not logged");
+    }
+    p = {};
+}
+
+void press_frame(uint32_t handle, CameraKind kind, ULONGLONG now, const ViewSample& v, double pitch, double yaw) {
+    Press& p = g_press;
+    if (p.start && now - p.last > kPressGapMs) press_end();
+    if (!p.start) p.start = now;
+    if (v.ok && p.have && now - p.last <= kPairMs) {
+        const double moved = std::fabs(std::remainder(v.yaw - p.prev_yaw, 360.0)) + std::fabs(v.pitch - p.prev_pitch);
+        p.moved += moved;
+        p.asked += p.pending;
+        g_interval.moved += moved;
+        g_interval.asked += p.pending;
+        if (!p.asked_at && p.asked >= kPressAskDeg) p.asked_at = now;
+        if (p.asked_at && !p.response_at && p.moved >= 0.5 * p.asked) p.response_at = now;
+    }
+    p.have = v.ok;
+    p.prev_yaw = v.yaw;
+    p.prev_pitch = v.pitch;
+    p.pending = std::fabs(yaw) + std::fabs(pitch);
+    p.last = now;
+    ++p.frames;
+    if ((!p.cameras || p.camera[p.cameras - 1].handle != handle || p.camera[p.cameras - 1].kind != kind) &&
+        p.cameras < int(std::size(p.camera)))
+        p.camera[p.cameras++] = {handle, kind, now};
+}
+
+// A stretch of gyro frames on one transition camera: the log line on each of the first ones, and on any whose frames
+// didn't all turn the cameras, on an old orbit state, or whose view didn't follow (up to kTransitionLines).
 uint32_t g_transition = 0;
-ULONGLONG g_transition_at = 0;
-int g_transitions = 0, g_failed_transitions = 0;
+ULONGLONG g_transition_at = 0, g_transition_last = 0;
+bool g_transition_old_state = false;
+int g_transitions = 0, g_transition_lines = 0;
 double g_transition_yaw = 0, g_transition_pitch = 0;
 int g_transition_frames = 0, g_transition_turned = 0;
-size_t g_transition_list = 0;  // the camera list's length at the last frame (SIZE_MAX: unreadable)
-constexpr int kFailedTransitionLines = 50;
+std::string g_transition_list;
+Follow g_transition_follow;
+constexpr int kTransitionLines = 300;
 
 void transition_end() {
-    const bool failed = g_transition_turned < g_transition_frames;
-    if (g_transition && (g_transitions <= 12 || (failed && g_failed_transitions < kFailedTransitionLines))) {
-        g_failed_transitions += failed;
-        log("glacier: transition camera %08X for %llu ms: %d gyro frames (%d turned cameras), asked yaw %.2f pitch %.2f, "
-            "%s",
-            g_transition, GetTickCount64() - g_transition_at, g_transition_frames, g_transition_turned, g_transition_yaw,
-            g_transition_pitch,
-            g_transition_list == SIZE_MAX ? "camera list unreadable"
-                                          : std::format("{} cameras in the list", g_transition_list).c_str());
+    if (!g_transition) return;
+    const bool notable = g_transition_turned < g_transition_frames || g_transition_old_state || g_transition_follow.stuck();
+    if (g_transitions <= 12 || (notable && g_transition_lines < kTransitionLines)) {
+        g_transition_lines += notable;
+        log("glacier: transition camera %08X%s for %llu ms (ended %llu ms ago): %d gyro frames (%d turned cameras), turns of yaw %.2f "
+            "pitch %.2f; %s; %s",
+            g_transition, g_transition_old_state ? " on an old orbit state" : "", g_transition_last - g_transition_at,
+            GetTickCount64() - g_transition_last, g_transition_frames, g_transition_turned, g_transition_yaw, g_transition_pitch,
+            g_transition_follow.text().c_str(), g_transition_list.c_str());
+        if (notable && g_transition_lines == kTransitionLines) log("glacier: further transition lines not logged");
     }
     g_transition = 0;
 }
 
-// A transition camera without an orbit (L2's zoom, about 0.5 s, up to 2 s seen) blends the cameras on both sides of it,
-// which the stick keeps turning: the gyro turns every orbit camera, as the game re-aligns the one it returns to. The list
-// grows as the level streams cameras in (64 entries were too few after a while of play: the gyro then stopped for the
-// whole zoom, MODLOG 2026-11-03).
-bool turn_all(double pitch, double yaw) {
+// Before a frame's turn on a transition camera.
+void transition_frame(uint32_t handle, bool old_state, ULONGLONG now, const ViewSample& v) {
+    if (g_transition && (handle != g_transition || now - g_transition_last > kAimGapMs)) transition_end();
+    if (!g_transition) {
+        g_transition = handle;
+        g_transition_at = now;
+        g_transition_old_state = old_state;
+        ++g_transitions;
+        g_transition_frames = g_transition_turned = 0;
+        g_transition_yaw = g_transition_pitch = 0;
+        g_transition_follow = {};
+    }
+    g_transition_last = now;
+    g_transition_follow.frame(now, v);
+}
+
+// An active camera with a valid-looking orbit state that the orbit update doesn't integrate, once per entity.
+void old_state_log(uint32_t handle, const Orbit& o, const Limits& limits, const CameraList& list) {
+    static uint16_t logged[256] = {};
+    const uint16_t entity = uint16_t(handle);
+    if (!entity || std::find(std::begin(logged), std::end(logged), entity) != std::end(logged)) return;
+    const auto slot = std::find(std::begin(logged), std::end(logged), uint16_t(0));
+    if (slot == std::end(logged)) return;
+    *slot = entity;
+    uintptr_t point = 0, position = 0;
+    const bool looks = look_at_point(handle, point, position);
+    log("glacier: camera %08X has an orbit state the orbit update doesn't use (radius %.2f yaw %.1f pitch %.1f deg, rates %.3f %.3f, "
+        "limits pitch %.1f..%.1f deg%s): taken for a transition camera on an old entity; %s",
+        handle, o.radius, o.yaw / kRad, o.pitch / kRad, o.yaw_rate, o.pitch_rate, limits.pitch_min / kRad, limits.pitch_max / kRad,
+        looks ? ", looks at a point now" : "", list_text(list).c_str());
+}
+
+// A transition camera (L2's zoom, about 0.5 s, up to 2 s seen) blends the cameras on both sides of it, which the stick
+// keeps turning: the gyro turns every orbit camera, as the game re-aligns the one it returns to.
+bool turn_all(const CameraList& list, double pitch, double yaw) {
     ++g_transition_frames;
     g_transition_yaw += yaw;
     g_transition_pitch += pitch;
-    uintptr_t range[2] = {};
-    g_transition_list = SIZE_MAX;
-    if (!g_cameras || !mem::guarded_copy(range, g_cameras + 8, sizeof range) || range[1] < range[0] ||
-        range[1] - range[0] > kMaxCameras * 2)
-        return false;
-    static uint16_t entities[kMaxCameras];  // game thread only
-    const size_t n = (range[1] - range[0]) / 2;
-    g_transition_list = n;
-    if (!n || !mem::guarded_copy(entities, range[0], n * 2)) return false;
+    g_transition_follow.turning(pitch, yaw);
+    g_transition_list = list_text(list);
     bool turned = false;
-    for (size_t i = 0; i < n; ++i) {
+    for (size_t i = 0; i < list.n; ++i) {
         Limits limits{};
-        const uintptr_t orbit = orbit_of(entities[i], limits);
-        turned |= orbit && !std::isnan(turn_camera(entities[i], orbit, limits, pitch, yaw));
+        const uintptr_t orbit = orbit_of(list.entities[i], limits);
+        turned |= orbit && !std::isnan(turn_camera(list.entities[i], orbit, limits, pitch, yaw));
     }
     g_transition_turned += turned;
     return turned;
@@ -329,27 +555,22 @@ bool turn_all(double pitch, double yaw) {
 
 // One stretch of gyro turns on one active orbit camera (an "aim" when the camera looks at a point: L2's aim cameras),
 // summed up in one line when it ends: what became of the point, whether the game rewrote the one written, whether the
-// view followed the turns (the derived view's movement between consecutive gyro frames against the turns asked; the
-// right stick moves it too), and the game's own mouse/keyboard input meanwhile (a game that switches to its keyboard and
+// view followed the turns, and the game's own mouse/keyboard input meanwhile (a game that switches to its keyboard and
 // mouse controls may take the aim from the mouse). Aims: every one up to kAimLines. Past that, and for cameras without
 // a point, only the stretches whose view didn't follow (up to kStuckLines).
 struct Aim {
     uint32_t handle = 0;
     ULONGLONG start = 0, last = 0;
-    int frames = 0, points[5] = {}, rewritten = 0, pairs = 0, cursor_moves = 0;
-    double asked_yaw = 0, asked_pitch = 0, view_yaw = 0, view_pitch = 0;
-    bool have_view = false, wrote = false;
-    double prev_yaw = 0, prev_pitch = 0, pending_yaw = 0, pending_pitch = 0;
+    int frames = 0, points[5] = {}, rewritten = 0, cursor_moves = 0;
+    Follow follow;
+    bool wrote = false;
     float written[3] = {};
     uint32_t mouse = 0, keyboard = 0;
     POINT cursor{};
 };
 Aim g_aim;
 int g_aim_lines = 0, g_stuck_lines = 0;
-constexpr int kAimLines = 40, kStuckLines = 50;
-constexpr ULONGLONG kAimGapMs = 500, kPairMs = 100;  // a stretch ends after kAimGapMs without a turn
-constexpr double kJudgeDeg = 2;                      // turns asked below this (in all) aren't judged,
-constexpr int kJudgePairs = 10;                      // nor stretches shorter than this (the derived view lags)
+constexpr int kAimLines = 40, kStuckLines = 200;
 
 void aim_end() {
     Aim& a = g_aim;
@@ -358,32 +579,24 @@ void aim_end() {
         return;
     }
     const bool aim = a.frames > a.points[int(Point::None)];
-    const double asked = std::hypot(a.asked_yaw, a.asked_pitch);
-    const double followed = asked >= kJudgeDeg && a.pairs >= kJudgePairs
-                                ? (a.view_yaw * a.asked_yaw + a.view_pitch * a.asked_pitch) / (asked * asked)
-                                : NAN;
-    const bool stuck = !std::isnan(followed) && followed < 0.5;
+    const bool stuck = a.follow.stuck();
     if (stuck ? g_stuck_lines < kStuckLines : aim && g_aim_lines < kAimLines) {
         ++(stuck ? g_stuck_lines : g_aim_lines);
         uint32_t mouse = 0, keyboard = 0;
         dinputpad::desktop_input(mouse, keyboard);
-        const std::string verdict = std::isnan(followed) ? std::string("too little turn to judge")
-                                    : stuck ? std::format("NOT FOLLOWED ({:.0f}%)", followed * 100)
-                                            : std::format("followed ({:.0f}%)", followed * 100);
         log("glacier: %s %08X for %llu ms (ended %llu ms ago): %d gyro frames; point turned %d, none %d, unreadable %d, "
-            "near %d, far %d, rewritten by the game %d; asked yaw %.2f pitch %.2f, view moved yaw %.2f pitch %.2f over %d "
-            "frame pairs: %s; game mouse input %u, keyboard %u, cursor moved %d",
+            "near %d, far %d, rewritten by the game %d; %s; game mouse input %u, keyboard %u, cursor moved %d",
             aim ? "aim" : "camera", a.handle, a.last - a.start, GetTickCount64() - a.last, a.frames,
             a.points[int(Point::Turned)], a.points[int(Point::None)], a.points[int(Point::Unreadable)],
-            a.points[int(Point::Near)], a.points[int(Point::Far)], a.rewritten, a.asked_yaw, a.asked_pitch, a.view_yaw,
-            a.view_pitch, a.pairs, verdict.c_str(), mouse - a.mouse, keyboard - a.keyboard, a.cursor_moves);
+            a.points[int(Point::Near)], a.points[int(Point::Far)], a.rewritten, a.follow.text().c_str(), mouse - a.mouse,
+            keyboard - a.keyboard, a.cursor_moves);
         if (stuck && g_stuck_lines == kStuckLines) log("glacier: further views that didn't follow not logged");
     }
     a = {};
 }
 
 // Before a turn of the active camera: starts or continues its stretch, and judges the last frame's turn.
-void aim_frame(uint32_t handle, ULONGLONG now) {
+void aim_frame(uint32_t handle, ULONGLONG now, const ViewSample& v) {
     Aim& a = g_aim;
     if (a.handle && (a.handle != handle || now - a.last > kAimGapMs)) aim_end();
     POINT cursor{};
@@ -397,18 +610,7 @@ void aim_frame(uint32_t handle, ULONGLONG now) {
         ++a.cursor_moves;
         a.cursor = cursor;
     }
-    double pitch = 0, yaw = 0;
-    const bool have = read_view(pitch, yaw);
-    if (have && a.have_view && a.frames && now - a.last <= kPairMs) {
-        a.view_yaw += std::remainder(yaw - a.prev_yaw, 360.0);
-        a.view_pitch += pitch - a.prev_pitch;
-        a.asked_yaw += a.pending_yaw;
-        a.asked_pitch += a.pending_pitch;
-        ++a.pairs;
-    }
-    a.have_view = have;
-    a.prev_yaw = yaw;
-    a.prev_pitch = pitch;
+    a.follow.frame(now, v);
     a.last = now;
 }
 
@@ -417,8 +619,7 @@ void aim_turned(const PointTurn& pt, double pitch, double yaw) {
     Aim& a = g_aim;
     ++a.frames;
     ++a.points[int(pt.result)];
-    a.pending_yaw = yaw;
-    a.pending_pitch = pitch;
+    a.follow.turning(pitch, yaw);
     if (pt.result == Point::None) {
         a.wrote = false;
         return;
@@ -436,22 +637,33 @@ void aim_turned(const PointTurn& pt, double pitch, double yaw) {
 }  // namespace
 
 bool turn(double pitch, double yaw) {
+    const ULONGLONG now = GetTickCount64();
+    ViewSample sample;
+    sample.ok = read_view(sample.pitch, sample.yaw);
     Limits limits{};
     uint32_t handle = 0;
     const uintptr_t orbit = active_orbit(limits, handle);
     Orbit o{};
-    if (!orbit || !mem::guarded_copy(&o, orbit, sizeof o)) {
+    const bool has_state = orbit && mem::guarded_copy(&o, orbit, sizeof o);
+    const CameraList list = camera_list();
+    g_list_length = list.known ? int(list.n) : -1;
+    // A valid-looking state on a camera the update doesn't integrate: an old orbit camera's, under a transition camera.
+    const bool old_state = has_state && list.known && !list.has(handle);
+    press_frame(handle, !has_state ? CameraKind::NoState : old_state ? CameraKind::OldState : CameraKind::Orbit, now, sample, pitch, yaw);
+    if (!has_state || old_state) {
         aim_end();
-        if (handle && handle != g_transition) {
-            transition_end();
-            g_transition = handle;
-            g_transition_at = GetTickCount64();
-            ++g_transitions;
-            g_transition_frames = g_transition_turned = 0;
-            g_transition_yaw = g_transition_pitch = 0;
+        if (!handle) return false;
+        ++(old_state ? g_interval.old_state : g_interval.transition);
+        transition_frame(handle, old_state, now, sample);
+        // Its own state and point too: should a camera the game does use ever be missing from the list, this keeps it turning.
+        bool turned = false;
+        if (old_state) {
+            old_state_log(handle, o, limits, list);
+            turned = !std::isnan(turn_camera(handle, orbit, limits, pitch, yaw));
         }
-        return handle && turn_all(pitch, yaw);
+        return turn_all(list, pitch, yaw) || turned;
     }
+    ++g_interval.orbit;
     transition_end();
     const uint16_t entity = uint16_t(handle);
     if (handle != g_camera && entity && std::find(std::begin(g_logged), std::end(g_logged), entity) == std::end(g_logged)) {
@@ -459,13 +671,14 @@ bool turn(double pitch, double yaw) {
         if (slot != std::end(g_logged)) {
             *slot = entity;
             uintptr_t point = 0, position = 0;
-            log("glacier: orbit camera %08X (state %s, limits pitch %.1f..%.1f deg%s)", handle,
+            log("glacier: orbit camera %08X (state %s, limits pitch %.1f..%.1f deg%s%s)", handle,
                 mem::module_offset(orbit).c_str(), limits.pitch_min / kRad, limits.pitch_max / kRad,
-                look_at_point(handle, point, position) ? ", looks at a point now" : "");
+                look_at_point(handle, point, position) ? ", looks at a point now" : "",
+                list.known ? ", in the list" : ", list unknown");
         }
     }
     g_camera = handle;
-    aim_frame(handle, GetTickCount64());
+    aim_frame(handle, now, sample);
     PointTurn pt;
     const bool turned = !std::isnan(turn_camera(handle, orbit, limits, pitch, yaw, &pt));
     aim_turned(pt, pitch, yaw);
@@ -473,11 +686,22 @@ bool turn(double pitch, double yaw) {
 }
 
 std::string status() {
-    if (g_aim.handle && GetTickCount64() - g_aim.last > kAimGapMs) aim_end();
+    const ULONGLONG now = GetTickCount64();
+    if (g_aim.handle && now - g_aim.last > kAimGapMs) aim_end();
+    if (g_press.start && now - g_press.last > kPressGapMs) press_end();
+    if (g_transition && now - g_transition_last > kAimGapMs) transition_end();
     double pitch = 0, yaw = 0;
     const bool ok = view(pitch, yaw);
-    return std::format("glacier: orbit camera {} handle {:08X} view {}", g_installed ? (live() ? "live" : "idle") : "not hooked",
-                       g_camera, ok ? std::format("yaw {:.2f} pitch {:.2f}", yaw, pitch) : std::string("-"));
+    std::string text = std::format("glacier: orbit camera {} handle {:08X} view {}", g_installed ? (live() ? "live" : "idle") : "not hooked",
+                                   g_camera, ok ? std::format("yaw {:.2f} pitch {:.2f}", yaw, pitch) : std::string("-"));
+    const Interval& i = g_interval;
+    if (i.orbit || i.transition || i.old_state)
+        text += std::format(" | gyro frames: {} orbit, {} transition, {} old state; asked {:.1f} deg, view moved {:.1f} deg; {} presses, {} "
+                            "slow; list {}",
+                            i.orbit, i.transition, i.old_state, i.asked, i.moved, i.presses, i.slow_presses, g_list_length);
+    if (g_cameras_changes) text += std::format(" | list object changed {} times", g_cameras_changes);
+    g_interval = {};
+    return text;
 }
 
 }  // namespace gyro4all::glacier::look

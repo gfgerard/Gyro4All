@@ -467,6 +467,7 @@ YawPath=_state.yaw
 |---|---|
 | `ObjectType` | The class (`Namespace.Class`) of the active object the paths start from. |
 | `YawObjectType` | `YawPath`'s class, when yaw lives in another object than pitch. |
+| `ObjectName`, `YawObjectName` | Optional: the name of the GameObject the `ObjectType` (`YawObjectType`) instance sits on, when the game has several instances of the class (Neon White: one `MouseLook` per axis, so `YawObjectType` repeats the class). Default: the first instance whose paths resolve. |
 | `PitchPath`, `YawPath` | Paths to two float fields. |
 | `PitchYawPath` | Instead of those: a path to a value type with float `pitch` and `yaw` fields (`_cameraMode.DebugGetInstanceData(@).pitchYaw`). |
 | `PitchPerDegree`, `YawPerDegree` | The value's units for one degree up and right. Default `-1` and `1`: degrees, with pitch counting down. Radians are `0.0174533`; a negative number runs the other way. |
@@ -492,7 +493,10 @@ whenever the file changes.
 ### Finding a Unity game's camera (the probe)
 
 Normally you do nothing. Unity has no common look state like Unreal's `ControlRotation`, so with `AutoProbe=1` a game with
-no `[Unity]` section gets its own found the first time it has a perspective camera in gameplay with the mouse captured. A UI
+no `[Unity]` section gets its own found the first time it has a perspective camera in gameplay with the mouse captured. Splash,
+loading and title screens often capture the mouse too, so a camera counts as gameplay's only once you have turned it with the
+stick or mouse, or after 45 s on it (`probe: ...: gameplay, the camera may be searched by itself`); until then the gyro runs as
+usual, and the 2 minutes of play the searches run in count from there. A UI
 element with the pad's or keyboard's focus counts as a menu: no search and no gyro there, for up to a minute per camera. The
 search waits for a camera nobody is turning, since a cutscene pans (20 s at most). A menu stops a search, which starts over 3 s
 after the menu closes. A search that finds nothing costs little and comes back: on each new camera, once more 30 s later or after

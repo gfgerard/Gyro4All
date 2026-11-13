@@ -18,6 +18,10 @@ struct LookCondition {
 struct UnityProfile {
     std::string object_type;      // ObjectType: the class of the object the paths start from
     std::string yaw_object_type;  // YawObjectType: YawPath's (or YawObject's) class when it differs ("" = ObjectType)
+    // ObjectName=/YawObjectName=: the name of the GameObject the ObjectType (YawObjectType) instance sits on, for games with
+    // several instances of the class: Neon White's two MouseLook scripts, one turning the body's yaw (on Player), one the
+    // camera's pitch. "" = the first instance whose paths resolve.
+    std::string object_name, yaw_object_name;
     std::string camera_field;     // CameraField: path to the Camera (FOV, follow check); "" = Camera.main
     std::vector<std::string> path;        // PitchYawPath: a value type with float pitch and yaw fields
     std::vector<std::string> pitch_path;  // PitchPath: a float

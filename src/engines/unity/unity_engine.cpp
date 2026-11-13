@@ -46,6 +46,8 @@ struct Api {
     void* rigidbody = nullptr;        // the Rigidbody class, and Physics.SyncTransforms: a yaw body with physics (body_rigidbody)
     void* sync_transforms = nullptr;
     void* game_object_transform = nullptr;  // PitchObject=/YawObject= naming a GameObject
+    void* get_game_object = nullptr;        // ObjectName=/YawObjectName=: Component.gameObject's Object.name
+    void* get_name = nullptr;
     // Optional: managed code stripping can remove what a game doesn't call itself, and a pause or FOV signal less is no
     // reason to lose the camera.
     void* get_fov = nullptr;
@@ -72,6 +74,8 @@ bool resolve_api() {
     g_api.rigidbody = g_runtime.find_class("UnityEngine", "Rigidbody");
     g_api.sync_transforms = g_runtime.find_method(g_runtime.find_class("UnityEngine", "Physics"), "SyncTransforms", 0);
     g_api.game_object_transform = g_runtime.find_method(g_runtime.find_class("UnityEngine", "GameObject"), "get_transform", 0);
+    g_api.get_game_object = g_runtime.find_method(component, "get_gameObject", 0);
+    g_api.get_name = g_runtime.find_method(g_runtime.find_class("UnityEngine", "Object"), "get_name", 0);
     g_api.get_fov = g_runtime.find_method(camera, "get_fieldOfView", 0);
     g_api.orthographic = g_runtime.find_method(camera, "get_orthographic", 0);
     g_api.time_scale = g_runtime.find_method(time, "get_timeScale", 0);
@@ -275,16 +279,26 @@ void* object_transform(ManagedPath& path, void* root) {
 // about it, and a destroyed object's wrapper keeps answering field reads while its Unity calls throw.
 struct ProfileObject {
     std::string type;
+    std::string name;  // ObjectName=/YawObjectName=: its GameObject's name ("" = any)
     void* klass = nullptr;
     uintptr_t handle = 0;
     void* pointer = nullptr;  // only when the handle exports are missing
     ULONGLONG next_search = 0;
     bool told = false;
 
-    void reset(const std::string& name) {
+    void reset(const std::string& class_name, const std::string& object_name) {
         g_runtime.free_handle(handle);
         *this = {};
-        type = name;
+        type = class_name;
+        name = object_name;
+    }
+
+    bool named(void* object) const {
+        if (name.empty()) return true;
+        if (!g_api.get_game_object || !g_api.get_name) return false;
+        int length = 0;
+        const wchar_t* chars = g_runtime.string_chars(g_runtime.invoke(g_api.get_name, g_runtime.invoke(g_api.get_game_object, object)), length);
+        return chars && narrow(std::wstring(chars, size_t(length))) == name;
     }
 
     template <typename Valid>
@@ -305,11 +319,11 @@ struct ProfileObject {
         for (size_t i = 0; i < count; ++i) {
             void** element = static_cast<void**>(g_runtime.array_element(array, i));
             void* object = element ? *element : nullptr;
-            if (!object || !g_runtime.alive(object) || !valid(object)) continue;
+            if (!object || !g_runtime.alive(object) || !named(object) || !valid(object)) continue;
             g_runtime.free_handle(handle);
             handle = g_runtime.new_handle(object, true);
             pointer = handle ? nullptr : object;
-            log("unity: profile object %s found (%zu instance(s))", type.c_str(), count);
+            log("unity: profile object %s%s found (%zu instance(s))", type.c_str(), name.empty() ? "" : (" on '" + name + "'").c_str(), count);
             return object;
         }
         return nullptr;
@@ -802,8 +816,8 @@ private:
                 g_profile.yaw_on_object() ? "on YawObject's Transform" : g_profile.yaw_parent > 0 ? "on YawParent" : "a float",
                 g_profile.look.size());
         g_pair_class = nullptr;
-        g_main_object.reset(g_profile.object_type);
-        g_yaw_object.reset(g_profile.yaw_object_type);
+        g_main_object.reset(g_profile.object_type, g_profile.object_name);
+        g_yaw_object.reset(g_profile.yaw_object_type, g_profile.yaw_object_name);
         root_ = yaw_root_ = nullptr;
         axes_ = {};
         camera_ = last_camera_ = nullptr;
@@ -961,7 +975,7 @@ private:
                                                              : yaw_class + " " + join_path(g_profile.yaw_path);
         log("unity: the camera turned with the stick or mouse but %s didn't: it isn't the look state, looking again", what.c_str());
         const std::wstring& path = settings::profile_path();
-        for (const wchar_t* key : {L"ObjectType", L"YawObjectType", L"CameraField", L"PitchPath", L"YawPath", L"PitchPerDegree",
+        for (const wchar_t* key : {L"ObjectType", L"YawObjectType", L"ObjectName", L"YawObjectName", L"CameraField", L"PitchPath", L"YawPath", L"PitchPerDegree",
                                    L"YawPerDegree", L"YawParent", L"PitchTransform", L"PitchObject", L"YawObject", L"YawFromCamera",
                                    L"Source"})
             WritePrivateProfileStringW(L"Unity", key, nullptr, path.c_str());

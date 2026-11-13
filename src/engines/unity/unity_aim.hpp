@@ -66,6 +66,36 @@ private:
     double yaw_ = 0, pitch_ = 0;
 };
 
+// "Is this gameplay?" for the automatic search: the player has turned this camera with the stick or mouse. A splash,
+// loading or title camera with a locked cursor never turns with look input; one that pans by itself must turn kOwnMotion
+// times faster with it than without. Fed every frame with the camera's change since the last frame.
+struct PlayerTurnGate {
+    static constexpr double kEnough = 5;   // degrees turned during look input
+    static constexpr double kCut = 20;     // a bigger jump in a frame is a shot cut or a teleport, not a turn
+    static constexpr uint64_t kIdleMs = 1000;  // no verdict before the camera was seen this long without input (its own motion)
+
+    void reset() { *this = {}; }
+    bool turned() const { return turned_; }
+
+    // Returns turned(). dt_ms: since the last frame; look: the player's look input this frame.
+    bool add(double d_yaw, double d_pitch, uint64_t dt_ms, bool look) {
+        if (turned_) return true;
+        const double moved = std::abs(std::remainder(d_yaw, 360.0)) + std::abs(d_pitch);
+        if (moved >= kCut || dt_ms == 0 || dt_ms > 1000) return false;
+        if (look) looked_ += moved, look_ms_ += dt_ms;
+        else idle_ += moved, idle_ms_ += dt_ms;
+        if (looked_ < kEnough || look_ms_ == 0 || idle_ms_ < kIdleMs) return false;
+        const double idle_rate = idle_ / (double(idle_ms_) / 1000);
+        turned_ = looked_ / (double(look_ms_) / 1000) >= AimCheck::kOwnMotion * idle_rate;
+        return turned_;
+    }
+
+private:
+    double looked_ = 0, idle_ = 0;
+    uint64_t look_ms_ = 0, idle_ms_ = 0;
+    bool turned_ = false;
+};
+
 // A view found with no player input is only a guess until the player turns the camera: if the camera turns with the
 // stick or mouse and the view's state doesn't, that state is something else (an effect on top of the real one).
 // Fed with the frames where the player turned and the gyro didn't. Two "ignored" verdicts in a row reject it.

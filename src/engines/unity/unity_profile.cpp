@@ -68,6 +68,8 @@ UnityProfile load_unity_profile(const std::wstring& path) {
     UnityProfile profile;
     profile.object_type = setting(path, L"ObjectType");
     profile.yaw_object_type = setting(path, L"YawObjectType");
+    profile.object_name = setting(path, L"ObjectName");
+    profile.yaw_object_name = setting(path, L"YawObjectName");
     profile.camera_field = setting(path, L"CameraField");
     profile.path = split(setting(path, L"PitchYawPath"), '.');
     profile.pitch_path = split(setting(path, L"PitchPath"), '.');

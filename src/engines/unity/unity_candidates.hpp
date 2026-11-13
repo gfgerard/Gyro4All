@@ -191,6 +191,8 @@ struct ProbeResult {
     bool pitch_transform = false;  // the game copies the pitch float to the camera only on look input: turn both
     bool yaw_from_camera = false;  // the yaw float is relative to a body that catches up with it (YawFromCamera=1)
     std::string pitch_object, yaw_object;  // a path to a component or GameObject whose Transform has it, instead of a float
+    // Pitch and yaw in two instances of one class (Neon White's MouseLook per axis): their GameObjects' names.
+    std::string pitch_owner_name, yaw_owner_name;
     std::string zoom_reference;            // ZoomReference=: a float path from ObjectType's object to the unzoomed FOV
     FovAxis zoom_axis = FovAxis::Auto;     // the axis it matched the camera's FOV in
 };
@@ -214,7 +216,12 @@ inline std::vector<std::pair<std::string, std::string>> profile_keys(const Probe
     std::vector<std::pair<std::string, std::string>> keys;
     if (!r.pitch_class.empty()) {
         keys.emplace_back("ObjectType", r.pitch_class);
-        if (!r.yaw_parent && !r.yaw_class.empty() && r.yaw_class != r.pitch_class) keys.emplace_back("YawObjectType", r.yaw_class);
+        const bool two_instances = !r.yaw_parent && r.yaw_class == r.pitch_class && !r.pitch_owner_name.empty() &&
+                                   !r.yaw_owner_name.empty() && r.pitch_owner_name != r.yaw_owner_name;
+        if (two_instances) keys.emplace_back("ObjectName", r.pitch_owner_name);
+        if (!r.yaw_parent && !r.yaw_class.empty() && (r.yaw_class != r.pitch_class || two_instances))
+            keys.emplace_back("YawObjectType", r.yaw_class);
+        if (two_instances) keys.emplace_back("YawObjectName", r.yaw_owner_name);
         if (!r.camera_field.empty()) keys.emplace_back("CameraField", r.camera_field);
         if (!r.pitch_object.empty()) {
             keys.emplace_back("PitchObject", r.pitch_object);

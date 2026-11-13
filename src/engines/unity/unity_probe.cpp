@@ -73,6 +73,10 @@ constexpr int kMaxDiscoveries = 12;
 // The automatic searches (by itself, after a rejected or undone view) only run in the first minutes of play; later the
 // probe key is the way. Only time in gameplay counts (not menus, loading or alt-tab).
 constexpr ULONGLONG kAutoWindowMs = 120000;
+// Splash, loading and title screens often lock the cursor over a still camera, which looks like gameplay. The search by
+// itself waits for the player to turn the camera with the stick or mouse (PlayerTurnGate), or for this long on one camera
+// in what looks like gameplay; the window above counts from the first camera that passed.
+constexpr ULONGLONG kGameplayFallbackMs = 45000;
 constexpr ULONGLONG kMenuCheckMs = 1000, kMenuPatienceMs = 60000;
 constexpr int kDeepObjects = 32;  // per container, and each class once
 
@@ -86,8 +90,9 @@ const char kSettings[] =
     "; The same during the game, without restarting:\r\n"
     ";   ProbeKey: starts the probe right where you are, and cancels it. F1..F24, optionally with Ctrl+, Shift+ or Alt+;\r\n"
     ";     empty = no key.\r\n"
-    ";   AutoProbe=1: a game with no profile gets its camera looked for by itself, in gameplay: the gyro waits a few seconds\r\n"
-    ";     at most, once per game, and what is found goes into its profile. If that fails it goes on watching while you play,\r\n"
+    ";   AutoProbe=1: a game with no profile gets its camera looked for by itself, in gameplay: once you have turned the\r\n"
+    ";     camera with the stick or mouse (or after 45 s on one camera), the gyro waits a few seconds at most, once per\r\n"
+    ";     game, and what is found goes into its profile. If that fails it goes on watching while you play,\r\n"
     ";     and when the camera stops answering the gyro the probe starts by itself. 0 = off.\r\n"
     "ProbeKey=Ctrl+F7\r\n"
     "AutoProbe=1\r\n";
@@ -328,6 +333,14 @@ bool g_discovery_done = false;
 bool g_menu_on_screen = false;
 ULONGLONG g_menu_next = 0, g_menu_since = 0, g_menu_left_at = 0;
 void* g_menu_camera = nullptr;  // the camera whose patience ran out: it has the gyro now
+// Whether the camera is gameplay's (kGameplayFallbackMs).
+void* g_gate_camera = nullptr;  // the camera judged
+void* g_gate_passed = nullptr;  // the last camera that passed
+bool g_play_started = false;    // a camera passed: gameplay time counts
+PlayerTurnGate g_turn_gate;
+ULONGLONG g_gate_ms = 0, g_gate_last = 0;  // gameplay time on g_gate_camera, and its last frame
+bool g_gate_have_view = false;
+ViewAngles g_gate_view;
 
 bool resolve_api(Runtime& rt) {
     if (g_api.ready) return true;
@@ -1229,6 +1242,15 @@ void finish(Runtime& rt) {
     result.yaw_per_degree = slot_per_degree(uint32_t(t.found_yaw), false);
     result.yaw_from_camera = t.yaw_relative;
     result.camera_field = camera_field(rt, g.owners[pitch.owner].object, g.camera);
+    // Two instances of one class (Neon White's MouseLook, one per axis): the runtime would take the first for both.
+    if (pitch.owner != yaw.owner && g.owners[pitch.owner].object != g.owners[yaw.owner].object &&
+        result.pitch_class == result.yaw_class && g_api.get_game_object && g_api.get_name) {
+        result.pitch_owner_name = narrow_string(rt, rt.invoke(g_api.get_name, rt.invoke(g_api.get_game_object, g.owners[pitch.owner].object)));
+        result.yaw_owner_name = narrow_string(rt, rt.invoke(g_api.get_name, rt.invoke(g_api.get_game_object, g.owners[yaw.owner].object)));
+        probe_log("probe: pitch and yaw are in two %s instances, on GameObjects '%s' and '%s'%s", result.pitch_class.c_str(),
+                  result.pitch_owner_name.c_str(), result.yaw_owner_name.c_str(),
+                  result.pitch_owner_name == result.yaw_owner_name ? ": same name, they can't be told apart" : "");
+    }
     result.automatic = g.quiet;
     write_result(rt, std::move(result));
 }
@@ -2337,8 +2359,9 @@ bool probe_watching_quietly() {
 }
 
 bool probe_discovery_pending() {
+    // Only on a camera that passed as gameplay's: before that the gyro runs as it would without AutoProbe.
     return g_auto_setting && auto_window_open() && !g_discovery_done && g_discoveries < kMaxDiscoveries && g_discover_camera != g_discover_tried &&
-           (g.phase == State::Off || probe_watching_quietly());
+           g_discover_camera && g_discover_camera == g_gate_passed && (g.phase == State::Off || probe_watching_quietly());
 }
 
 bool probe_menu_on_screen() { return g_menu_on_screen; }
@@ -2404,10 +2427,44 @@ void probe_discovery_again() {
     if (g_pitch.done && g_pitch.owners.empty()) g_pitch.camera = nullptr, g_pitch.done = false;
 }
 
+// Whether this camera is gameplay's, for the search by itself: the player turned it, or kGameplayFallbackMs on it.
+bool gameplay_camera(Runtime& rt, void* camera, bool allowed, ULONGLONG now) {
+    if (!allowed || !camera || g_menu_on_screen) {
+        g_gate_last = 0;  // the time on this camera stops; its turns so far stay
+        return false;
+    }
+    if (camera != g_gate_camera) {
+        g_gate_camera = camera;
+        g_turn_gate.reset();
+        g_gate_ms = g_gate_last = 0;
+        g_gate_have_view = false;
+    }
+    if (camera == g_gate_passed) return true;
+    ViewAngles view;
+    const bool read = resolve_api(rt) && read_angles(rt, camera, view);
+    if (read && g_gate_have_view && g_gate_last)
+        g_turn_gate.add(view.yaw - g_gate_view.yaw, view.pitch - g_gate_view.pitch, now - g_gate_last, look_input());
+    if (read) g_gate_view = view, g_gate_have_view = true;
+    // Only gameplay frames count toward the fallback (not a pause or a menu in between).
+    if (g_gate_last) g_gate_ms += std::min<ULONGLONG>(now - g_gate_last, 1000);
+    g_gate_last = now;
+    const bool turned = g_turn_gate.turned();
+    if (!turned && g_gate_ms < kGameplayFallbackMs) return false;
+    g_gate_passed = camera;
+    g_play_started = true;
+    log("probe: %s: gameplay, the camera may be searched by itself",
+        turned ? "the player turned this camera with the stick or mouse"
+               : std::format("{} s on this camera", kGameplayFallbackMs / 1000).c_str());
+    return true;
+}
+
 void probe_discover(Runtime& rt, void* camera, bool allowed) {
     const ULONGLONG now = GetTickCount64();
     watch_menu(rt, allowed ? camera : nullptr, now);
-    if (allowed && camera && !g_menu_on_screen && g_play_last) {
+    const bool gameplay = g_auto_setting && auto_window_open() && !g_discovery_done && g_discoveries < kMaxDiscoveries
+                              ? gameplay_camera(rt, camera, allowed, now)
+                              : camera && camera == g_gate_passed;
+    if (allowed && camera && !g_menu_on_screen && g_play_last && g_play_started) {
         const bool was_open = auto_window_open();
         g_play_ms += std::min<ULONGLONG>(now - g_play_last, 1000);
         if (was_open && !auto_window_open())
@@ -2425,12 +2482,12 @@ void probe_discover(Runtime& rt, void* camera, bool allowed) {
         g_menu_left_at = now;
         g_discover_next = 0;  // a camera searched before this menu gets its second look when it closes
     }
-    if (!allowed || camera != g_discover_camera || g_menu_on_screen) {
+    if (!allowed || camera != g_discover_camera || g_menu_on_screen || !gameplay) {
         g_discover_since = now;
         g_discover_view.reset();
     }
     g_discover_camera = camera;
-    if (!allowed || g_menu_on_screen || !camera || !g_auto_setting || !auto_window_open() || g_discovery_done ||
+    if (!allowed || g_menu_on_screen || !camera || !gameplay || !g_auto_setting || !auto_window_open() || g_discovery_done ||
         g_discoveries >= kMaxDiscoveries)
         return;
     if (probe_watching_quietly() && g.phase == State::Capture && camera != g_discover_turned) {
