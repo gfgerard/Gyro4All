@@ -5,6 +5,20 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-14 **Unreal: `PauseConditions=` replaces the built-in MOVE_Flying pause** (builds, 1441 checks pass; not
+  tested in game yet). Since 2026-10-25 `read_scene` paused the gyro whenever the pawn's
+  `CharacterMovement.MovementMode` was 5 (MOVE_Flying), found for Dead Island 2's scripted scenes; that entry already
+  named the risk, and a fork hit it (Daemon X Machina's Arsenal hovers in MOVE_Flying: gyro off at every take-off).
+  Now a character in flying mode doesn't pause anything by itself; a profile lists its own scripted-scene states in
+  `[Gyro4All] PauseConditions=` (comma-separated, any holding pauses; `Root.Sub...Property` with the `Object=` roots
+  PC/Pawn/Camera/ViewTarget and `@Class` steps, alone or with `== != < <= > >=` and a number/true/false). Parsing in
+  `ue_profile.cpp` (`parse_pause_condition`, `load_pause_conditions`, unit-tested: every form, 15 bad inputs, list,
+  `[GyroUE]`), read again on profile change; `ue::read_number` (bool bitfields, ints/bytes/enums by element size,
+  float/double, objects as set/unset). The generic `IsInActiveCutscene` check stays (a flag no game sets in play).
+  `profiles/DeadIsland-Win64-Shipping.ini` gets `PauseConditions=Pawn.CharacterMovement.MovementMode==5`, the same
+  rule as before. Log: `scene: pause condition '...' holds: gyro paused` / `scripted scene over`; `... can't be read
+  from <class>` once per class. To verify: DI2 (Epic), the gyro stops in a scripted scene and works after it.
+
 - 2026-11-13 **NativeFlickStick: no restart, and the flick stick settings show without touching the stick** (builds,
   1410 checks pass; **verified in game by the user**).
   - Before: GyroLib's panel shows its flick stick settings only while the host declares `GL_HOST_NATIVE_STICK_SUPPRESSION`,
@@ -627,6 +641,103 @@ Steam Input; the connection wasn't recorded). Also seen once: right after a firs
     The generic view now learns the clamp (a pitch write that comes back pulled toward zero; starts at +-89;
     `unity: learnt the game's pitch clamp`); `PitchLimit=` pins it. To re-verify: aim past where the mouse stops.
 
+- 2026-11-14 **RDR2 "drift": closed on our side as the reporter's sensor.** No other user (nor our own pads) reports it.
+  Upstream request drafted for GyroLib: a configurable active-use residual limit (today 0.15 deg/s), with tightening apart from
+  smoothing and an optional speed deadzone as secondary asks. Workarounds meanwhile: set the pad down with L2 released, or Small
+  movement stabilization 2-3 deg/s with Smoothing 5 ms.
+- 2026-11-14 **RDR2 "drift", reporter's fresh-install log (1.11.1, DualSense on USB at 1000 samples/s, not under Steam
+  Input): a wrong bias learned at start and never refined while the gyro is always on.** Repro: pad on the table, game loaded
+  with the pad, drift at once; opening GyroLib's panel (Start+Options) and closing it with the mouse stops it "for quite a while".
+  - The bias is learned in the first 3 s, while the Rockstar launcher has focus (`focus: ... (bias=(0.00 ...))` at start, `(0.39
+    -0.13 0.08)` when the game is in front), then stays exactly the same in every status line for 90 s, with `still=1`
+    (pad on the table) and the gyro on.
+  - With the pad lying still, the status lines' cumulative `applied` grows from yaw 2.4 pitch 6.8 to yaw 7.0 pitch 20.3 in
+    30 s: about 0.15 deg/s yaw and 0.45 deg/s pitch written by the gyro. That is the drift: the gyro path with a bias that is off,
+    not the game's stick.
+  - The panel suspends the gyro (outside active use: 2 s constant), so the still pad gets its real bias; closing with the mouse
+    only matters because the pad isn't touched. The log ends 2 s after the panel closes, so the new bias isn't in it.
+  - No `calibration.automatic menus only -> any time` line, so `calibration.automatic` wasn't 1 at start (2, or 0 if GyroLib's
+    own default won on a new `gyrolib.ini`): not known, their `gyrolib.ini` wasn't sent.
+  - Side note: XInput's sticks rest at LX 899 and RX 642..899 (DualSense raw about 131 of 255), LY/RY 0.
+  - Why it is never refined: at the default sensitivity 2.5 that drift is a residual of about 0.18 deg/s pitch and 0.06 yaw
+    against the bias. GyroLib keeps reading the pad whatever the activation, but while the gyro is in use (always on here;
+    L2 held with Hold) it accepts only residuals within 0.15 deg/s of the current correction, so 0.18 is rejected for good,
+    even with `still=1`. Outside active use (L2 released, panel open) it would learn with the 2 s constant, but only when the
+    stillness tests pass (mean under 3 deg/s, noise under 0.9 deg/s RMS, acceleration noise under 0.025 g, within 0.35 deg/s
+    of the first stable window), which a hand-held pad rarely does. So with Hold, any bias change of over 0.15 deg/s
+    since the pad last lay still stays until it lies still again with L2 released.
+  - The reporter always plays with Hold on L2; the fresh install ran Gyro4All's default Always on, so this repro is the
+    always-on case. Their earlier L2 log (backup, 2026-11-10) shows the same pad's bias wandering while lying still with L2
+    released: 0.44, 0.49, 0.53, 0.55 deg/s on X over about three minutes. A bias that moves like that while the pad stays in
+    hand is never followed (no stillness with L2 released, the 0.15 guard with L2 held).
+  - Candidate fix (not built, and no help for Hold users, who already get the 2 s path with L2 released and the pad set down):
+    while GyroLib reads the pad as lying still for a few seconds, report it to GyroLib as not in use
+    (menu open, camera not allowed), so a pad set down refines the bias with the 2 s constant, as the panel does. Risk: a hand
+    steady enough to pass the stillness tests would freeze the camera and teach GyroLib hand motion as bias (what the 0.15
+    guard prevents). To ask upstream: accept larger residuals in active use after a long stillness.
+- 2026-11-14 **RDR2 "drift": the reporter's DualSense itself drifts.** In 007 under Steam Input there is no drift with Steam's
+  default gyro settings, but with Steam's gyro speed deadzone at 0 it drifts every time, and Steam's anti-drift doesn't remove
+  it. Fits the `pad reads` slides in their traces: the raw reading wanders away from the bias while the pad is held, more than
+  GyroLib's active-use correction accepts (0.15 deg/s). What we have and don't, in GyroLib 1.3.1 (still the latest release):
+  - No hard speed deadzone (Steam's "Gyro Speed Deadzone"): GyroLib says on purpose that calibration adds no dead zone to output.
+  - `gyro.tightening_dps` (0..10, default 0) is the soft version (Steam's "Precision Speed"-like): below the threshold the vector
+    is scaled by speed/threshold, so output goes as speed squared. It applies only while smoothing is on (its value is kept
+    while `gyro.smoothing_ms=0`, and the panel hides it). Panel labels (English): "Small movement stabilization" is
+    `gyro.tightening_dps`, "Smoothing limit" is `gyro.smoothing_threshold_dps`. The reporter has smoothing 0 and tightening 0. Workaround to try:
+    `gyro.smoothing_ms=5`, `gyro.tightening_dps=2..3` (5 ms only filters speeds under half of `smoothing_threshold_dps`, 2.5 deg/s).
+    Not tested in game. TROUBLESHOOTING's drift row says so.
+  - Not done in Gyro4All: a deadzone on GyroLib's output (integrated degrees per frame) would duplicate GyroLib's filtering.
+    To ask upstream: tightening independent of smoothing, and an optional speed deadzone for worn sensors.
+- 2026-11-14 **RDR2 "drift" after a reconnect: cause found in our own log. After the controller is reopened, GyroLib's bias is
+  (0.00 0.00 0.00) and the saved manual calibration is not applied to the new endpoint.** Own test: 1.11.0, DualSense about 480
+  samples/s (Bluetooth, likely), not under Steam Input, Hold on L2, saved manual calibration in `gyrolib.ini`. At start the
+  bias is restored at once (0.23 -0.05 -0.63, close to the saved 0.21 -0.17 -0.70). Two reopens (`xinput: not shown: no
+  controller`, `gyro: GyroLib's sample count restarted ...: the controller was reopened`): both times every status line
+  reads bias (0.00 0.00 0.00), with the gyro on, for over two minutes, and automatic calibration never brought it back. It
+  came back only with a manual "Recalibrate gyro" in the panel (opened 02:37:28, `gyrolib.ini changed, reloaded` 02:37:39):
+  then (0.21 -0.17 -0.70), the same as the saved record. With the pad's real bias of about 0.5 deg/s on the reporter's pad and sensitivity 2, that
+  is about 1 deg/s of drift while aiming, until the pad is set down. Matches the reporter's repro (USB port change), and the
+  "random" cases if the connection drops briefly. The host only logs the reopen; it resets nothing.
+  - The reporter said a manual recalibration didn't seem to help, while it fixed it here (Bluetooth). Not explained: they may
+    have calibrated before a later reconnect, with the pad in hand (a failed measurement keeps the last result), or hit the
+    identity case below on USB.
+  - Why focus loss fixes it for the reporter isn't proven: GyroLib suspends the gyro and learns outside active use with a 2 s
+    constant, so a pad held still while unfocused gets the bias back. The game's own menu only closes Gyro4All's gate.
+  - Suspect in GyroLib: the manual record is keyed by VID/PID/serial; "if two connected endpoints claim the same calibration
+    identity, its saved record is removed and reuse is disabled for that context's lifetime" (SETTINGS.md). A reopen where the
+    old endpoint is still registered when the new one appears would hit that. Not verified.
+  - Host fix (built, unit tests pass, not tested in game): `restore_after_reopen` in `host.cpp`. On a reopen, once motion is
+    back (source set, over 200 samples, at least 1 s later), if the bias reads (0 0 0) it loads `gyrolib.ini` again
+    (`gl_load_settings`) for the saved manual record; 5 s later it logs the bias, and if it is still zero shows a notice to
+    recalibrate. Log lines in ADVANCED.md. Whether `gl_load_settings` applies the record to an already-registered endpoint
+    (and whether the identity case below blocks it) is what the in-game test must show. Also worth reporting upstream.
+  - In-game test (1.11.1, same DualSense over Bluetooth, about 480 samples/s, not under Steam Input, saved manual record
+    present from the start): one reopen (pad off and on). GyroLib applied the saved record to the new endpoint by itself:
+    `the reopened controller kept its calibration: bias=(0.21 -0.17 -0.70)` 0.4 s after motion came back, so the reload never
+    ran. That revises the reading above: in the earlier session the record was most likely written only at 02:37:39 (that
+    session's recalibration), so before it the pad had only a learned bias, which a reopen drops to zero. The fix's
+    reload and notice (the no-record case) are still untested, and so is a USB port change (the reporter's repro).
+  - Later: the no-record notice shows in game (own test). The notice and the reload run only for SDL motion (Steam Input
+    samples never get a local bias). Open question: the reporter has a saved record, yet a USB port change drifts every time
+    and focus loss (Ctrl+Esc) stops it. Either GyroLib drops the record on the new endpoint (two endpoints with one identity
+    during the port change, or a different USB identity) and relearns while unfocused, or it is not the gyro: the game reads
+    the pad itself (DirectInput, foreground-cooperative, and raw HID), and focus loss makes it reacquire. The `focus:` lines
+    now carry the bias, so the reporter's log tells the two apart: bias zero before the Ctrl+Esc and non-zero after it means
+    the gyro; a correct bias throughout means the game's own input.
+- 2026-11-14 **RDR2 "drift": the reporter found a 100% repro.** Moving the controller to another USB port while the game runs
+  starts the drift; switching focus away (Ctrl+Esc to the Start menu) and back stops it; opening and closing the game's own
+  menu does not. Same build as the trace work (new trace lines). Not reproduced here yet, no code changed. Candidates, from
+  what differs between focus loss and the game's menu:
+  - **The game's own DirectInput read of the DualSense:** RDR2 reads the pad through DirectInput (`GetDeviceState`, DIJOYSTATE2,
+    from the exe) besides the XInput controller Gyro4All shows; `dinputpad` only idles that read while the panel is open. After a
+    replug the game may keep a stale or mis-mapped device whose axes don't rest at centre; the device is foreground-cooperative,
+    so focus loss unacquires it and the game reacquires (a menu doesn't). Would not depend on the gyro at all.
+  - **Gyro4All's XInput controller:** `xinput::selected_gamepad` looks the SDL pad up again on a new instance, but a stale stick
+    state after the replug isn't ruled out; the `xinput: sticks in the last 10 s ... (now RX .. RY ..)` line shows it.
+  - **GyroLib's bias on the new endpoint:** a new SDL endpoint restarts calibration (the saved manual one only if the serial is
+    readable); with the pad in hand it may keep a wrong bias. Focus loss suspends GyroLib (outside active use: 2 s constant),
+    the game's menu only closes Gyro4All's gate. The trace's B lines show it.
+  - Test: gyro off (no L2) after the replug: if the view still slides, it is the stick path, not the gyro.
 - 2026-11-10 **RDR2 "drift", reporter's third report: "almost always, very noticeable" after switching to defaults, "random and
   barely noticeable" with their backed-up files.** The backup holds an older `winmm.dll` (an earlier build also labelled 1.10.1,
   size differs from the 1.10.1 release zip: the log line can't tell the two apart), their `gyrolib.ini` and the game's
@@ -2542,7 +2653,7 @@ the System32 DXGI factory vtable and the heap scan for GUObjectArray; `PROXY=ver
 - **Cinematics:** the gyro still turned the camera in a cinematic. An `IsLookInputIgnored()` gate (vtable[231], exe+0x3687CD0, via the reflected UFunction's native thunk, `first_virtual_call`) never fired there: reverted. Dumps scene vs
   gameplay: the only difference is `Pawn.CharacterMovement.MovementMode` (ByteProperty @0x1A4): 5 (MOVE_Flying) in the scene, 1 in play; `BP_Base_Player_C.IsInActiveCutscene` (@0x1A08) false in both. Built in (Unreal module `read_scene`):
   the scene counts as paused while the pawn's `IsInActiveCutscene` is true or `CharacterMovement.MovementMode` is 5 (logged `scene:`); risk: a game whose normal play flies the character loses the gyro there. **VERIFIED in game**
-  (user, Epic version): the gyro stops in the scripted scene and works after it. Profile `profiles/DeadIsland-Win64-Shipping.ini` (`[View.Default] Property=RotationInput`). GAMES.md row.
+  (user, Epic version): the gyro stops in the scripted scene and works after it (since 2026-11-14 the MOVE_Flying rule lives in the profile as `PauseConditions=`, see Findings). Profile `profiles/DeadIsland-Win64-Shipping.ini` (`[View.Default] Property=RotationInput`). GAMES.md row.
 - 2026-10-25 **Bug (user): Dead Island 2, with GyroLib's panel open the mouse pointer moved behind it and the d-pad drove the game.** No `nativepad:` lines; Epic's overlay (`EOSOVH-Win64-Shipping.dll`) owns the exe's LoadLibrary imports,
   so `hk_load_*` never saw the delay-load of `libScePad.dll` and its imports were never patched. Mouse: Slate polls `GetCursorPos` every frame in menus. Fix: `hooks.cpp` watches `libScePad.dll` loads (`watch_dll`, loader
   notification) and runs `patch_all` from a new thread; `overlay.cpp` hooks `GetCursorPos` in the game modules (import-table mode): while the panel captures the mouse it returns the position from when it took it. 674 checks; not

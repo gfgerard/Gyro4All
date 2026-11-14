@@ -174,7 +174,7 @@ All diagnostics go to `Gyro4All\Gyro4All.log` (probe results, if enabled, to `Gy
 | `camera: '<view>' is rewritten by the game` (or `is ignored by the camera`), `trying '<next>' (N degrees carried over)` / `the camera follows view '<view>' now (Match=Camera)` | The game switched between rotations of the same view target and Gyro4All followed it (see [Several cameras for the same view target](#several-cameras-for-the-same-view-target-matchcamera)). |
 | `probe: started during play (...)` / `probe: camera learned: ...` / `probe: stopped (...)` | A probe started from the probe key or by AutoProbe, and what became of it (see [Learning a camera during play](#learning-a-camera-during-play-no-restart)). |
 | `update rotation: <class> UpdateRotation is vtable[N] at <module>+0x... (reads RotationInput +0x... first): hooked, the gyro goes into RotationInput` | A `Property=RotationInput` view: the gyro is added to the stick's look input inside the controller's `UpdateRotation` (see [The stick's look input](#the-sticks-look-input-propertyrotationinput)). `N functions of its vtable read RotationInput first ... not found` / `not unique`: the controller's `UpdateRotation` couldn't be told apart, so that view doesn't turn (report it with the log). |
-| `scene: the pawn is in a cutscene (IsInActiveCutscene): gyro paused` / `the pawn moves in MOVE_Flying (a scripted scene): gyro paused` / `scripted scene over` | Unreal: scripted moments count as a pause, so the gyro stops as the stick does: a pawn with a reflected `IsInActiveCutscene` set (Dead Island 2), or the pawn's `CharacterMovement` in flying mode (games move the character along a scripted path with it). |
+| `scene: the pawn is in a cutscene (IsInActiveCutscene): gyro paused` / `scene: pause condition '<condition>' holds: gyro paused` / `scripted scene over` | Unreal: scripted moments count as a pause, so the gyro stops as the stick does: a pawn with a reflected `IsInActiveCutscene` set, or one of the profile's `PauseConditions=` (Dead Island 2: `Pawn.CharacterMovement.MovementMode==5`, its scripted scenes fly the character). A character in flying mode doesn't pause the gyro by itself (games where the player flies). `profile: pause condition '<condition>'` at start lists each one read; `... ignored: <why>` a malformed one; `scene: pause condition '<condition>' can't be read from <class> (path not found / no such number, bool or object property)`: that pawn (or controller, camera) doesn't have it, so it doesn't pause there (logged once per class). |
 | `profile: the profile file changed, views read again` | The profile was edited, or the probe added a view: its views apply at once. |
 | The gyro stops mid-game, `gyro on` still logged | Look at the lines just before: `focus: lost to <program> (window class ...)` (another window is in front), `gyro: GyroLib suspends the gyro` (activation mode, focus, pause, menus or calibration), `gyro: motion data lost`, `gyro: GyroLib's sample count restarted` (the controller was reopened) or `gyro: the controller reads as lying still` while you hold it (no real gyro data). If `applied yaw` keeps changing, `camera: stopped following the gyro (...) - target ..., camera manager ..., CameraStyle ...` names the camera that took over. |
 | `glacier: aim <camera> for N ms ...` (007 First Light) | One line per L2 aim (the first 40 of a session), and for any camera whose view didn't follow the gyro (`NOT FOLLOWED`, up to 200): what became of the aim point (`point turned`, or skipped: `none`, `unreadable`, `near`, `far`), how often the game rewrote it (`rewritten by the game`), the turn asked against how far the view moved, and the game's own mouse/keyboard input meanwhile (`game mouse input`, `keyboard`, `cursor moved`). Mouse input during an aim that didn't follow: the game took the aim from the mouse (it switched to its keyboard-and-mouse controls); keep the mouse still while playing with the controller. |
@@ -192,6 +192,7 @@ All diagnostics go to `Gyro4All\Gyro4All.log` (probe results, if enabled, to `Gy
 | `unity: profile path: field <name> not found on <class>` / `unity: profile: ...` | A `[Unity]` path doesn't fit the game: wrong name, a static field, or a value of the wrong type. Logged once each. |
 | `probe: the camera that turns with the stick or mouse: <hierarchy>` / `probe: camera VERIFIED: pitch <class>.<path>, yaw <class>.<path> -> <file>` / `probe: no camera: ...` | The Unity probe's steps. Details in `Gyro4All-probe.log`. |
 | Camera drifts slowly | Rest the pad in a menu for a few seconds (`bias=` in the status line should become non-zero) or use "Recalibrate gyro". |
+| `gyro: the reopened controller has no calibration (bias 0 0 0): gyrolib.ini loaded again for its saved one (result N)`, then `gyro: calibration restored after the reopen: bias=(...)` or `calibration still missing after the reopen` (with a notice) | The controller was reopened (another USB port, a Bluetooth drop) and GyroLib gave it no bias, so the camera would drift at the sensor's own offset. Gyro4All loads `gyrolib.ini` again for the saved manual calibration; if that doesn't bring it back, recalibrate with the controller lying still. `kept its calibration`: nothing to do. |
 | Panel doesn't open | Look for `overlay:` lines (DX11/DX10/DX9 games: also `panel:` lines, e.g. `panel: captured D3D11 swapchain ...`, `panel: D3D11 renderer ready ...`, `panel: no frame presented for N ms: panel closed`). Try from the game's pause menu. As a fallback, edit `gyrolib.ini` directly. |
 | Double motion | Steam Input or another tool is also converting the gyro to mouse. In the F10 panel, set "Steam Input mouse" to Block (or Convert movement). |
 | `steam mouse: blocked (Block) (view N)` / `converted (Convert movement)` / `passes through (<why>)` | Games using the gyro4all.dll panel: what happens to Steam Input's mouse, per the panel's "Steam Input mouse" row for view N. `left to GyroLib's own option (DX12 panel)` in DX12 games. Every 10 s while it acts: `N injected mouse motions blocked, M injected Raw Input packets emptied`. `Raw Input reads hooked (... failed)`: Block still stops the cursor, but a game reading Raw Input or DirectInput still gets Steam's motion. |
@@ -396,6 +397,12 @@ still read, and the same key in a `[Gyro4All]` section wins.
 Views=InCar
 ; Diagnostics: F7 = snapshot, F8 = log what changed (see below).
 Probe=0
+; Optional: game states that count as a pause (the gyro stops, as the stick does), for scripted scenes. A comma-
+; separated list; the gyro pauses while any of them holds. Each is Root.Sub...Property (same path syntax as Object=
+; below), alone (true / non-zero) or with == != < <= > >= and a number, true or false. The property can be a bool,
+; a number, a byte or enum (its value as a number) or an object (1 when set). Read again when the file changes.
+; e.g. Dead Island 2, whose scripted scenes fly the character (MOVE_Flying = 5):
+;PauseConditions=Pawn.CharacterMovement.MovementMode==5, PC.bCinematicMode
 
 [View.Default]
 Label=Exploration
@@ -451,8 +458,8 @@ Offsets=0x68
 RotatorSize=24
 ```
 
-In Unreal games the profile's views are read again whenever the file changes, so edits (and views the probe adds)
-apply without a restart. Its `[Gyro4All]` settings still apply from the next start.
+In Unreal games the profile's views and `PauseConditions=` are read again whenever the file changes, so edits (and
+views the probe adds) apply without a restart. Its other `[Gyro4All]` settings still apply from the next start.
 
 ### Unity camera profiles
 

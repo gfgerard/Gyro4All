@@ -38,6 +38,7 @@ Scene g_scene;
 View* g_view = nullptr;
 View* g_base = nullptr;              // the view for the view target (g_view may be one of its Match=Camera views)
 CameraMatch g_match;
+std::vector<PauseCondition> g_pause_conditions;  // the profile's PauseConditions= (read_scene)
 
 FILETIME profile_stamp() {
     WIN32_FILE_ATTRIBUTE_DATA data{};
@@ -48,11 +49,12 @@ FILETIME profile_stamp() {
 void load_profile() {
     probe_configure(has_views(settings::profile_path()));
     g_views = load_views(settings::profile_path());
+    g_pause_conditions = load_pause_conditions(settings::profile_path());
     g_profile_time = profile_stamp();
 }
 
 // The profile file changed (edited by hand, or a view added by the probe): read its views again and use them at once.
-// Only the views: the profile's [Gyro4All] settings still apply from the next start.
+// Only the views and PauseConditions=: the profile's other [Gyro4All] settings still apply from the next start.
 void check_profile_file() {
     static ULONGLONG next = 0;
     const ULONGLONG now = GetTickCount64();
@@ -63,6 +65,7 @@ void check_profile_file() {
     g_profile_time = stamp;
     log("profile: the profile file changed, views read again");
     g_views = load_views(settings::profile_path());
+    g_pause_conditions = load_pause_conditions(settings::profile_path());
     // A new view can't take a sensitivity profile's id once that profile has its tab (at start the view wins, and the
     // core turns that profile off).
     std::erase_if(g_views, [](const View& v) {
@@ -118,22 +121,41 @@ Scene read_scene() {
     s.paused = ue::prop_of(settings, "PauserPlayerState") ? ue::read_obj(settings, "PauserPlayerState") != 0
                                                           : ue::read_obj(settings, "Pauser") != 0;
     // Scripted moments count as a pause (the gyro stops, as the stick does in them):
-    // - a reflected IsInActiveCutscene on the pawn (Dead Island 2's BP_Base_Player_C);
-    // - the pawn's CharacterMovement in MOVE_Flying (5): games move the character along a scripted path with it (Dead
-    //   Island 2's in-engine scenes, where the stick doesn't turn the camera; MovementMode is 1, walking, in play).
+    // - a reflected IsInActiveCutscene on the pawn (a flag no game sets during play);
+    // - the profile's PauseConditions= (Dead Island 2: its in-engine scenes fly the character, MOVE_Flying; a generic
+    //   MOVE_Flying rule would stop the gyro in games whose player really flies).
     const bool cutscene = ue::read_bool(s.pawn, "IsInActiveCutscene", false);
-    const ue::Obj movement = ue::read_obj(s.pawn, "CharacterMovement");
-    const ue::Prop mode = ue::prop_of(movement, "MovementMode");
-    int32_t mode_value = 0;
-    const bool flying = mode && mode.element_size == 1 && ue::read_i32(movement + mode.offset, mode_value) &&
-                        (mode_value & 0xFF) == 5;
-    static int last_scripted = 0;  // 0 none, 1 cutscene, 2 flying
-    const int scripted = cutscene ? 1 : flying ? 2 : 0;
-    if (scripted != last_scripted && s.pawn) {
-        log("scene: %s", scripted == 1   ? "the pawn is in a cutscene (IsInActiveCutscene): gyro paused"
-                         : scripted == 2 ? "the pawn moves in MOVE_Flying (a scripted scene): gyro paused"
-                                         : "scripted scene over");
+    const PauseCondition* holding = nullptr;
+    for (PauseCondition& c : g_pause_conditions) {
+        const std::string& r = c.object.front();
+        const ue::Obj root = r == "PC" ? s.pc : r == "Pawn" ? s.pawn : r == "Camera" ? s.camera : s.view_target;
+        const ue::Obj o = root ? resolve_path(c.object, s) : 0;
+        double value = 0;
+        if (o && ue::read_number(o, c.property.c_str(), value)) {
+            c.missing_class = 0;
+            c.held = c.holds(value);
+        } else {
+            c.held = false;
+            // Logged once per class of the root: a pawn without the path (on foot / in a vehicle) leaves it off.
+            const ue::Obj root_class = root ? ue::class_of(root) : 0;
+            if (root && root_class != c.missing_class) {
+                c.missing_class = root_class;
+                log("scene: pause condition '%s' can't be read from %s (%s): it doesn't pause there", c.text.c_str(),
+                    ue::name_of(root_class).c_str(), o ? "no such number, bool or object property" : "path not found");
+            }
+        }
+        if (c.held && !holding) holding = &c;
+    }
+    static int last_scripted = 0;  // 0 none, 1 cutscene, 2 pause condition
+    static std::string last_condition;
+    const int scripted = cutscene ? 1 : holding ? 2 : 0;
+    const std::string condition = scripted == 2 ? holding->text : std::string{};
+    if ((scripted != last_scripted || condition != last_condition) && s.pawn) {
+        if (scripted == 1) log("scene: the pawn is in a cutscene (IsInActiveCutscene): gyro paused");
+        else if (scripted == 2) log("scene: pause condition '%s' holds: gyro paused", condition.c_str());
+        else log("scene: scripted scene over");
         last_scripted = scripted;
+        last_condition = condition;
     }
     s.paused = s.paused || scripted != 0;
     return s;

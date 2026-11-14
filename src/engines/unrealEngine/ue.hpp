@@ -68,6 +68,9 @@ bool has_world_rotation(Obj component, const Prop& relative);
 void dump_props(Obj o, const char* stop_at_class);  // log every property down to (not including) stop_at_class
 std::string value_string(Obj o, const char* name);  // "" if missing or unsupported type
 bool write_number(Obj o, const char* name, double value);
+// A bool (bitfields too), integer, byte / enum (its value), float or double as a number; an object property reads 1 when
+// set. False if o has no such property or it is of another type.
+bool read_number(Obj o, const char* name, double& out);
 
 // Probe: snapshot every float/double/rotator (structs nested up to 3 levels) of the roots and all
 // objects whose Outer chain reaches a root (components, subobjects); the diff logs what changed.

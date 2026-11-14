@@ -7,6 +7,8 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <format>
@@ -195,6 +197,89 @@ AddResult add_view(const std::wstring& path, const std::string& exe_stem, const 
     if (!WritePrivateProfileStringW(settings::kSection, L"Views", widen(join(list, ',')).c_str(), path.c_str()))
         return AddResult::Failed;
     return AddResult::Added;
+}
+
+bool PauseCondition::holds(double v) const {
+    switch (op) {
+        case Op::NonZero: return v != 0;
+        case Op::Eq: return v == value;
+        case Op::Ne: return v != value;
+        case Op::Lt: return v < value;
+        case Op::Le: return v <= value;
+        case Op::Gt: return v > value;
+        case Op::Ge: return v >= value;
+    }
+    return false;
+}
+
+bool parse_pause_condition(const std::string& text, PauseCondition& out, std::string& error) {
+    const auto trim = [](std::string s) {
+        const auto blank = [](char c) { return c == ' ' || c == '\t'; };
+        while (!s.empty() && blank(s.front())) s.erase(s.begin());
+        while (!s.empty() && blank(s.back())) s.pop_back();
+        return s;
+    };
+    out = PauseCondition{};
+    out.text = trim(text);
+    if (out.text.empty()) return error = "empty", false;
+    // The operator: the first of < > = ! in the text; two characters when followed by '='.
+    const size_t at = out.text.find_first_of("<>=!");
+    const std::string path = trim(out.text.substr(0, at));
+    if (at != std::string::npos) {
+        const bool two = at + 1 < out.text.size() && out.text[at + 1] == '=';
+        const std::string op = out.text.substr(at, two ? 2 : 1);
+        if (op == "==") out.op = PauseCondition::Op::Eq;
+        else if (op == "!=") out.op = PauseCondition::Op::Ne;
+        else if (op == "<") out.op = PauseCondition::Op::Lt;
+        else if (op == "<=") out.op = PauseCondition::Op::Le;
+        else if (op == ">") out.op = PauseCondition::Op::Gt;
+        else if (op == ">=") out.op = PauseCondition::Op::Ge;
+        else return error = "unknown operator '" + op + "' (== != < <= > >=)", false;
+        const std::string value = trim(out.text.substr(at + op.size()));
+        std::string lower = value;
+        for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+        if (lower.empty()) return error = "no value after the operator", false;
+        if (lower == "true") out.value = 1;
+        else if (lower == "false") out.value = 0;
+        else {
+            char* end = nullptr;
+            out.value = std::strtod(value.c_str(), &end);
+            if (end == value.c_str() || *end != '\0' || !std::isfinite(out.value))
+                return error = "the value '" + value + "' isn't a number, true or false", false;
+        }
+    }
+    for (const unsigned char c : path)
+        if (!std::isalnum(c) && c != '_' && c != '.' && c != '@')
+            return error = std::string("the path has a character it can't have ('") + char(c) + "')", false;
+    if (path.empty() || path.front() == '.' || path.back() == '.' || path.find("..") != std::string::npos)
+        return error = "malformed path", false;
+    std::vector<std::string> parts = split(path, '.');
+    if (parts.size() < 2) return error = "needs a root and a property, e.g. Pawn.bIsInCutscene", false;
+    const std::string& root = parts.front();
+    if (root != "PC" && root != "Pawn" && root != "Camera" && root != "ViewTarget")
+        return error = "unknown root '" + root + "' (PC, Pawn, Camera or ViewTarget)", false;
+    if (parts.back().front() == '@') return error = "the last step must be a property, not a class", false;
+    out.property = parts.back();
+    parts.pop_back();
+    out.object = std::move(parts);
+    return true;
+}
+
+std::vector<PauseCondition> load_pause_conditions(const std::wstring& path) {
+    std::vector<PauseCondition> out;
+    std::wstring list;
+    if (!settings::read(path, L"PauseConditions", list)) return out;
+    for (const std::string& item : split(narrow(list), ',')) {
+        PauseCondition c;
+        std::string error;
+        if (parse_pause_condition(item, c, error)) {
+            log("profile: pause condition '%s'", c.text.c_str());
+            out.push_back(std::move(c));
+        } else {
+            log("profile: pause condition '%s' ignored: %s", item.c_str(), error.c_str());
+        }
+    }
+    return out;
 }
 
 }  // namespace gyro4all::unreal

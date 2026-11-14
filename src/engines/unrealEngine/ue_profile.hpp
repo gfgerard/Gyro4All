@@ -75,6 +75,33 @@ bool has_views(const std::wstring& path);
 // the default view alone.
 std::vector<View> load_views(const std::wstring& path);
 
+// PauseConditions= ([Gyro4All] of the profile): states of the game that count as a pause (the gyro stops, as the stick
+// does), for scripted scenes the engine can't tell from play. A comma-separated list; the gyro pauses while any holds:
+//   PauseConditions=Pawn.CharacterMovement.MovementMode==5, PC.bCinematicMode
+// Each is Root.Sub...Property (Root = PC, Pawn, Camera or ViewTarget, steps as in Object=), alone (the value is true or
+// non-zero) or followed by == != < <= > >= and a number, true or false. The property is a bool, a number, a byte or
+// enum (its value as a number) or an object (1 when set).
+struct PauseCondition {
+    enum class Op { NonZero, Eq, Ne, Lt, Le, Gt, Ge };
+    std::string text;                 // as written (trimmed), for the log
+    std::vector<std::string> object;  // Root.Sub... (the object holding the property)
+    std::string property;
+    Op op = Op::NonZero;
+    double value = 0;
+    // runtime (ue_engine.cpp)
+    uintptr_t missing_class = 0;  // root class whose path couldn't be read, logged once per class
+    bool held = false;
+
+    bool holds(double v) const;
+};
+
+// Parses one condition. False with `error` set for an empty text, a path without a root and a property, an unknown
+// root, a character a path can't have, a missing value or one that isn't a number, true or false.
+bool parse_pause_condition(const std::string& text, PauseCondition& out, std::string& error);
+
+// The profile's PauseConditions= (invalid ones are logged and skipped). None when the profile has none.
+std::vector<PauseCondition> load_pause_conditions(const std::wstring& path);
+
 // A rotation the camera probe verified, to add to the profile as a Match=Camera view.
 struct LearnedView {
     std::string object;    // profile path ("Camera.@SBZClampCameraRotationModifier")

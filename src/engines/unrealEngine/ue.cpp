@@ -1057,6 +1057,59 @@ std::string value_string(Obj o, const char* name) {
     return buffer;
 }
 
+bool read_number(Obj o, const char* name, double& out) {
+    const Prop p = prop_of(o, name);
+    if (!p) return false;
+    const uintptr_t a = o + p.offset;
+    const std::string& t = p.type;
+    if (t == "BoolProperty") {
+        uint8_t info[4] = {};  // FieldSize, ByteOffset, ByteMask, FieldMask
+        uint8_t byte = 0;
+        if (!guarded_copy(info, p.field + g_prop_size, 4) || !rd(a + info[1], byte)) return false;
+        out = (byte & info[3]) != 0 ? 1 : 0;
+        return true;
+    }
+    if (t == "FloatProperty") {
+        float v;
+        return rd(a, v) && (out = v, true);
+    }
+    if (t == "DoubleProperty") return rd(a, out);
+    if (t == "ObjectProperty" || t == "WeakObjectProperty" || t == "ClassProperty") {
+        uintptr_t v = 0;
+        if (t == "WeakObjectProperty") {
+            int32_t index = -1;
+            if (!rd(a, index)) return false;
+            out = index >= 0 ? 1 : 0;
+            return true;
+        }
+        return rd(a, v) && (out = v != 0 ? 1 : 0, true);
+    }
+    // Integers, bytes and enums (an EnumProperty's size is its underlying integer's).
+    const bool is_signed = t == "IntProperty" || t == "Int8Property" || t == "Int16Property" || t == "Int64Property" ||
+                           t == "EnumProperty";
+    const bool is_unsigned = t == "ByteProperty" || t == "UInt16Property" || t == "UInt32Property" || t == "UInt64Property";
+    if (!is_signed && !is_unsigned) return false;
+    switch (p.element_size) {
+        case 1: {
+            uint8_t v;
+            return rd(a, v) && (out = is_signed && t != "EnumProperty" ? double(int8_t(v)) : double(v), true);
+        }
+        case 2: {
+            uint16_t v;
+            return rd(a, v) && (out = is_signed ? double(int16_t(v)) : double(v), true);
+        }
+        case 4: {
+            uint32_t v;
+            return rd(a, v) && (out = is_signed ? double(int32_t(v)) : double(v), true);
+        }
+        case 8: {
+            uint64_t v;
+            return rd(a, v) && (out = is_signed ? double(int64_t(v)) : double(v), true);
+        }
+    }
+    return false;
+}
+
 bool write_number(Obj o, const char* name, double value) {
     const Prop p = prop_of(o, name);
     if (!p) return false;

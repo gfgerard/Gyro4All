@@ -827,6 +827,51 @@ std::string foreground_window() {
     return std::format("{} (window class {})", narrow(file ? file + 1 : path), narrow(cls));
 }
 
+// A reopened controller (another USB port, a Bluetooth drop) comes back as a new GyroLib endpoint whose bias is zero: the
+// manual calibration saved in gyrolib.ini isn't applied to it, and with the pad in hand automatic calibration may not learn
+// it back, so the view drifts at the sensor's own offset until a manual recalibration (MODLOG 2026-11-14, RDR2). Once
+// motion is back, load gyrolib.ini again so its saved calibration applies to the new endpoint; if the bias still reads zero
+// a few seconds later, a notice asks for a recalibration.
+struct ReopenRestore {
+    ULONGLONG load_at = 0, check_at = 0;
+} g_reopen;
+
+bool zero_bias(const gl_vec3& b) { return b.x == 0 && b.y == 0 && b.z == 0; }
+
+void restore_after_reopen(const gl_diagnostics& d, ULONGLONG now, bool reopened) {
+    if (reopened) {
+        g_reopen.load_at = now + 1000;
+        g_reopen.check_at = 0;
+        return;
+    }
+    // Only for SDL motion: Steam Input samples never get a local bias (GyroLib), so zero is normal there.
+    if (g_reopen.load_at && now >= g_reopen.load_at && d.source == GL_SOURCE_SDL && d.accepted_samples > 200) {
+        g_reopen.load_at = 0;
+        g_reopen.check_at = now + 5000;
+        if (!zero_bias(d.bias)) {
+            log("gyro: the reopened controller kept its calibration: bias=(%.2f %.2f %.2f)", d.bias.x, d.bias.y, d.bias.z);
+            g_reopen.check_at = 0;
+            return;
+        }
+        const char* path = gl_get_settings_path(g_gyro->get());
+        const int32_t r = path && *path ? gl_load_settings(g_gyro->get(), path) : -1;
+        log("gyro: the reopened controller has no calibration (bias 0 0 0): gyrolib.ini loaded again for its saved one "
+            "(result %d)", r);
+    }
+    if (g_reopen.check_at && now >= g_reopen.check_at) {
+        g_reopen.check_at = 0;
+        if (d.source != GL_SOURCE_SDL) return;
+        if (!zero_bias(d.bias)) {
+            log("gyro: calibration restored after the reopen: bias=(%.2f %.2f %.2f)", d.bias.x, d.bias.y, d.bias.z);
+            return;
+        }
+        log("gyro: calibration still missing after the reopen (bias 0 0 0): notice to recalibrate");
+        notify::show(L"Gyro4All: the controller reconnected without its gyro calibration, so the camera may drift. "
+                     L"Put the controller down and use \"Recalibrate gyro\" in the settings panel.",
+                     12);
+    }
+}
+
 // What the "gyro on/off" line can't see: focus, GyroLib's own permission (activation mode, focus, pause, menus,
 // calibration) and the sensor stream. A gyro that stops while Gyro4All still says "gyro on" shows up here.
 void log_gyro_changes(bool focused, const gl_gyro_state& gs) {
@@ -835,8 +880,10 @@ void log_gyro_changes(bool focused, const gl_gyro_state& gs) {
     gl_diagnostics d{};
     gl_get_diagnostics(g_gyro->get(), &d);
     const ULONGLONG now = GetTickCount64();
+    // With the bias, so a drift that stops after an Alt+Tab can be told apart: bias learned while unfocused, or not the gyro.
     if (focus.changed(focused, now, 500))
-        log("focus: %s", focused ? "the game window is in front" : ("lost to " + foreground_window()).c_str());
+        log("focus: %s (bias=(%.2f %.2f %.2f))", focused ? "the game window is in front" : ("lost to " + foreground_window()).c_str(),
+            d.bias.x, d.bias.y, d.bias.z);
     if (enabled.changed(gs.enabled != 0, now, 1000))
         log("gyro: GyroLib %s", gs.enabled ? "enables the gyro"
                                            : "suspends the gyro (activation mode, focus, pause, menus or calibration)");
@@ -845,10 +892,12 @@ void log_gyro_changes(bool focused, const gl_gyro_state& gs) {
     if (source.changed(int(d.source), now, 0)) log("gyro: motion source %u", d.source);
     if (still.changed(d.stationary != 0, now, 3000))
         log("gyro: the controller %s", d.stationary ? "reads as lying still" : "moves");
-    if (d.accepted_samples < last_samples)
+    const bool reopened = d.accepted_samples < last_samples;
+    if (reopened)
         log("gyro: GyroLib's sample count restarted (%llu -> %llu): the controller was reopened",
             (unsigned long long)last_samples, (unsigned long long)d.accepted_samples);
     last_samples = d.accepted_samples;
+    restore_after_reopen(d, now, reopened);
 }
 
 // Game thread, after the SDL poll and before gl_update, once per frame (the game updates Steam once per frame too).

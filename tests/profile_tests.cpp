@@ -645,6 +645,44 @@ void test_add_view_rejects_empty() {
     CHECK(GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES);
 }
 
+void test_pause_conditions() {
+    std::puts("profile: PauseConditions= parses each form and rejects bad ones");
+    PauseCondition c;
+    std::string error;
+    CHECK(parse_pause_condition(" Pawn.CharacterMovement.MovementMode == 5 ", c, error));
+    CHECK(c.text == "Pawn.CharacterMovement.MovementMode == 5" && c.property == "MovementMode");
+    CHECK(c.object.size() == 2 && c.object[0] == "Pawn" && c.object[1] == "CharacterMovement");
+    CHECK(c.op == PauseCondition::Op::Eq && c.value == 5 && c.holds(5) && !c.holds(1));
+    CHECK(parse_pause_condition("PC.bCinematicMode", c, error));
+    CHECK(c.op == PauseCondition::Op::NonZero && c.object.size() == 1 && c.holds(1) && !c.holds(0));
+    CHECK(parse_pause_condition("Camera.@BlendCam_C.Weight>=0.5", c, error));
+    CHECK(c.op == PauseCondition::Op::Ge && c.object.size() == 2 && c.object[1] == "@BlendCam_C" && c.holds(0.5) && !c.holds(0.4));
+    CHECK(parse_pause_condition("ViewTarget.bHidden != TRUE", c, error) && c.op == PauseCondition::Op::Ne && c.value == 1);
+    CHECK(parse_pause_condition("Pawn.Mode<2", c, error) && c.op == PauseCondition::Op::Lt && c.holds(1) && !c.holds(2));
+    CHECK(parse_pause_condition("Pawn.Mode<=2", c, error) && c.op == PauseCondition::Op::Le && c.holds(2));
+    CHECK(parse_pause_condition("Pawn.Mode > -1", c, error) && c.op == PauseCondition::Op::Gt && c.holds(0));
+    CHECK(parse_pause_condition("Pawn.bFlag==false", c, error) && c.value == 0 && c.holds(0));
+    for (const char* bad : {"", "   ", "Pawn", "Pawn.", ".Pawn.X", "Pawn..X", "Actor.X", "Pawn.X = 5", "Pawn.X ==",
+                            "Pawn.X == five", "Pawn.X == 5abc", "Pawn.X Y", "Pawn.@Class", "Pawn.X =< 5", "Pawn.X !5"}) {
+        error.clear();
+        const bool ok = parse_pause_condition(bad, c, error);
+        CHECK(!ok && !error.empty());
+        if (ok) std::printf("  accepted '%s'\n", bad);
+    }
+
+    std::puts("profile: PauseConditions= list from [Gyro4All], else [GyroUE]; bad items skipped");
+    const std::wstring path = temp_profile(L"pause_conditions");
+    write_file(path, "[Gyro4All]\r\nPauseConditions=Pawn.CharacterMovement.MovementMode==5, Actor.X, Pawn.IsInScene\r\n");
+    std::vector<PauseCondition> list = load_pause_conditions(path);
+    CHECK(list.size() == 2 && list[0].value == 5 && list[1].property == "IsInScene");
+    write_file(path, "[GyroUE]\r\nPauseConditions=PC.bCinematicMode\r\n");
+    list = load_pause_conditions(path);
+    CHECK(list.size() == 1 && list[0].object[0] == "PC");
+    write_file(path, "[Gyro4All]\r\nViews=\r\n");
+    CHECK(load_pause_conditions(path).empty());
+    DeleteFileW(path.c_str());
+}
+
 void test_split() {
     std::puts("profile: split trims and drops empty items");
     const std::vector<std::string> parts = split(" a, b ,,c ", ',');
@@ -1794,6 +1832,20 @@ void test_unity_discovery() {
     CHECK(seam.add(2500, -179.9, 0, 1500));
     seam.reset();  // another camera: from the start
     CHECK(!seam.add(2600, -179.9, 0, 1500));
+    // Gameplay for the search by itself: the player turned the camera with look input.
+    PlayerTurnGate gate;
+    for (int i = 0; i < 20; ++i) CHECK(!gate.add(0.01, 0, 16, false));  // a still splash camera, idle 320 ms
+    for (int i = 0; i < 10; ++i) CHECK(!gate.add(1, 0, 16, true));      // turned, but its own motion isn't known yet
+    for (int i = 0; i < 50; ++i) gate.add(0.01, 0, 16, false);
+    CHECK(gate.add(1, 0, 16, true) && gate.turned());
+    PlayerTurnGate title_pan;  // a title camera that pans by itself turns as fast with look input as without
+    for (int i = 0; i < 100; ++i) title_pan.add(0.5, 0, 16, false);
+    for (int i = 0; i < 40; ++i) CHECK(!title_pan.add(0.5, 0, 16, true));
+    PlayerTurnGate still;  // a camera that doesn't answer the stick never passes
+    for (int i = 0; i < 100; ++i) CHECK(!still.add(0, 0, 16, i % 2 == 0));
+    PlayerTurnGate shot_cut;  // a shot cut during look input isn't a turn; the seam isn't either
+    for (int i = 0; i < 100; ++i) shot_cut.add(0, 0, 16, false);
+    CHECK(!shot_cut.add(90, 0, 16, true) && !shot_cut.add(359.5, 0, 16, true));
     // The first real turns judge a view found by itself.
     LookStateCheck check;
     CHECK(check.add(10, 10) == LookStateCheck::Verdict::None);
@@ -1876,6 +1928,17 @@ void test_unity_probe_candidates() {
     keys = profile_keys(r);
     CHECK(value("YawObjectType") == "Game.Body" && value("CameraField") == "(none)");
     CHECK(value("PitchObject") == "(none)" && value("YawObject") == "(none)");
+    CHECK(value("ObjectName") == "(none)" && value("YawObjectName") == "(none)");
+    // Two instances of one class, one per axis (Neon White's MouseLook): told apart by their GameObjects.
+    ProbeResult two{"MouseLook", "rotationY", "MouseLook", "rotationX", "", 1, 1};
+    two.pitch_owner_name = "PlayerCamera";
+    two.yaw_owner_name = "Player";
+    keys = profile_keys(two);
+    CHECK(value("ObjectType") == "MouseLook" && value("YawObjectType") == "MouseLook" && value("ObjectName") == "PlayerCamera" &&
+          value("YawObjectName") == "Player");
+    two.yaw_owner_name = "PlayerCamera";  // same name: nothing to tell them apart with
+    keys = profile_keys(two);
+    CHECK(value("YawObjectType") == "(none)" && value("ObjectName") == "(none)");
     // Transforms a script holds: no floats, no units.
     ProbeResult t;
     t.pitch_class = t.yaw_class = "Player";
@@ -1997,6 +2060,7 @@ int main() {
     test_load_trailing_tab();
     test_add_view_property();
     test_add_view_rejects_empty();
+    test_pause_conditions();
     test_split();
     test_stick_model();
     test_stick_fallback_not_when_writes_last();
