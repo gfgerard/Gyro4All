@@ -41,6 +41,10 @@ with one-hit hardware breakpoints until a write sticks and the view follows (ste
 the user before attaching the debugger and have them save first; never on games with anti-debugging (Themida, Denuvo):
 there, use Gyro4All's own write watcher (`WriteWatch` in `Gyro4All.ini`, no debugger; camtrace README), which can also
 follow the game's mouse or pad input forward (`r:ri+24`, `r:xi+c`) when the copies lead nowhere.
+Order of the tools (camtrace README, "Which tool when"): static triage of the exe first (protection, imports, RTTI,
+community tables; game closed), then `guided.py`, then read the code around a static address with `refs` and a
+disassembler, and only then breakpoints, for what reading can't settle (virtual calls, heap objects, several
+writers). The debugger can't search: it needs an address from `guided.py`. A write test is always the proof.
 After finding the camera, remember to search for FOV data for zoom compensation feature.
 
 ## Ground rules

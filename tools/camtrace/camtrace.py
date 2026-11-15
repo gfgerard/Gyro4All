@@ -375,7 +375,8 @@ def cmd_bp(p, a):
     if a.cond:  # only hits where this cdb expression is true, e.g. "poi(@rcx+0x70) == 0x22b1cff4c00"
         act = f".if ({a.cond}) {{{act}}} .else {{gc}}"
     with open(script, "w") as f:
-        f.write("\n".join(["sxi *", "sxi ld", "sxi ud", "sxi ct", "sxi et", "sxi cpr", "sxi epr",
+        # sxi av: access violations the game (or Gyro4All's guarded reads) handle itself; `sxi *` leaves av breaking.
+        f.write("\n".join(["sxi *", "sxi av", "sxi ld", "sxi ud", "sxi ct", "sxi et", "sxi cpr", "sxi epr",
                            f'ba {kind} {at:#x} "{act}"', "g", ".echo CAMTRACE-NOT-HIT", "bc *", ".detach", "q", ""]))
     print(f"breakpoint on {'execution of' if a.exec else 'reads or writes of' if a.read else 'writes to'} {p.name(at)} ({at:#x}); switch to the game (it"
           f" fires on the next {'run' if a.exec else 'access' if a.read else 'write'}, one hit, then the debugger detaches). Output: {out}", flush=True)

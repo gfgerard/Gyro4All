@@ -15,6 +15,25 @@ and no writes, so it also works on Denuvo and Themida games. It finds the view's
 Then write-test what it lists, and only use `bp` when every candidate is a copy the game rewrites. **On games with
 anti-debugging (Denuvo, Themida) use Gyro4All's own write watcher instead of `bp`** (below).
 
+## Which tool when (cheapest first)
+
+The guided search, the exe file and the debugger don't compete: each needs what the previous one gives.
+
+1. **Static triage of the exe, game closed** (minutes, no risk): protection (a packed `.text` with entropy near 8,
+   Denuvo or Themida: then no `bp`, and static reading only on an unpacked dump), imports (input API, graphics API),
+   MSVC RTTI and strings naming camera classes (`.?AV...Camera...@@` leads to vtables, then to objects), community
+   Cheat Engine tables. This rarely finds the source by itself; it says which routes are open.
+2. **`guided.py`** (a minute, read-only): the view's copies and stored angles, with their addresses. The debugger
+   can't search, so this always comes before it.
+3. **Read the exe from a static address**: `refs` on its RVA lists the code that touches it; disassemble those functions
+   and follow the stores back through the registers. When the chain stays in one or two functions this replaces
+   breakpoints: in NieR:Automata (MODLOG 2026-11-15) reading the orbit update showed the angles and their velocity
+   directly once the camera object was known.
+4. **`bp` (or WriteWatch on protected games)** only where reading is ambiguous: virtual calls, heap objects (no static
+   address, so `refs` finds nothing), several writers. Each hit costs a round of the user moving the stick, a save
+   first, and some risk.
+5. **`write-test`** always last: the only proof that a value is the source.
+
 ## Guided search (start here)
 
 `uv run --with numpy python -I tools/camtrace/guided.py <exe> [--ref ADDR] [--eye ADDR] [--poses 6] [--exe-only] [--up z] [--out FILE]`

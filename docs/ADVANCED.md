@@ -172,7 +172,7 @@ All diagnostics go to `Gyro4All\Gyro4All.log` (probe results, if enabled, to `Gy
 | `engine: none detected, using Unreal` | The game's exe and folder don't look like an Unreal game (renamed exe outside `Binaries\Win64`). Unreal is used anyway; `Engine=Unreal` in the `[Gyro4All]` section of `Gyro4All\Gyro4All.ini` (or the game's profile) sets it explicitly. |
 | `applied yaw` changes but the camera doesn't move | Custom camera: see [Finding the camera](#finding-the-camera-of-a-new-game). |
 | `camera: '<view>' is rewritten by the game` (or `is ignored by the camera`), `trying '<next>' (N degrees carried over)` / `the camera follows view '<view>' now (Match=Camera)` | The game switched between rotations of the same view target and Gyro4All followed it (see [Several cameras for the same view target](#several-cameras-for-the-same-view-target-matchcamera)). |
-| `probe: started during play (...)` / `probe: camera learned: ...` / `probe: stopped (...)` | A probe started from the probe key or by AutoProbe, and what became of it (see [Learning a camera during play](#learning-a-camera-during-play-no-restart)). |
+| `probe: started during play (...)` / `probe: camera learned: ...` / `probe: stopped (...)` | A probe started from the probe key or by AutoProbe, and what became of it (see [Learning a camera during play](#learning-a-camera-during-play-no-restart)). `probe: ... turns yaw only: live test of N rotation(s) that followed the camera's pitch alone`, then `probe: camera learned: yaw in <rotation> (view N '<label>'), pitch in <rotation>: PitchObject= written to [View.<key>]`: the camera keeps yaw and pitch in two objects (see "Yaw and pitch in two objects" there). |
 | `update rotation: <class> UpdateRotation is vtable[N] at <module>+0x... (reads RotationInput +0x... first): hooked, the gyro goes into RotationInput` | A `Property=RotationInput` view: the gyro is added to the stick's look input inside the controller's `UpdateRotation` (see [The stick's look input](#the-sticks-look-input-propertyrotationinput)). `N functions of its vtable read RotationInput first ... not found` / `not unique`: the controller's `UpdateRotation` couldn't be told apart, so that view doesn't turn (report it with the log). |
 | `scene: the pawn is in a cutscene (IsInActiveCutscene): gyro paused` / `scene: pause condition '<condition>' holds: gyro paused` / `scripted scene over` | Unreal: scripted moments count as a pause, so the gyro stops as the stick does: a pawn with a reflected `IsInActiveCutscene` set, or one of the profile's `PauseConditions=` (Dead Island 2: `Pawn.CharacterMovement.MovementMode==5`, its scripted scenes fly the character). A character in flying mode doesn't pause the gyro by itself (games where the player flies). `profile: pause condition '<condition>'` at start lists each one read; `... ignored: <why>` a malformed one; `scene: pause condition '<condition>' can't be read from <class> (path not found / no such number, bool or object property)`: that pawn (or controller, camera) doesn't have it, so it doesn't pause there (logged once per class). |
 | `profile: the profile file changed, views read again` | The profile was edited, or the probe added a view: its views apply at once. |
@@ -421,8 +421,14 @@ Label=Exploration
 ;   ActiveList=0x35D0    with Object=...@ClassA|ClassB: the object before @ keeps a list (TArray) of objects there,
 ;                        newest first; the view is active while its first entry is of those classes, and turns it
 ;                        (one camera object per mode). ActiveListSkip=ClassC|ClassD: entries to look past
-;   PitchView=1          this view turns yaw only; its pitch goes into view 1's rotation (a camera that keeps
-;                        yaw and pitch in two objects; the probe writes it for a camera that only followed yaw)
+;   PitchObject=Pawn.Camera     this view turns yaw only; its pitch goes into this rotation instead, for a camera
+;   PitchProperty=RelativeRotation  that keeps yaw and pitch in two objects (AMID EVIL: ControlRotation turns the
+;                        character, the camera component the pitch). Same syntax as Object= / Property=; raw
+;                        state: PitchOffsets=0x2A0 and PitchRotatorSize=12 instead of PitchProperty. Without
+;                        PitchObject the pitch rotation is on this view's own object. The probe writes it when
+;                        the camera's yaw followed one rotation and its pitch another
+;   PitchView=1          older form: this view turns yaw only; its pitch goes into view 1's rotation (the probe
+;                        writes it for a yaw-only camera when it found no rotation for the pitch)
 ;   WorldRotation=1      with Property=RelativeRotation of a scene component that uses absolute rotation: also
 ;                        writes the component's world rotation (see "Components with absolute rotation")
 ;   RecenterPitch=0      level pitch for the recenter button, in this view's rotator (degrees, default 0);
@@ -975,6 +981,18 @@ rotation the profile already has isn't added twice), and Gyro4All uses it at onc
 
 A probe started with `Probe=1` in a game that already has a profile adds its camera the same way. Only in a game with
 no profile does it still write the profile's default view (a restart applies it).
+
+**Yaw and pitch in two objects.** Some first-person games turn the character with `ControlRotation` (the yaw) and keep
+the pitch in another object, e.g. the camera component's `RelativeRotation` (AMID EVIL): the live test then says
+`yaw followed, pitch didn't move`. The probe also records, in every capture that turned the camera 10° or more up or
+down, the rotations whose pitch followed the camera's while their yaw stayed put (`pitch only ...` in
+`Gyro4All-probe.log`), and when the best rotation turns yaw only, it tests those with pitch turns alone
+(`probe test (pitch, round N): ...: MOVES THE CAMERA'S PITCH`). The one that passes twice becomes the view's
+`PitchObject=` / `PitchProperty=` (or `PitchOffsets=`): written into the view that already turns the yaw (usually
+`[View.Default]`, `probe: camera learned: yaw in ..., pitch in ...`), else into the new `Match=Camera` view. So turn
+the camera **up or down too** in at least one capture. A component's rotation caches (a quaternion followed by the
+rotator made from it, which reads back the transform) are ignored as outputs: writing them turns the view only until
+the component moves.
 
 ## Building from source
 
