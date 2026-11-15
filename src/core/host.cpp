@@ -229,6 +229,29 @@ bool profile_button_down(SDL_Gamepad* pad, int button) {
     return SDL_GetGamepadButton(pad, SDL_GamepadButton(button));
 }
 
+// Steam Controller (2026): SDL reports the capacitive grips as plain buttons (misc5 = raw b21 left, misc6 = raw b20
+// right; measured on the puck). GyroLib only offers its GRIP SENSOR activation for buttons whose joystick property
+// marks them as grips, which SDL doesn't set: Gyro4All sets it (GyroLib re-reads it within 500 ms). The mapping
+// check keeps other layouts out.
+void mark_grip_sensors(SDL_Gamepad* pad) {
+    static SDL_JoystickID marked = 0;
+    const SDL_JoystickID id = pad ? SDL_GetGamepadID(pad) : 0;
+    if (!pad || id == marked || SDL_GetGamepadVendor(pad) != 0x28DE) return;
+    marked = id;
+    char* mapping = SDL_GetGamepadMapping(pad);
+    const bool layout = mapping && std::strstr(mapping, "misc5:b21,") && std::strstr(mapping, "misc6:b20,");
+    if (!layout)
+        log("gyro: Valve controller %04X:%04X, %d raw buttons, not marked for grip sensors (mapping %s)",
+            SDL_GetGamepadVendor(pad), SDL_GetGamepadProduct(pad), SDL_GetNumJoystickButtons(SDL_GetGamepadJoystick(pad)),
+            mapping ? mapping : "none");
+    SDL_free(mapping);
+    if (!layout) return;
+    const SDL_PropertiesID props = SDL_GetJoystickProperties(SDL_GetGamepadJoystick(pad));
+    SDL_SetNumberProperty(props, "gyrolib.controls.button.21.grip_touch", GL_LEFT);
+    SDL_SetNumberProperty(props, "gyrolib.controls.button.20.grip_touch", GL_RIGHT);
+    log("gyro: Steam Controller grip sensors marked (GRIP SENSOR activation available)");
+}
+
 // Updates the profiles from the selected controller after gl_update: the result is reported on the next frame.
 // gameplay = the default view may turn the camera now.
 void update_sensitivity_profiles(SDL_Gamepad* pad, bool gameplay) {
@@ -418,7 +441,31 @@ void register_views() {
     sync_zoom_support(views);
 }
 
+// Steam hides the controllers it handles from the game's SDL (SDL_GAMECONTROLLER_IGNORE_DEVICES, "0xVVVV/0xPPPP,...")
+// and shows its virtual pad instead. For the Steam Controller (2026), whose Steam Input can't be turned off, that
+// virtual pad has no grip sensors: un-hide the real one (wired 1302, puck 1304) for GyroLib's SDL, read when GyroLib
+// loads it. The game still gets Steam's virtual pad (XInput translation stays off: a real XInput pad is connected).
+void unhide_steam_controller() {
+    wchar_t list[4096] = {};
+    const DWORD n = GetEnvironmentVariableW(L"SDL_GAMECONTROLLER_IGNORE_DEVICES", list, 4096);
+    if (n == 0 || n >= 4096) return;
+    std::wstring kept, removed;
+    for (const wchar_t* p = list; *p;) {
+        const wchar_t* end = std::wcschr(p, L',');
+        std::wstring item(p, end ? end - p : std::wcslen(p));
+        p = end ? end + 1 : p + item.size();
+        std::wstring upper = item;
+        std::transform(upper.begin(), upper.end(), upper.begin(), ::towupper);
+        auto& out = upper == L"0X28DE/0X1302" || upper == L"0X28DE/0X1304" ? removed : kept;
+        if (!item.empty()) out += (out.empty() ? L"" : L",") + item;
+    }
+    log("gyro: Steam hides from SDL: %s%s", narrow(list).c_str(),
+        removed.empty() ? "" : (" (Steam Controller " + narrow(removed) + " shown to GyroLib for its grip sensors)").c_str());
+    if (!removed.empty()) SetEnvironmentVariableW(L"SDL_GAMECONTROLLER_IGNORE_DEVICES", kept.c_str());
+}
+
 bool start_gyro() {
+    unhide_steam_controller();
     const std::wstring dll = settings::install_dir() + L"\\gyrolib.dll";
     if (!deps::check_gyrolib(dll)) return false;  // the game's own runtime DLLs would crash GyroLib
     HMODULE gyrolib = LoadLibraryW(dll.c_str());
@@ -968,6 +1015,7 @@ void frame() {
     // GyroLib's flick stick needs the game's own right-stick rotation suppressed: possible for the controller shown to
     // the game as XInput, or when the game reads the controller itself through a checked report layout.
     SDL_Gamepad* pad = xinput::selected_gamepad(g_gyro->get(), g_input->get(), out);
+    mark_grip_sensors(pad);
     overlay::draw(pad);  // D3D11/D3D10/D3D9 games: GyroLib's static panel, built after gl_update
     // Gamepad access to the Gyro4All settings window: L3+R3 (both stick clicks) while the panel is open folds or
     // unfolds it. ImGui's gamepad nav cannot cross windows (the panel of GyroLib and the settings window are
