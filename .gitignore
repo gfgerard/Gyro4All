@@ -12,6 +12,7 @@ third_party/
 *.bak
 extract/
 .vs/
+.vscode/
 bench/*.csv
 games/
 GyroCamProbe/
