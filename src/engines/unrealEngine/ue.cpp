@@ -1180,6 +1180,13 @@ struct Verdict {
     bool pitch_followed = false, turns_pawn = false;
 };
 std::map<std::string, Verdict> g_verdicts;  // live test results by ProbeGroup id
+// Pitch-only rotations: their pitch followed the camera's while their yaw stayed put, in the scored diffs that turned
+// the pitch enough. For cameras that keep the axes in two objects, whose yaw rotation alone moved the camera in the
+// live test (Amid Evil: ControlRotation turns the character, the camera component's RelativeRotation the pitch).
+constexpr double kPitchScoreMin = 10;  // degrees of pitch a scored diff needs to score pitch-only rotations
+std::map<std::string, Candidate> g_pitch_candidates;
+int g_pitch_diffs = 0;
+std::map<std::string, Verdict> g_pitch_verdicts;
 
 int32_t properties_size(Obj cls) {  // UStruct::PropertiesSize follows ChildProperties (UE 4.25-5.x)
     int32_t n = 0;
@@ -1230,12 +1237,17 @@ void score(const std::string& key, Candidate c, std::vector<std::string>& seen, 
 // (dp, dy): it holds the POV's exact values, or it changed by the same amounts (a copy kept with an offset or a
 // small lag: Hogwarts Legacy's camera stack keeps its pitch 3 degrees above the POV's). The scored turn is at least
 // 10 degrees of yaw, so an unrelated value matching both changes is unlikely; the live test decides anyway.
+// A yaw-only rotation counts too: its yaw followed while its pitch stayed put (AMID EVIL's ControlRotation, whose
+// camera keeps the pitch elsewhere). Otherwise it would only score in captures without pitch, and the probe asks for
+// some; the live test tells it apart (yaw only), and the pitch is then looked for on its own (probe_pitch_groups).
 bool follows(double p0, double y0, double p, double y, const double now[3], double dp, double dy, bool& exact) {
     exact = false;
     if (!std::isfinite(p) || !std::isfinite(y) || !std::isfinite(p0) || !std::isfinite(y0)) return false;
     if (std::abs(p) > 360 || std::abs(y) > 1e5 || near_angle(y0, y)) return false;  // not an angle, or didn't turn
     if (near_angle(y, now[1]) && near_angle(p, now[0])) return exact = true;  // pitch 350 = -10 (UE5 keeps 0..360)
     const double tol_y = (std::max)(0.6, std::abs(dy) * 0.03), tol_p = (std::max)(0.6, std::abs(dp) * 0.03);
+    const bool yaw = std::abs(wrap180((y - y0) - dy)) < tol_y || near_angle(y, now[1]);
+    if (yaw && near_angle(p0, p)) return exact = near_angle(y, now[1]), true;  // yaw only
     return std::abs(wrap180((y - y0) - dy)) < tol_y && std::abs(wrap180((p - p0) - dp)) < tol_p;
 }
 
@@ -1501,6 +1513,41 @@ bool camera_fov(Obj camera, double reference_horizontal, double& current_vertica
     return fov::is_valid(current_vertical) && fov::is_valid(reference_vertical);
 }
 
+// A pitch-only rotation (p0/y0 at the snapshot): its pitch turned by the camera's pitch turn dp (or holds the POV's
+// pitch) while its yaw stayed put, e.g. a first-person camera component's RelativeRotation under a capsule that turns
+// the yaw.
+bool follows_pitch_only(double p0, double y0, double p, double y, const double now[3], double dp, bool& exact) {
+    exact = false;
+    if (!std::isfinite(p) || !std::isfinite(y) || !std::isfinite(p0) || !std::isfinite(y0)) return false;
+    if (std::abs(p) > 360 || std::abs(y) > 1e5 || std::abs(wrap180(y - y0)) > 0.6) return false;
+    if (std::abs(wrap180(p - p0)) < std::abs(dp) * 0.5) return false;  // didn't turn with it
+    if (near_angle(p, now[0])) return exact = true;
+    return std::abs(wrap180((p - p0) - dp)) < (std::max)(0.6, std::abs(dp) * 0.03);
+}
+
+// A raw rotator at `off` that is a USceneComponent rotation cache (FRotationConversionCache: a quaternion, then the
+// rotator made from it; Amid Evil's components +0x180/+0x190 and +0x1A0/+0x1B0, Dead Island 2's capsule +0x200 and
+// +0x220). GetComponentRotation() returns that rotator while the quaternion is unchanged, so a write turns the view
+// until the component moves again: it passed the live test standing still in both games, but it is an output.
+bool is_rotation_cache(const std::vector<uint8_t>& bytes, size_t off, bool wide) {
+    const size_t elem = wide ? 8 : 4, quat = 4 * elem;
+    if (off < quat || off + 3 * elem > bytes.size()) return false;
+    double q[4], r[3];
+    for (size_t i = 0; i < 4; ++i) {
+        if (wide) std::memcpy(&q[i], &bytes[off - quat + i * elem], 8);
+        else { float f; std::memcpy(&f, &bytes[off - quat + i * elem], 4); q[i] = f; }
+    }
+    for (size_t i = 0; i < 3; ++i) {
+        if (wide) std::memcpy(&r[i], &bytes[off + i * elem], 8);
+        else { float f; std::memcpy(&f, &bytes[off + i * elem], 4); r[i] = f; }
+    }
+    const double norm = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+    if (!std::isfinite(norm) || std::abs(norm - 1) > 0.01 || !std::isfinite(r[2]) || std::abs(r[2]) > 360) return false;
+    double made[4];
+    rotator_quat(r[0], r[1], r[2], made);
+    return same_rotation(q, made);
+}
+
 size_t probe_snapshot(const std::vector<std::pair<std::string, Obj>>& roots) {
     g_leaves.clear();
     if (!g_ready) return 0;
@@ -1679,7 +1726,20 @@ int probe_diff(bool verbose) {
         return 0;
     }
     ++g_scored_diffs;
-    std::vector<std::string> seen;
+    const bool score_pitch = std::abs(dp) >= kPitchScoreMin;
+    if (score_pitch) ++g_pitch_diffs;
+    std::vector<std::string> seen, pitch_seen;
+    int pitch_found = 0, caches = 0;
+    // A pitch-only rotation, scored apart (g_pitch_candidates).
+    auto score_pitch_only = [&](const std::string& key, Candidate c, bool exact, const std::string& label) {
+        if (std::find(pitch_seen.begin(), pitch_seen.end(), key) != pitch_seen.end()) return;
+        pitch_seen.push_back(key);
+        auto [it, inserted] = g_pitch_candidates.try_emplace(key, std::move(c));
+        ++it->second.hits;
+        if (exact) ++it->second.exact;
+        ++pitch_found;
+        probe_log("  pitch only %s%s", label.c_str(), exact ? "" : " (moved by the same amount)");
+    };
     std::vector<uintptr_t> reflected;  // addresses of reflected rotators (the raw scan skips them)
     int found = 0;
     for (const Leaf& l : g_leaves) {
@@ -1688,7 +1748,18 @@ int probe_diff(bool verbose) {
         double v[3];
         if (&l == pov || !read_leaf(l, v)) continue;
         bool exact = false;
-        if (!follows(l.base[0], l.base[1], v[0], v[1], now, dp, dy, exact)) continue;
+        if (!follows(l.base[0], l.base[1], v[0], v[1], now, dp, dy, exact)) {
+            // Pitch only: never the camera manager's output (its POV caches).
+            if (!score_pitch || !follows_pitch_only(l.base[0], l.base[1], v[0], v[1], now, dp, exact)) continue;
+            Candidate c;
+            split_label(l.label, c.object, c.cls, c.property);
+            c.size = l.kind == 2 ? 12 : 24;
+            const int32_t camera_engine = c.object == "Camera" ? engine_part_size(l.obj, "PlayerCameraManager") : 0;
+            if (c.object.rfind("Camera", 0) == 0 && !(camera_engine > 0 && l.address >= l.obj + camera_engine)) continue;
+            score_pitch_only(c.object + "|" + c.property, c, exact,
+                             std::format("{} (P {:.2f} -> {:.2f}, Y {:.2f})", l.label, l.base[0], v[0], v[1]));
+            continue;
+        }
         Candidate c;
         split_label(l.label, c.object, c.cls, c.property);
         c.size = l.kind == 2 ? 12 : 24;
@@ -1716,6 +1787,7 @@ int probe_diff(bool verbose) {
         std::vector<uint8_t> cur(r.bytes.size());
         if (!guarded_copy(cur.data(), r.o, cur.size())) continue;
         const int32_t scene = scene_component_size(r.o);
+        const bool is_scene = is_a(r.o, "SceneComponent");
         // The camera manager is mostly output (POV caches), but a game's own subclass may keep its look state past
         // the engine's PlayerCameraManager part (Life is Strange: LiSPlayerCameraManager +0x33CC/+0x33FC).
         const bool camera_root = r.label.rfind("Camera(", 0) == 0;
@@ -1738,8 +1810,30 @@ int probe_diff(bool verbose) {
                     p = fp, y = fy, p0 = fp0, y0 = fy0;
                 }
                 bool exact = false;
-                if (!follows(p0, y0, p, y, now, dp, dy, exact)) continue;
+                const bool both = follows(p0, y0, p, y, now, dp, dy, exact);
+                if (!both && (!score_pitch || !follows_pitch_only(p0, y0, p, y, now, dp, exact))) continue;
                 if (std::find(reflected.begin(), reflected.end(), r.o + off) != reflected.end()) continue;
+                if (is_scene && is_rotation_cache(cur, off, wide != 0)) {
+                    ++caches;
+                    continue;
+                }
+                const bool camera_output =
+                    r.label.rfind("Camera", 0) == 0 && !(camera_root && camera_engine > 0 && int32_t(off) >= camera_engine);
+                if (!both) {
+                    // Pitch only: never the camera manager's output nor a component's transform state.
+                    if (camera_output || (scene > 0 && int32_t(off) < scene)) continue;
+                    Candidate c;
+                    std::string ignored;
+                    split_label(r.label, c.object, c.cls, ignored);
+                    c.offset = int32_t(off);
+                    c.size = wide ? 24 : 12;
+                    char key[32];
+                    std::snprintf(key, sizeof key, "|+0x%X|%d", c.offset, c.size);
+                    score_pitch_only(c.object + key, c, exact,
+                                     std::format("{}+0x{:X} ({} rotator, P {:.2f} -> {:.2f})", r.label, off,
+                                                 wide ? "double" : "float", p0, p));
+                    continue;
+                }
                 Candidate c;
                 std::string ignored;
                 split_label(r.label, c.object, c.cls, ignored);
@@ -1758,6 +1852,9 @@ int probe_diff(bool verbose) {
             }
         }
     }
+    if (caches) probe_log("probe: %d component rotation cache(s) ignored (they read back the transform: an output)", caches);
+    if (score_pitch)
+        probe_log("probe: %d rotation(s) followed the camera's pitch alone (pitch diff #%d)", pitch_found, g_pitch_diffs);
     probe_log("probe: %d rotations followed the camera (scored diff #%d)", found, g_scored_diffs);
     log("probe: diff of snapshot #%d (%d rotators, %d numbers, %d raw matches, %d candidates, scored #%d) -> "
         "Gyro4All-probe.log", g_snapshots, rotators, scalars, matches, found, g_scored_diffs);
@@ -1830,12 +1927,55 @@ void probe_verdict(const std::string& id, int verdict, const std::string& note, 
     g_verdicts[id] = {verdict, note, pitch_followed, turns_pawn};
 }
 
+std::vector<ProbeGroup> probe_pitch_groups() {
+    std::vector<ProbeGroup> groups;
+    if (g_pitch_diffs < 1) return groups;
+    // Followed the camera's pitch alone in most diffs that turned the pitch (one is enough: few captures turn it much).
+    const int needed = (std::max)(1, (g_pitch_diffs + 1) / 2);
+    for (const auto& [key, c] : g_pitch_candidates) {
+        if (c.hits < needed) continue;
+        auto it = std::find_if(groups.begin(), groups.end(), [&](const ProbeGroup& g) {
+            return c.property.empty() && g.property.empty() && g.object == c.object && g.size == c.size;
+        });
+        if (it == groups.end()) {
+            ProbeGroup g;
+            g.object = c.object, g.cls = c.cls, g.property = c.property, g.size = c.size;
+            g.id = "pitch|" + c.object + "|" + (c.property.empty() ? "raw" + std::to_string(c.size) : c.property);
+            groups.push_back(g);
+            it = groups.end() - 1;
+        }
+        if (c.property.empty()) it->offsets.push_back(c.offset);
+        it->hits = (std::max)(it->hits, c.hits);
+        it->exact = (std::max)(it->exact, c.exact);
+    }
+    for (ProbeGroup& g : groups) {
+        std::sort(g.offsets.begin(), g.offsets.end());
+        if (auto v = g_pitch_verdicts.find(g.id); v != g_pitch_verdicts.end()) g.verdict = v->second.result, g.note = v->second.note;
+    }
+    // Verified first; then the pawn's objects (a first-person camera component), then reflected before raw.
+    std::stable_sort(groups.begin(), groups.end(), [](const ProbeGroup& a, const ProbeGroup& b) {
+        if ((a.verdict == kMovesCamera) != (b.verdict == kMovesCamera)) return a.verdict == kMovesCamera;
+        const bool pa = a.object.rfind("Pawn", 0) == 0, pb = b.object.rfind("Pawn", 0) == 0;
+        if (pa != pb) return pa;
+        if (a.hits != b.hits) return a.hits > b.hits;
+        return a.property.empty() < b.property.empty();
+    });
+    return groups;
+}
+
+void probe_pitch_verdict(const std::string& id, int verdict, const std::string& note) {
+    g_pitch_verdicts[id] = {verdict, note, verdict == kMovesCamera, false};
+}
+
 void probe_reset() {
     g_leaves.clear();
     g_raw.clear();
     g_candidates.clear();
     g_verdicts.clear();
     g_scored_diffs = 0;
+    g_pitch_candidates.clear();
+    g_pitch_verdicts.clear();
+    g_pitch_diffs = 0;
 }
 
 std::string probe_suggestion(const std::string& exe_stem, std::string& summary, bool as_profile, bool& verified) {
@@ -1906,6 +2046,23 @@ std::string probe_suggestion(const std::string& exe_stem, std::string& summary, 
         text += "[View.Default]\nLabel=Exploration\n" + view_lines(*best, "");
         summary = best->object + (best->property.empty() ? std::format(" raw x{}", best->offsets.size()) : "." + best->property) +
                   (best->world ? " (WorldRotation)" : "") + (verified ? ", verified live" : ", not verified");
+        // A verified yaw-only pick: its pitch goes into the pitch-only rotation that moved the camera's pitch.
+        if (verified && !best->pitch_followed) {
+            const std::vector<ProbeGroup> pitch = probe_pitch_groups();
+            if (!pitch.empty() && pitch.front().verdict == kMovesCamera) {
+                const ProbeGroup& p = pitch.front();
+                std::string lines = "PitchObject=" + p.object + "\n";
+                if (!p.property.empty()) {
+                    lines += "PitchProperty=" + p.property + "\n";
+                } else {
+                    std::string offsets;
+                    for (int32_t off : p.offsets) offsets += (offsets.empty() ? "" : ",") + std::format("0x{:X}", off);
+                    lines += "PitchOffsets=" + offsets + "\nPitchRotatorSize=" + std::to_string(p.size) + "\n";
+                }
+                text += "; Yaw only: the pitch is kept in another rotation, which moved the camera's pitch in the live test.\n" + lines;
+                summary += ", pitch in " + p.object + (p.property.empty() ? " raw" : "." + p.property);
+            }
+        }
     }
     // Everything else that followed the camera, with what the live test (or the passive rules) said about it.
     std::string others;

@@ -36,6 +36,8 @@ bool right_stick_moving();
 bool look_input();
 // The profile file was rewritten by Gyro4All (a view added by the probe): read it again on the next frame.
 void profile_changed();
+// The view for the current view target (the default view, or its ViewTargetClass / ActiveList one), nullptr if none.
+const View* current_base_view();
 // A view for the probe's live test of one candidate rotation.
 View test_view_for(const std::string& object, const std::string& property, const std::vector<int32_t>& offsets, int size,
                    bool world);

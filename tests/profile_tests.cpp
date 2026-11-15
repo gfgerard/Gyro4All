@@ -533,6 +533,72 @@ void test_add_view_yaw_only() {
     CHECK(views[0].pitch_view == 0);
 }
 
+void test_pitch_rotation_keys() {
+    std::puts("profile: PitchObject=/PitchProperty= and PitchOffsets= read back (Amid Evil's camera component)");
+    const std::wstring path = temp_profile(L"pitchkeys");
+    write_file(path,
+               "[View.Default]\r\nLabel=Exploration\r\nPitchObject=Pawn.Camera\r\nPitchProperty=RelativeRotation\r\n"
+               "[Gyro4All]\r\nViews=Raw,Bad\r\n"
+               "[View.Raw]\r\nId=2\r\nViewTargetClass=Car\r\nProperty=Look\r\nRotatorSize=12\r\nPitchOffsets=0x40,0x60\r\n"
+               "[View.Bad]\r\nId=3\r\nViewTargetClass=Boat\r\nProperty=Look\r\nPitchObject=Pawn.Camera\r\n");
+    const std::vector<View> views = load_views(path);
+    CHECK(views.size() == 3);
+    const View& def = views[0];
+    CHECK(def.has_pitch_rotation() && def.pitch_property == "RelativeRotation");
+    CHECK(def.pitch_object.size() == 2 && def.pitch_object[0] == "Pawn" && def.pitch_object[1] == "Camera");
+    CHECK(def.property.empty() && def.offsets.empty());  // the yaw stays ControlRotation
+    const View* raw = by_id(views, 2);
+    CHECK(raw && raw->has_pitch_rotation() && raw->pitch_object.empty() && raw->pitch_offsets.size() == 2 &&
+          raw->pitch_offsets[1] == 0x60 && raw->pitch_rotator_size == 12);  // PitchRotatorSize defaults to RotatorSize
+    const View* bad = by_id(views, 3);
+    CHECK(bad && !bad->has_pitch_rotation());  // PitchObject alone: ignored
+}
+
+void test_set_pitch_rotation() {
+    std::puts("profile: set_pitch_rotation writes the default view's pitch and keeps the rest");
+    const std::wstring path = temp_profile(L"setpitch");
+    write_file(path, "; keep me\r\n[Gyro4All]\r\nNotices=0\r\n");
+    LearnedView pitch;
+    pitch.pitch_object = "Pawn.Camera";
+    pitch.pitch_property = "RelativeRotation";
+    CHECK(set_pitch_rotation(path, "Default", pitch));
+    CHECK(ini_value(path, L"View.Default", L"Label") == "Exploration");
+    CHECK(ini_value(path, L"Gyro4All", L"Notices") == "0");
+    CHECK(read_file(path).find("; keep me") == 0);
+    std::vector<View> views = load_views(path);
+    CHECK(views.size() == 1 && views[0].pitch_property == "RelativeRotation" && views[0].pitch_object.size() == 2);
+    // Raw pitch replaces the property, and PitchView goes.
+    WritePrivateProfileStringW(L"View.Default", L"PitchView", L"4", path.c_str());
+    LearnedView raw;
+    raw.pitch_object = "Pawn";
+    raw.pitch_offsets = {0x500};
+    raw.pitch_rotator_size = 12;
+    CHECK(set_pitch_rotation(path, "Default", raw));
+    views = load_views(path);
+    CHECK(views[0].pitch_property.empty() && views[0].pitch_offsets.size() == 1 && views[0].pitch_offsets[0] == 0x500);
+    CHECK(views[0].pitch_rotator_size == 12 && views[0].pitch_view == 0);
+    CHECK(!set_pitch_rotation(path, "Default", LearnedView{}));  // nothing to write
+}
+
+void test_add_view_with_pitch() {
+    std::puts("profile: a learned view with a pitch rotation writes PitchObject= instead of PitchView=");
+    const std::wstring path = temp_profile(L"addpitch");
+    LearnedView v;
+    v.object = "Pawn.CollisionCylinder";
+    v.offsets = {0x200};
+    v.rotator_size = 12;
+    v.pitch_view = 1;
+    v.pitch_object = "Pawn.Camera";
+    v.pitch_property = "RelativeRotation";
+    uint32_t id = 0;
+    std::string key;
+    CHECK(add_view(path, "Game", v, {}, id, key) == AddResult::Added);
+    const std::vector<View> views = load_views(path);
+    const View* learned = by_id(views, id);
+    CHECK(learned && learned->match_camera && learned->pitch_view == 0 && learned->pitch_property == "RelativeRotation");
+    CHECK(pitch_keys_text(v, "\n") == "PitchObject=Pawn.Camera\nPitchProperty=RelativeRotation\n");
+}
+
 void test_add_view_keeps_profile() {
     std::puts("profile: add_view keeps the existing views and settings, takes a free id");
     const std::wstring path = temp_profile(L"existing");
@@ -2053,6 +2119,9 @@ int main() {
     test_update_rotation_shape();
     test_add_view_new_file();
     test_add_view_yaw_only();
+    test_pitch_rotation_keys();
+    test_set_pitch_rotation();
+    test_add_view_with_pitch();
     test_add_view_keeps_profile();
     test_add_view_legacy_profile();
     test_add_view_duplicate();

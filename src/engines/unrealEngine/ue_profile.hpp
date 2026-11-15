@@ -45,6 +45,15 @@ struct View {
     // PitchView=<id>: this view turns yaw only, its pitch goes into that view's rotation. For cameras that split the
     // axes over two objects (Dead Island 2: yaw from the pawn's capsule, pitch from ControlRotation). 0 = both here.
     uint32_t pitch_view = 0;
+    // PitchObject= with PitchProperty= (or PitchOffsets= and PitchRotatorSize=): this view turns yaw only, its pitch
+    // goes into that rotation (same syntax as Object=, Property=, Offsets=, RotatorSize=; no PitchObject = this view's
+    // own object). For first-person cameras that keep the two axes in two objects: Amid Evil turns the yaw with
+    // ControlRotation (the character) and the pitch with the camera component's RelativeRotation. Wins over PitchView=.
+    std::vector<std::string> pitch_object;
+    std::string pitch_property;
+    std::vector<int32_t> pitch_offsets;
+    int32_t pitch_rotator_size = 24;
+    bool has_pitch_rotation() const { return !pitch_property.empty() || !pitch_offsets.empty(); }
     // Optional: scalar properties written whenever the gyro moves this view (e.g. to cancel a camera
     // auto-recentering that the game only cancels for stick input). "Name:value" is on the view object;
     // "Root.Sub.Name:value" on another object, with the same path syntax as Object= (Life is Strange:
@@ -110,9 +119,22 @@ struct LearnedView {
     int32_t rotator_size = 24;
     bool world_rotation = false;
     uint32_t pitch_view = 0;  // PitchView=: its live test moved yaw only, pitch goes to that view
+    // PitchObject= / PitchProperty= (or PitchOffsets= / PitchRotatorSize=): its live test moved yaw only, and this
+    // rotation moved the camera's pitch alone (wins over pitch_view). Empty pitch_object: not set.
+    std::string pitch_object, pitch_property;
+    std::vector<int32_t> pitch_offsets;
+    int32_t pitch_rotator_size = 24;
     std::string label;  // tab label in the settings panel
     std::string note;   // a comment written above the section (where and when it was learned)
 };
+
+// The PitchObject= ... lines for a learned pitch rotation (learned.pitch_object), each ending in `eol`; "" if none.
+std::string pitch_keys_text(const LearnedView& learned, const char* eol);
+
+// Sets the pitch rotation of the profile's existing view [View.<key>] ("Default" for the default view, created if
+// missing): its PitchObject= and PitchProperty= or PitchOffsets= / PitchRotatorSize= (the other keys of that kind are
+// removed). The rest of the file is kept. For a probe that found the pitch of a view whose yaw already works.
+bool set_pitch_rotation(const std::wstring& path, const std::string& key, const LearnedView& pitch);
 
 // The view already turns that rotation (same object path, property or raw offsets).
 bool same_rotation(const View& view, const LearnedView& learned);

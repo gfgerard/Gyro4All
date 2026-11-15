@@ -278,10 +278,26 @@ ue::Obj view_object(const View& view, const Scene& s) {
     return resolve_path(view.object, s);
 }
 
+// A view's PitchObject= rotation as a view of its own (an empty PitchObject is the view's own object).
+static View pitch_rotation_view(const View& view) {
+    View p;
+    p.id = view.id;
+    p.object = view.pitch_object.empty() ? view.object : view.pitch_object;
+    p.property = view.pitch_property;
+    p.offsets = view.pitch_offsets;
+    p.rotator_size = view.pitch_rotator_size;
+    return p;
+}
+
 bool apply(View& view, const Scene& s, double pitch, double yaw) {
     const ue::Obj target = view_object(view, s);
     if (!target) return false;
-    if (view.pitch_view && view.pitch_view != view.id && pitch != 0) {
+    if (view.has_pitch_rotation() && pitch != 0) {
+        // PitchObject=: the pitch goes into that rotation, the yaw stays in this view's.
+        View pitch_only = pitch_rotation_view(view);
+        if (!apply(pitch_only, s, pitch, 0)) return false;
+        pitch = 0;
+    } else if (view.pitch_view && view.pitch_view != view.id && pitch != 0) {
         // PitchView=: the pitch goes into the other view's rotation (only its rotation: its own PitchView and OnGyro
         // don't apply here).
         const auto other = std::find_if(g_views.begin(), g_views.end(), [&](const View& v) { return v.id == view.pitch_view; });
@@ -342,6 +358,13 @@ bool apply(View& view, const Scene& s, double pitch, double yaw) {
 
 // The candidate's current rotation (its first rotator for raw groups).
 bool read_view_rotation(const View& v, const Scene& s, double& pitch, double& yaw) {
+    if (v.has_pitch_rotation()) {
+        // Yaw from this view's rotation, pitch from its PitchObject= one.
+        View own = v;
+        own.pitch_property.clear(), own.pitch_offsets.clear();
+        double unused_pitch = 0, unused_yaw = 0;
+        return read_view_rotation(own, s, unused_pitch, yaw) && read_view_rotation(pitch_rotation_view(v), s, pitch, unused_yaw);
+    }
     const ue::Obj target = view_object(v, s);
     if (!target) return false;
     double roll = 0;
@@ -634,6 +657,8 @@ bool right_stick_moving() {
 bool look_input() { return right_stick_moving() || host::mouse_moving(); }
 
 void profile_changed() { g_profile_time = {}; }
+
+const View* current_base_view() { return g_base; }
 
 View test_view_for(const std::string& object, const std::string& property, const std::vector<int32_t>& offsets, int size,
                    bool world) {

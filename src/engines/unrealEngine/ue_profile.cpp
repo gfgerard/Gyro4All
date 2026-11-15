@@ -41,6 +41,13 @@ void load_view_extras(View& v, const std::wstring& path, const wchar_t* section)
     v.active_skip = split(ini(path, section, L"ActiveListSkip"), '|');
     if (!output.empty()) v.output_matrix = int32_t(std::strtol(output.c_str(), nullptr, 0));
     v.pitch_view = GetPrivateProfileIntW(section, L"PitchView", 0, path.c_str());
+    v.pitch_object = split(ini(path, section, L"PitchObject"), '.');
+    v.pitch_property = ini(path, section, L"PitchProperty");
+    for (const std::string& o : split(ini(path, section, L"PitchOffsets"), ','))
+        v.pitch_offsets.push_back(int32_t(std::strtol(o.c_str(), nullptr, 0)));
+    v.pitch_rotator_size = GetPrivateProfileIntW(section, L"PitchRotatorSize", v.rotator_size, path.c_str());
+    if (!v.pitch_object.empty() && !v.has_pitch_rotation())
+        log("profile: [%ls] PitchObject= ignored: needs PitchProperty= or PitchOffsets=", section);
     v.watch = split(ini(path, section, L"Watch"), ',');
     v.watched_values.assign(v.watch.size(), std::string{});
     v.dump = GetPrivateProfileIntW(section, L"Dump", 0, path.c_str()) != 0;
@@ -124,7 +131,15 @@ std::vector<View> load_views(const std::wstring& path) {
         if (v.output_matrix >= 0) where += std::format(" (output +0x{:X})", v.output_matrix);
         if (v.active_list >= 0) where += std::format(" (active while first in the list at +0x{:X})", v.active_list);
         if (v.world_rotation) where += v.offsets.empty() ? " (WorldRotation)" : " (WorldRotation ignored: needs Property=)";
-        if (v.pitch_view) where += std::format(" (yaw only, pitch in view {})", v.pitch_view);
+        if (v.has_pitch_rotation()) {
+            std::string pitch = v.pitch_object.empty() ? std::string("(same object)") : join(v.pitch_object, '.');
+            if (!v.pitch_property.empty()) pitch += "." + v.pitch_property;
+            for (size_t i = 0; i < v.pitch_offsets.size(); ++i)
+                pitch += std::format("{}0x{:X}", i ? "," : " raw +", v.pitch_offsets[i]);
+            where += " (yaw only, pitch in " + pitch + ")";
+        } else if (v.pitch_view) {
+            where += std::format(" (yaw only, pitch in view {})", v.pitch_view);
+        }
         const std::string target = !v.view_target_class.empty() ? v.view_target_class
                                    : v.match_camera || v.active_list >= 0 ? "(any)"
                                                                             : "(pawn)";
@@ -185,7 +200,8 @@ AddResult add_view(const std::wstring& path, const std::string& exe_stem, const 
         for (int32_t off : learned.offsets) offsets += (offsets.empty() ? "" : ",") + std::format("0x{:X}", off);
         text += "Offsets=" + offsets + "\r\nRotatorSize=" + std::to_string(learned.rotator_size) + "\r\n";
     }
-    if (learned.pitch_view) text += "PitchView=" + std::to_string(learned.pitch_view) + "\r\n";
+    if (!learned.pitch_object.empty()) text += pitch_keys_text(learned, "\r\n");
+    else if (learned.pitch_view) text += "PitchView=" + std::to_string(learned.pitch_view) + "\r\n";
     FILE* file = nullptr;
     if (_wfopen_s(&file, path.c_str(), L"ab") != 0 || !file) return AddResult::Failed;
     const bool written = std::fwrite(text.data(), 1, text.size(), file) == text.size();
@@ -197,6 +213,33 @@ AddResult add_view(const std::wstring& path, const std::string& exe_stem, const 
     if (!WritePrivateProfileStringW(settings::kSection, L"Views", widen(join(list, ',')).c_str(), path.c_str()))
         return AddResult::Failed;
     return AddResult::Added;
+}
+
+std::string pitch_keys_text(const LearnedView& learned, const char* eol) {
+    if (learned.pitch_object.empty() || (learned.pitch_property.empty() && learned.pitch_offsets.empty())) return {};
+    std::string text = "PitchObject=" + learned.pitch_object + eol;
+    if (!learned.pitch_property.empty()) return text + "PitchProperty=" + learned.pitch_property + eol;
+    std::string offsets;
+    for (int32_t off : learned.pitch_offsets) offsets += (offsets.empty() ? "" : ",") + std::format("0x{:X}", off);
+    return text + "PitchOffsets=" + offsets + eol + "PitchRotatorSize=" + std::to_string(learned.pitch_rotator_size) + eol;
+}
+
+bool set_pitch_rotation(const std::wstring& path, const std::string& key, const LearnedView& pitch) {
+    if (pitch_keys_text(pitch, "\n").empty()) return false;
+    const std::wstring section = L"View." + widen(key);
+    const wchar_t* s = section.c_str();
+    const wchar_t* p = path.c_str();
+    std::string offsets;
+    for (int32_t off : pitch.pitch_offsets) offsets += (offsets.empty() ? "" : ",") + std::format("0x{:X}", off);
+    const bool raw = pitch.pitch_property.empty();
+    // A Default section written for the first time gets its label, so the panel's tab keeps its usual name.
+    if (key == "Default" && ini(path, s, L"Label").empty() && !WritePrivateProfileStringW(s, L"Label", L"Exploration", p))
+        return false;
+    return WritePrivateProfileStringW(s, L"PitchObject", widen(pitch.pitch_object).c_str(), p) &&
+           WritePrivateProfileStringW(s, L"PitchProperty", raw ? nullptr : widen(pitch.pitch_property).c_str(), p) &&
+           WritePrivateProfileStringW(s, L"PitchOffsets", raw ? widen(offsets).c_str() : nullptr, p) &&
+           WritePrivateProfileStringW(s, L"PitchRotatorSize", raw ? std::to_wstring(pitch.pitch_rotator_size).c_str() : nullptr, p) &&
+           WritePrivateProfileStringW(s, L"PitchView", nullptr, p);
 }
 
 bool PauseCondition::holds(double v) const {

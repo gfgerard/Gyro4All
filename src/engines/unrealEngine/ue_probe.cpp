@@ -207,8 +207,11 @@ struct LiveTest {
     int round = 1, attempts = 0;
     std::vector<std::string> passed;  // ids that moved the camera in round 1 (tested again in round 2)
     View view;                        // the candidate, as a profile view
+    // Pitch round: the verified rotation turned yaw only, so pitch-only rotations (ue::probe_pitch_groups) get pitch
+    // turns alone: the camera's pitch must follow and come back, its yaw stay put.
+    bool pitch_mode = false;
     double base_p = 0, base_y = 0;    // camera before the current turn
-    double val_y = 0, pawn_yaw = 0, delta_p = 0;
+    double val_p = 0, val_y = 0, pawn_yaw = 0, delta_p = 0;
     double written_p = 0, written_y = 0;  // turn currently written into the candidate (undone on abort)
     bool base_loc_ok = false;
     double base_loc[3] = {};
@@ -244,7 +247,7 @@ void next_candidate() {
     }
     if (g_test.round == 1 && !g_test.passed.empty()) {  // round 2: the ones that moved the camera, once more
         std::vector<ue::ProbeGroup> again;
-        for (const ue::ProbeGroup& g : ue::probe_groups())
+        for (const ue::ProbeGroup& g : g_test.pitch_mode ? ue::probe_pitch_groups() : ue::probe_groups())
             if (std::find(g_test.passed.begin(), g_test.passed.end(), g.id) != g_test.passed.end()) again.push_back(g);
         g_test.queue = std::move(again);
         g_test.index = 0;
@@ -262,6 +265,19 @@ void next_candidate() {
 
 void test_result(int verdict, const std::string& note) {
     const ue::ProbeGroup& g = g_test.queue[g_test.index];
+    if (g_test.pitch_mode) {
+        const char* what = verdict == ue::kMovesCamera ? "MOVES THE CAMERA'S PITCH" : verdict == ue::kOverwritten ? "overwritten (output)"
+                         : verdict == ue::kNoEffect    ? "kept, camera didn't move"
+                         : verdict == ue::kInconsistent ? "inconsistent" : "not testable";
+        probe_log("probe test (pitch, round %d): %s: %s%s%s", g_test.round, group_text(g).c_str(), what,
+                  note.empty() ? "" : ": ", note.c_str());
+        log("probe test (pitch, round %d): %s: %s%s%s", g_test.round, group_text(g).c_str(), what, note.empty() ? "" : ": ",
+            note.c_str());
+        if (verdict == ue::kMovesCamera && g_test.round == 1) g_test.passed.push_back(g.id);
+        else if (verdict != ue::kMovesCamera && g_test.round == 2) ue::probe_pitch_verdict(g.id, ue::kInconsistent, note);
+        else ue::probe_pitch_verdict(g.id, verdict, note);
+        return next_candidate();
+    }
     const char* what = verdict == ue::kMovesCamera ? "MOVES THE CAMERA" : verdict == ue::kOverwritten ? "overwritten (output)"
                      : verdict == ue::kNoEffect    ? "kept, camera didn't move"
                      : verdict == ue::kInconsistent ? "inconsistent"
@@ -320,6 +336,37 @@ bool start_tests() {
     return true;
 }
 
+// The best verified rotation turned yaw only (its pitch didn't move the camera): the pitch-only rotations the captures
+// found get a live test of their own. False if there is none to test (then the yaw-only rotation is learned alone).
+bool start_pitch_tests() {
+    const std::vector<ue::ProbeGroup> groups = ue::probe_groups();
+    if (groups.empty() || groups.front().verdict != ue::kMovesCamera || groups.front().pitch_followed) return false;
+    std::vector<ue::ProbeGroup> queue;
+    for (const ue::ProbeGroup& g : ue::probe_pitch_groups())
+        if (g.verdict == ue::kUntested && queue.size() < size_t(kMaxTests)) queue.push_back(g);
+    if (queue.empty()) {
+        probe_log("probe: %s turns yaw only, and no untested rotation followed the camera's pitch alone (a capture that "
+                  "also turns the camera 10 degrees or more up or down finds it)", group_text(groups.front()).c_str());
+        return false;
+    }
+    if (g_test.written_p != 0 || g_test.written_y != 0) return false;
+    const ULONGLONG keep_notice = g_test.last_pause_notice;
+    g_test = {};
+    g_test.last_pause_notice = keep_notice;
+    g_test.pitch_mode = true;
+    g_test.queue = std::move(queue);
+    g_test.phase = LiveTest::Settle;
+    probe_log("probe test: %s turns yaw only; %zu pitch-only rotation(s) to test", group_text(groups.front()).c_str(),
+              g_test.queue.size());
+    log("probe: %s turns yaw only: live test of %zu rotation(s) that followed the camera's pitch alone",
+        group_text(groups.front()).c_str(), g_test.queue.size());
+    notify::show(std::format(L"Gyro4All probe: found the yaw, now testing {} rotation(s) for the pitch.\nDON'T TOUCH THE "
+                             L"CONTROLLER (the camera twitches up and down a little).",
+                             g_test.queue.size()),
+                 10);
+    return true;
+}
+
 // After a verified camera the probe's job is done: Probe=0 in Gyro4All.ini (and in the game's profile, if it sets
 // Probe itself), so the next start doesn't keep the gyro paused for another probe run.
 bool disable_probe() {
@@ -345,13 +392,22 @@ void probe_end(const char* why) {
 
 // A probe started during play (or in a game with a profile) verified a camera: it becomes a Match=Camera view of the
 // profile, used at once (the engine reads the file again). The profile's other views and settings are kept.
-void learn_camera(const ue::ProbeGroup& g, bool yaw_only) {
+// The learned pitch rotation of a yaw-only camera (LearnedView's pitch keys).
+void set_pitch(LearnedView& learned, const ue::ProbeGroup& pitch) {
+    learned.pitch_object = pitch.object;
+    learned.pitch_property = pitch.property;
+    learned.pitch_offsets = pitch.offsets;
+    learned.pitch_rotator_size = pitch.size ? pitch.size : 24;
+}
+
+void learn_camera(const ue::ProbeGroup& g, bool yaw_only, const ue::ProbeGroup* pitch = nullptr) {
     LearnedView learned;
     learned.object = g.object;
     learned.property = g.property;
     learned.offsets = g.offsets;
     learned.rotator_size = g.size ? g.size : 24;
     learned.world_rotation = g.world;
+    if (pitch) set_pitch(learned, *pitch), yaw_only = false;
     learned.pitch_view = yaw_only ? 1 : 0;
     learned.label = g.cls.empty() ? "Learned camera" : g.cls;
     SYSTEMTIME t;
@@ -360,7 +416,10 @@ void learn_camera(const ue::ProbeGroup& g, bool yaw_only) {
                                "Live test: {}. Used while the camera follows it (Match=Camera).{}",
                                GYRO4ALL_VERSION, t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
                                ue::name_of(g_auto.target_class), g.note.empty() ? "moved the camera" : g.note,
-                               yaw_only ? "\nYaw only: its pitch goes to the default view (PitchView=1)." : "");
+                               yaw_only ? "\nYaw only: its pitch goes to the default view (PitchView=1)."
+                               : pitch  ? "\nYaw only: its pitch goes to " + group_text(*pitch) + " (PitchObject=), which moved the "
+                                          "camera's pitch in the live test."
+                                        : std::string());
     const std::vector<uint32_t> reserved(std::begin(kSensitivityViewIds), std::end(kSensitivityViewIds));
     uint32_t id = 0;
     std::string key;
@@ -389,8 +448,41 @@ void learn_camera(const ue::ProbeGroup& g, bool yaw_only) {
     probe_end("camera learned");
 }
 
+// The camera's yaw is the base view's own rotation (it already turns the camera's yaw) and its pitch is elsewhere: the
+// pitch rotation goes into the base view's section (PitchObject=), instead of a Match=Camera view, which would never
+// take over (the camera follows the base view's yaw, and the choice judges yaw only).
+bool learn_pitch_of_base(const ue::ProbeGroup& yaw, const ue::ProbeGroup& pitch) {
+    const View* base = current_base_view();
+    LearnedView yaw_rotation;
+    yaw_rotation.object = yaw.object, yaw_rotation.property = yaw.property, yaw_rotation.offsets = yaw.offsets;
+    if (!base || !same_rotation(*base, yaw_rotation)) return false;
+    LearnedView learned;
+    set_pitch(learned, pitch);
+    CreateDirectoryW((settings::mod_dir() + L"\\profiles").c_str(), nullptr);
+    const bool ok = set_pitch_rotation(settings::profile_path(), base->key, learned);
+    log("probe: camera learned: yaw in %s (view %u '%s'), pitch in %s: %s", group_text(yaw).c_str(), base->id,
+        base->label.c_str(), group_text(pitch).c_str(),
+        ok ? ("PitchObject= written to [View." + base->key + "] of " + narrow(settings::profile_path())).c_str()
+           : "the profile couldn't be written");
+    probe_log("probe: camera learned: yaw in %s, pitch in %s (%s)", group_text(yaw).c_str(), group_text(pitch).c_str(),
+              ok ? ("[View." + base->key + "] PitchObject=").c_str() : "profile not written");
+    notify::show(ok ? L"Gyro4All: the camera's pitch found and VERIFIED, added to this game's profile.\nThe gyro turns "
+                      L"yaw and pitch from now on (no restart needed)."
+                    : L"Gyro4All: the camera's pitch found, but the game's profile couldn't be written.\nSee "
+                      L"Gyro4All\\Gyro4All.log.",
+                 20);
+    if (ok) profile_changed();
+    g_auto.done = true;
+    if (!g_probe_runtime) disable_probe();
+    probe_end("camera learned");
+    return true;
+}
+
 void finish_tests() {
+    const bool after_pitch_round = g_test.pitch_mode;
     g_test.phase = LiveTest::Off;
+    g_test.pitch_mode = false;
+    if (!after_pitch_round && start_pitch_tests()) return;
     if (probe_adds_view()) {
         const std::vector<ue::ProbeGroup> groups = ue::probe_groups();
         // The best verified rotation comes first (probe_groups): yaw and pitch, then one that also turns the character.
@@ -407,6 +499,13 @@ void finish_tests() {
                           verified.turns_pawn       ? "it also turns the character: the look input, upstream of the camera"
                           : verified.pitch_followed ? "turns yaw and pitch"
                                                     : "yaw only");
+            if (!verified.pitch_followed) {
+                const std::vector<ue::ProbeGroup> pitch = ue::probe_pitch_groups();
+                if (!pitch.empty() && pitch.front().verdict == ue::kMovesCamera) {
+                    if (learn_pitch_of_base(verified, pitch.front())) return;
+                    return learn_camera(verified, false, &pitch.front());
+                }
+            }
             return learn_camera(verified, !verified.pitch_followed);
         }
     }
@@ -489,6 +588,14 @@ void run_live_test(const Scene& s, bool valid, ULONGLONG still_for) {
         g_test.yaw_ok = g_test.pitch_ok = g_test.turns_pawn = false;
         g_test.base_loc_ok = s.loc_ok;
         if (s.loc_ok) std::copy(s.pov_loc, s.pov_loc + 3, g_test.base_loc);
+        if (g_test.pitch_mode) {  // pitch alone, towards level: away from the pitch limits
+            g_test.val_p = p0;
+            g_test.delta_p = g_test.base_p > 0 ? -kTestTurn : kTestTurn;
+            if (!apply(g_test.view, s, g_test.delta_p, 0)) return test_result(ue::kUntestable, "pitch couldn't be written");
+            g_test.written_p = g_test.delta_p;
+            enter(LiveTest::PitchOut);
+            return;
+        }
         if (!apply(g_test.view, s, 0, kTestTurn)) return test_result(ue::kUntestable, "couldn't be written");
         g_test.written_y = kTestTurn;
         enter(LiveTest::YawOut);
@@ -540,11 +647,25 @@ void run_live_test(const Scene& s, bool valid, ULONGLONG still_for) {
         const bool on = std::abs(dp - g_test.delta_p) < kTestTolerance && std::abs(dy) < kTestTolerance;
         if (held(on, 150)) g_test.pitch_ok = true;
         else if (in_phase < 700) return;
+        if (g_test.pitch_mode && !g_test.pitch_ok) {
+            double p = 0, y = 0;
+            const bool kept = read_view_rotation(g_test.view, s, p, y) &&
+                              std::abs(wrap180(p - g_test.val_p - g_test.delta_p)) < kTestTolerance;
+            undo_turn(s);
+            return test_result(kept ? ue::kNoEffect : ue::kOverwritten,
+                               kept ? "the value kept the turn, the camera's pitch didn't follow" : "the game rewrote the value");
+        }
         undo_turn(s);
         enter(LiveTest::PitchBack);
         return;
     }
     case LiveTest::PitchBack:
+        if (g_test.pitch_mode) {
+            if (held(std::abs(dy) < kTestTolerance && std::abs(dp) < kTestTolerance, 100))
+                return test_result(ue::kMovesCamera, kPitchFollowed);
+            if (in_phase >= 700) test_result(ue::kInconsistent, "the camera's pitch turned but didn't come back when undone");
+            return;
+        }
         if (!held(std::abs(dy) < kTestTolerance && std::abs(dp) < kTestTolerance, 100) && in_phase < 700) return;
         test_result(ue::kMovesCamera, std::string("yaw followed") +
                                           (g_test.pitch_ok ? std::string(", ") + kPitchFollowed : ", pitch didn't move (may be kept elsewhere)") +

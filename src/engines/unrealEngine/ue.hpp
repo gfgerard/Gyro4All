@@ -107,6 +107,11 @@ struct ProbeGroup {
 std::vector<ProbeGroup> probe_groups();
 void probe_verdict(const std::string& id, int verdict, const std::string& note, bool pitch_followed = false,
                    bool turns_pawn = false);
+// Pitch-only rotations: in the scored diffs that turned the pitch 10 degrees or more, their pitch followed the camera's
+// while their yaw stayed put (a first-person camera component under a capsule that turns the yaw). For a camera whose
+// verified rotation turned yaw only (Amid Evil's ControlRotation), tested live on pitch alone. Verified ones first.
+std::vector<ProbeGroup> probe_pitch_groups();
+void probe_pitch_verdict(const std::string& id, int verdict, const std::string& note);
 // Forgets the snapshot, the candidates and the verdicts: a probe started again during play looks at the camera of
 // that moment only.
 void probe_reset();
