@@ -3031,3 +3031,29 @@ Afterburner running.
   (Unity, D3D11, SDR) and Days Gone (UE4, D3D11 through ReShade `d3d11.dll`/`dxgi.dll` with RenoDX, OptiScaler as
   `version.dll`; panel drawn as HDR10, 3840x2160, colour space 12). With ReShade the Present chain line reads `called
   from d3d11.dll+0x72908; slot 8 d3d11.dll+0x59B20`: the slot holds ReShade's swapchain proxy, not our hook.
+- 2026-11-15 **NieR:Automata (PlatinumGames engine, Steam 524220, July 2021 exe `NieRAutomata.exe`, x64, D3D11, SteamStub `.bind`, `.text` plain on disk): recon and camera source found** (plan in `games/NieRAutomata/`; no engine module yet, falls back to Unreal).
+  Slice 0 (DualSense, USB, Steam Input not checked): `winmm.dll` loads under SteamStub, frame on `PeekMessageW` at 60/s, the game reads the pad through Gyro4All's XInput (it also opens the DualSense through DirectInput/HID and lists it via WMI as XInput, "IG_"). Both exes carried a `RUNASADMIN` compatibility flag (installer's), so the game ran elevated and camtrace got error 5; removed with the user's OK.
+  `guided.py`: its own reference picked a heap vector that stopped turning after two moves; `--ref exe+0x114bad0` (static view matrices at `exe+0x114ba80`, 0x60-byte entries, rows right/up/back + translation, Y up) found yaw in radians only as copies (`exe+0x1773b90` = +-pi - [`exe+0x176dbf8`], written by `exe+0x13d7e0`; heap copies); all undone within a frame.
+  Camera object: static `exe+0x1020870` (vtable `exe+0xca7988`; `exe+0x1020868` points to a heap object with pitch copies at +0x228/+0x22c/+0x3a8). Fields from the object: +0x10 eye, +0x20 look-at, +0x30 up, +0x40 pitch, +0x44 yaw, +0x48 roll (radians), +0x50 distance: all copies. `exe+0x1841b0` sets eye/look-at/up and jumps to `exe+0x184350`, which derives the angles by atan2 from look-at - eye. Caller `exe+0x73e354` adds an offset (`+0x1a0`/`+0x1b0`, shake) to the smoothed eye `+0xf0` / look-at `+0x100`; `exe+0x73de89..` lerps them every frame toward the goal eye `+0x140` / look-at `+0x150` (up `+0x160`/`+0x170`, `+0x130` -> `+0x180`), so goals reach the view over ~1 s. Goal eye written (`exe+0x263e80` copy) by the orbit controller `exe+0x727260` (this = the camera object): `+0x3f0 += +0x4ac`, `+0x3f4 += +0x4b0` (angles plus angular velocity, damped), rotation from them (`exe+0x263d50`, order 5) plus `+0x590..0x5a4` offsets, eye = look-at + rotation * distance.
+  **Source (write-tested, stick released, kept, view followed): pitch `exe+0x1020c60` (+0x3f0), yaw `exe+0x1020c64` (+0x3f4), float radians, absolute.** Not yet in game with the gyro: sign conventions, pitch limits, and the ~1 s smoothing (goal -> view) still to handle. FOV candidate: `exe+0x10209a8` (+0x138) = 0.8727 rad (50.0 deg), lerped toward +0x188 (set from the controller's 4th argument); not verified.
+  Debugger: one-hit write breakpoints through cdb, no anti-debug reaction. camtrace `bp` now also sets `sxi av`: Gyro4All's guarded reads (Unreal fallback) raise first-chance access violations that stopped cdb before the breakpoint (`sxi *` doesn't cover av).
+- 2026-11-15 **NieR:Automata: Platinum engine module (`src/engines/platinum/`) and zoom-compensation FOV** (no version bump).
+  Module: the two orbit updates (`exe+0x727260` A, `exe+0x727910` B, found by their `+0x3f0 += +0x4ac` code and the unwind
+  table, prologues checked) are MinHook-hooked; the hook adds the gyro's turn (radians, yaw sense -1, pitch clamped to
+  1.3 rad) to the camera's pitch/yaw right before the game's update. Gate: no gameplay view while neither update ran for
+  100 ms. First play (DualSense, Steam Input not controlling the pad, ~30 min): both hooked, 99-100% of orbit updates
+  turned, ~0.12 ms per frame, no errors; the user: "va bien". Open: the orbit updates did not run for a 6-minute stretch of
+  normal play and run at only 3-7/s in some fights, flickering on and off (another camera function handles those modes,
+  not hooked yet); the summed applied pitch drifts up (+290 deg against yaw -290), so the game may recentre pitch or the
+  clamp cuts it.
+  FOV (found statically, checked live): camera `+0x138` is the view's vertical FOV in float radians (50 deg in the open
+  world), eased toward the goal `+0x188` with the eye/look-at (`exe+0x73e235`); the goal is written by the orbit updates
+  and blended with a scripted FOV `+0x358` at `exe+0x73dd80`. `exe+0x73e261` passes `+0x138` to the render camera's
+  setter `exe+0x27ace0` (`[cam+0x60]` -> `+0x274`, dirty flag `+0x284`); its projection (`exe+0x27aaaf`): y scale =
+  cot(fov/2) (`+0x54`, 2.1445), x scale = y / aspect `+0x270` (1.778), near/far `+0x268`/`+0x26c` (0.1/10000): vertical.
+  The module reports it as the zoom FOV against 50 deg vertical, or `ZoomReferenceFOV=` (horizontal) when set. Not yet
+  seen changing in game (NieR has no aim zoom; scripted camera zones may).
+  FOV in game (same day, DualSense, Steam Input not controlling the pad): reported at 50.0 vertical in the open world,
+  "Adapt to Zoom" on, gyro x1.000. Seen changing: 45 and 52 deg (camera zones, compensated), 12.8 and 10 deg only for a
+  frame or two right before the orbit camera goes idle (cutscene or another camera: the gyro is off there). Fix: the
+  reference line (`platinum: zoom reference FOV 50.0 degrees vertical`) was not logged with no setting.
