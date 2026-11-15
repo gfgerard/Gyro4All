@@ -19,11 +19,12 @@
 #include "unity.hpp"
 #include "platinum.hpp"
 #include "dawn.hpp"
+#include "decima.hpp"
 
 namespace gyro4all {
 
 std::span<Engine* const> all_engines() {
-    static Engine* const engines[] = {&halo::engine(), &unreal::engine(), &unreal3::engine(), &unity::engine(), &re::engine(), &fb::engine(), &idtech::engine(), &source::engine(), &foura::engine(), &swarm::engine(), &cryengine::engine(), &glacier::engine(), &northlight::engine(), &asura::engine(), &rage::engine(), &red::engine(), &platinum::engine(), &dawn::engine()};
+    static Engine* const engines[] = {&halo::engine(), &unreal::engine(), &unreal3::engine(), &unity::engine(), &re::engine(), &fb::engine(), &idtech::engine(), &source::engine(), &foura::engine(), &swarm::engine(), &cryengine::engine(), &glacier::engine(), &northlight::engine(), &asura::engine(), &rage::engine(), &red::engine(), &platinum::engine(), &dawn::engine(), &decima::engine()};
     return engines;
 }
 

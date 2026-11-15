@@ -3164,3 +3164,55 @@ Afterburner running.
   Not re-tested in game after the removal.
 - Quieter log: the heap scan line only when its counts change (cutscenes and menus rescan every 2 s with the same
   result), gyro on/waits lines capped at 100, FOV lines at 50 (was 200). Builds, not tested in game.
+
+## 2026-11-15 Death Stranding Director's Cut (Epic, Decima): recon and first load
+- Exe `DeathStranding.exe` (build "dsq 179/4027081", 2024-01-28), x64, no Denuvo/Themida section or strings, no
+  anti-cheat. Every import is delay-loaded; `winmm.dll` isn't imported directly, yet the `winmm.dll` proxy loads
+  (log written, GyroLib panel works on F10, DX12 HDR10 swapchain). Plan: `games/DeathStrandingDC/MODDING_PLAN.md`.
+- No engine detected: falls back to Unreal. `ue::init` -> `find_object_array` -> `item_stride` -> `mem::guarded_store`
+  faults (memcpy, caught by our `__try`), but the game's own crash reporter (vectored handler) sees the first-chance
+  access violation first: it writes `error.txt` in the game folder and shows an "Access Violation" window, then the
+  game keeps running. Guarded reads that fault are not silent in games with a VEH crash reporter.
+- Pad: the game opens the DualSense (054C:0CE6) over HID itself (raw reports 0x01, USB); XInput through
+  `XINPUTUAP.dll` (delay-load). Gyro4All doesn't show the pad as XInput (HID library import). Tested with a DualSense
+  over USB, Steam Input not involved (Epic).
+- Next: a Decima engine module (detection by exe/RTTI strings) so the Unreal scan never runs here; then the camera
+  (static triage, `guided.py`).
+- Decima module (`src/engines/decima/`, detection only: exe stem `DeathStranding`/`HorizonZeroDawn` plus `data\*.bin`)
+  verified in game: `engine: Decima (detected)`, no Unreal scan, no `error.txt`, no error window. Gyro off
+  (`view=none`) until the camera is found. DualSense, USB, no Steam Input.
+- **Camera found (write-tested in game, DualSense USB, no Steam Input).** Static route, no debugger:
+  - The exe's script exports `DSCameraInterface_sExportedSetCameraRotationHeading` / `...Pitch` /
+    `...GetCameraRotation` (names registered by code at `exe+0x266df40`, each with its function pointer in `rax`):
+    SetHeading `exe+0x26e8e40`, SetPitch `exe+0x26e8e70`, GetRotation `exe+0x26e8d30` (-> `exe+0x26ebd90`, reads the
+    camera entity's matrix). Set* store `value * 0.0174533` into a request object `[exe+0x7be9788]` (+0x200/+0x204
+    heading, +0x1f8/+0x1fc pitch, flags +0x29d bits 0x40/0x20); its consumer at `exe+0x26c4cb3`.
+  - The consumer calls `exe+0x2841830`, the active camera mode: `[[[[[exe+0x7bc92f8]+0x40][i]]+0x70]+0x330]` (minus 0x20
+    if non-null) `+0x54d0` (minus 0x20); entry `i` is the player whose `+0x88` is 0 (`exe+0x23c5140`). Chain used:
+    `[[[[[[exe+7bc92f8]+40]]+70]+330]+54b0]-20`.
+  - **mode+0xc10 = pitch, mode+0xc14 = heading, float radians.** Write tests: heading +0.5 kept, view turned (+ heading = left, from the gyro in game);
+    pitch +0.2 kept, view tilted up. Pitch adds GyroLib's degrees as radians; heading subtracts them.
+  - Next: the Decima module's apply (call `exe+0x2841830` on the game thread or follow the chain guarded), menus and
+    cutscenes (the getter returns null / flags), pitch limits, other camera modes (vehicles, first person), FOV
+    (`CameraFov`, `CameraFOVResource` types) for zoom compensation. Offsets are for build dsq 179/4027081 only:
+    signatures needed.
+- **Gyro works on foot** (Decima module apply, DualSense USB, no Steam Input; tested by the user): pitch and yaw follow
+  the controller after flipping heading's sign. The getter signature matches two identical copies (`exe+0x28417C0`,
+  `exe+0x2841830`); accepted when they agree. Not tested yet: vehicles, menus/map/pause (`sees_menus` false: no menu
+  gate), cutscenes, first-person/ADS, pitch limits, FOV.
+- **FOV / zoom compensation works** (user test: first person, binoculars' R3 zoom slows the gyro in proportion; DualSense
+  USB, no Steam Input). Zoom diff over all writable memory (A unzoomed, B R3 zoom, C unzoomed; floats with A == C and
+  B/A in a zoom-like ratio): the projection `1/tan(vFOV/2)` (2.39396 -> 4.85044), `tan(vFOV/2)` (0.41772 -> 0.20617)
+  and `tan(hFOV/2)` (0.74261). Third person 45.7 vertical (tan 0.4219 = 0.75 x 9/16, the 73.74 horizontal seen
+  in many copies), first person 45.3, R3 zoom 23.3.
+  - Dead ends: `mode+0x7ec` (73.74 / 61.9) is a copy (write test: kept, no visible change); `mode+0x694/0x698`
+    (1.0 -> 0.55 with R3) rewritten by the game within seconds, no effect; `mode+0xd20..0xd2c` are pitch limits
+    (±60 third person, ±80 first person). Decima RTTI member tables (stride 0x38: type, u16 offset, u16 flags, name)
+    give `Camera.FieldOfView` +0x74 / `Zoom` +0x80 / `NearPlane` +0x6c, but no live object of that layout followed
+    the zoom.
+  - The pointer path from the camera mode to the view objects changes per run (`mode+0xa50>+0x40>+0x110` once,
+    `mode+0x1430>+0x48>+0x5d0` the next). The module finds them by pattern: a breadth-first walk of the mode's
+    pointers (3 levels, `ReadProcessMemory` on itself so a stale pointer can't trip the game's crash reporter) for
+    t = tan(vFOV/2) < 0.95 with 1/t at -0x40 and tan(hFOV/2) at -0x28 matching the window aspect within 3%; the first
+    loose pattern (no aspect check) latched onto a 90-degree square view during loading. Re-validated every frame,
+    searched again (at most every 2 s) when it breaks. Reference = widest seen (or `ZoomReferenceFOV=`).
