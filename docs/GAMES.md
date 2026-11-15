@@ -37,6 +37,7 @@
 | Days Gone | ✅ Works (tested on the Steam version) | Unreal Engine 4 | Install in `BendGame\Binaries\Win64`, next to `DaysGone.exe`. Aim has its own view in settings. Bike has its own `Vehicle` view in the `F10` panel: set its Activation to Off to keep the gyro off on the bike. |
 | Dead Island 2 | ✅ Works (tested on the Epic version) | Unreal Engine 4 | Install in `DeadIsland\Binaries\Win64`. Single-player only: never play online co-op with it. |
 | Dead Space (2023) | ✅ Works (tested on the Steam version) | Frostbite | Install next to `Dead Space.exe` in the game's main folder.|
+| Deus Ex: Mankind Divided | ✅ Works (tested on the GOG version, 1.19) | Dawn | Install in `retail`, next to `DXMD.exe`. |
 | Dishonored (Definitive Edition) | ✅ Works (tested on the Epic version) | Unreal Engine 3 | Install in `Binaries\Win64`, next to `Dishonored.exe`. |
 | DOOM (2016) | ✅ Works (tested on the Steam version, Vulkan and OpenGL) | id Tech 6 | Install in the game's main folder, next to `DOOMx64vk.exe` and `DOOMx64.exe`. Gyro turns off in the pause menu, the map and during glory kills. Campaign only: never play multiplayer or SnapMap online with it. |
 | DOOM Eternal | ✅ Works (tested on the Steam version) | id Tech 7 | Install next to `DOOMEternalx64vk.exe` in the game's main folder. Turn Steam Input off for the game. Campaign only: never play BattleMode online with it. |
@@ -55,6 +56,7 @@
 | Kingdom Come: Deliverance | ✅ Works (tested on the Epic version, 1.9.7) | CryEngine (Warhorse's) | Install in `bin\Win64MasterMasterEpicPGO`, next to `KingdomCome.exe`, **as `version.dll`** (rename `winmm.dll`). Gyro4All shows your controller to the game as an Xbox one. `F10` panel works (DX11). |
 | Life is Strange Remastered | ✅ Works | Unreal Engine 4.23.1 | DX11: the `F10` panel isn't verified in this game yet; you can always change settings in `gyrolib.ini` (see [Using it](../README.md#using-it)). |
 | Luto | ✅ Works | Unreal Engine 5.5.4 | |
+| Marvel's Guardians of the Galaxy | ✅ Works (tested on the Epic version) | Dawn | Install in `retail`, next to `gotg.exe`. Needs renaming `msvcp140.dll` to `msvcp140.dll.bak`|
 | Mass Effect (Legendary Edition) | ✅ Works (tested on the Steam version) | Unreal Engine 3 | Install in `Game\ME1\Binaries\Win64`. |
 | Mass Effect 2 (Legendary Edition) | ✅ Works (tested on the Steam version) | Unreal Engine 3 | Install in `Game\ME2\Binaries\Win64`. |
 | Mass Effect 3 (Legendary Edition) | ✅ Works (tested on the Steam version) | Unreal Engine 3 | Install in `Game\ME3\Binaries\Win64`. |

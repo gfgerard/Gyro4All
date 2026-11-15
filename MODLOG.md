@@ -3057,3 +3057,110 @@ Afterburner running.
   "Adapt to Zoom" on, gyro x1.000. Seen changing: 45 and 52 deg (camera zones, compensated), 12.8 and 10 deg only for a
   frame or two right before the orbit camera goes idle (cutscene or another camera: the gyro is off there). Fix: the
   reference line (`platinum: zoom reference FOV 50.0 degrees vertical`) was not logged with no setting.
+- 2026-11-15 **Deus Ex: Mankind Divided (Dawn engine, Eidos Montréal's Glacier 2 fork; GOG build via Heroic, `retail\DXMD.exe` 1.19.0.0, x64, D3D11/D3D12): recon and camera source found** (plan in `games/DeusExMankindDivided/`; no engine module yet).
+  - Static triage: no packer or Denuvo (GOG), MSVC RTTI present (~17k classes, `Z*` Glacier names), imports `WINMM.dll`
+    directly (winmm proxy should load), 4 `XInput` strings but no XInput import (input layer `ZInputDeviceManager`,
+    `ZGamepadSteam`, Tobii EyeX). World Z up. IGCS (Frans Bouma, DXMD camera for 1.19) signatures all match once.
+  - Render camera: the player's `ZGenericCamera` (vtable exe+0x1b79208, ~20 live, the player's one has FOV 54.536):
+    rotation rows +0x50/+0x5C/+0x68 (3x3 floats), position +0x74, **FOV +0x13C (float degrees, vertical; IGCS default
+    54.54)**. Rebuilt every frame by the generic entity world-transform compose at exe+0x22d69b (writes +0x50/+0x60/+0x70,
+    clears +0x18), so a copy. Found by a heap scan for the RTTI vtables, not by guided.py.
+  - Dead ends: guided.py with its own reference picked the body's yaw-only matrix at exe+0x2e21190 (up row = world Z)
+    and, on the second run, a wrong group (yaw only ever ±90); `vectors` assumes Y up, so a Z-up pitch shows as a turn
+    (the "pitched" groups it listed were skinning matrices).
+  - **Source: `ZPlayerCharacter` (primary vtable exe+0x1c8de08, COL offset 0) +0xB28 yaw, +0xB2C pitch, float radians.**
+    guided.py with `--ref <ZGenericCamera>+0x68 --eye +0x74 --up z` listed the yaw (radians, sign -1). Write tests (game
+    in front, no input): yaw +0.5 kept and the camera's +0x68 row turned 28.6 deg (heading decreased); pitch +0.3 kept,
+    row Z 0.0215 -> 0.3159 (sin of the new pitch: + = up). Pitch limits, cover/third-person cameras, aiming/scope and
+    cutscenes not checked yet; yaw direction on screen (left/right) not confirmed by the user.
+- 2026-11-15 **Deus Ex: Mankind Divided: Dawn engine module (`src/engines/dawn/`), gyro working in game** (no version bump).
+  - Detection: `DXMD.exe` with `..\runtime\`. Vtables from the RTTI names at start (`ZPlayerCharacter` exe+0x1C8DE08,
+    `ZGenericCamera` exe+0x1B79208 in 1.19); heap scan on a thread of its own (2 s rescans, ~0.2 s each). Bug found: the
+    scan thread's own stack holds the vtables it compares against and counted as an object (1 "player" with a new address
+    every scan in the menu, 2 in game, so none turned): its stack is skipped.
+  - Frame: the exe's only `PeekMessageW` call (exe+0x14936C6) is the launcher's loop; the game window is pumped by
+    `GetMessageW` (exe+0x14855FF) on a thread of its own, so the core saw no frame after the launcher (no gyro, XInput or
+    F10 panel). Now Present-driven, like Northlight: a frame thread woken by each Present (overlay::on_present), 8 ms timer
+    without it. Removing the launcher would not help. Open: writes come from that thread, not the game thread (Control/RDR2
+    needed pacing for that); next is a hook on the game's yaw update (WriteWatch on player+0xB28 got 0 hits twice,
+    the game wasn't in front).
+  - XInput: the exe loads `xinput1_4.dll` itself and takes `XInputGetState` by `GetProcAddress` (no import, polls 0):
+    `managed_input()` turns on the export hooks; then ~1500 polls per 10 s answered with controller 0.
+  - Gyro on only while the camera's third row matches the angles (cos >= 0.99); off in cutscenes, cover, takedowns.
+    Pitch sense: the game's +0xB2C grows looking **down** (the third camera row is the camera's back): `kPitchSense -1`.
+    Yaw +1 right. FOV seen: 54.5 unzoomed (learnt as the widest), 44.0 aiming.
+  - **Tested (user, DualSense, Heroic/GOG, no Steam Input):** gyro yaw and pitch correct, XInput works, F10 panel opens.
+- 2026-11-15 **DXMD (Dawn): frame paced on the player camera's updates and a 150 ms mismatch filter** (no version bump).
+  - The frame thread polls the player `ZGenericCamera`'s third row and position (+0x68..+0x80) every 1 ms and runs one
+    gyro frame per change (as RAGE's, RDR2), 20 ms timer without one. RDR2's 6 ms merge window merged a third of this
+    game's ~6.1 ms frames at ~163 FPS (107-119 turns/s); 2.5 ms (the game writes the whole matrix at once, Gyro4All never
+    writes it): 157-163 camera updates/s, 99-100% turned, in pure gameplay stretches.
+  - Gyro off only after the camera and the angles disagree (> ~8 deg) for 150 ms. Before: 22 of 33 off stretches under
+    1 s (14 under 0.25 s), fast turns with the camera a frame behind. After: short mismatches logged at 8.1-14.0 deg
+    (and a 42 deg pair) were kept; off stretches 0.02-49 s (two under 0.2 s left).
+  - Not yet: the turn still comes from Gyro4All's thread, not the game thread (a hook on the yaw update would need a
+    WriteWatch with the game in front).
+
+## 2026-11-15 Marvel's Guardians of the Galaxy (Epic, Dawn, Denuvo): recon and the Dawn module's GOTG path (untested)
+- `retail\gotg.exe` (changelist 2984448), Dawn like DXMD (`<root>\retail` + `<root>\runtime`), **Denuvo Anti-Tamper**
+  (no debugger). Ships its private PDB (`gotg.pdb`): types, fields and functions read offline with `cdbX64 -z`.
+  Plan: `games/MarvelGOTG/MODDING_PLAN.md`.
+- First run with 1.12.0: no engine detected (Dawn only knew DXMD.exe), so Unreal with no camera, and only one host frame:
+  `PeekMessage` runs about once a second after the splash. That is why the F10 panel never opened.
+- Camera (PDB): `ZCameraBehavior_AimRotation` (+ `_Offset`) `m_degYaw` +0xF0 / `m_degPitch` +0xF4 float degrees,
+  `m_bIsActive` +0x20, `m_pPlayerController` +0x180; `ZCameraBehavior_Rotation::UpdateInternal` clamps and stores them
+  each update. `ZPlayerCameraSystem` +0x48 the `ZRenderCameraEntity*` (world matrix +0x60, `m_fFovYDeg` +0x140),
+  `m_bIsInFreeCam` +0x90.
+- Dawn module: detected by its layout, not the exe name (`<root>\runtime\*.pc_headerlib`, Glacier 2's resource
+  format; HITMAN 3 has `.rpkg`); the route by the exe's RTTI classes (`ZPlayerCharacter` + `ZGenericCamera`: DXMD's
+  character angles; else `ZCameraBehavior_AimRotation`: GOTG's camera behaviours). The frame thread (paced on the render camera's world matrix) as in DXMD; the gyro
+  adds degrees to every active player AimRotation; zoom from `m_fFovYDeg`; XInput export hooks on for every Dawn game
+  (they also see imported calls). Not tested: whether a write sticks (the next update may rebuild from the shot), and the yaw
+  and pitch senses (DXMD's guessed).
+- First test (DualSense, the game's native PlayStation support): the gyro turns the view out of the box (senses right).
+  Pacing: the behaviours live only as long as their camera mode, and the heap scan (0.4 s every 2 s, over ~4000
+  `ZPlayerCameraSystem` hits) found each new one 0.5-4 s late, so the gyro kept stopping; turns 57-109/s at ~120 FPS.
+  Fix: the active behaviours read every frame from the camera's mode tree (`ZCameraEntity` +0x510 `m_modeStack`,
+  24-byte entries, +0x520 `m_modeOverrides`; `ZCameraMode` +0x40 `m_apBehaviors`), the scan only to find the camera;
+  frames paced on the active behaviour's `m_backupShot` (+0x40, copied in the update that stores the angles) and the
+  camera's world matrix; `m_bIsPaused` +0x59B as the pause.
+- Second test: the camera from `ZPlayerCameraSystem` +0x48 was found, but walking its mode tree never reached an active
+  aim behaviour (0 turns). Now the camera is the one hosting the active behaviour's mode (`ZCameraBehavior::m_mode`
+  +0x28 -> `ZCameraMode::m_pCamera` +0x28); when the tree walk still misses it, the scanned behaviours are turned
+  directly and the log prints the tree (`tree walk missed active behaviour`) to fix the layout.
+- Third test: the player's camera is not the `ZPlayerCameraSystem`'s (that one never hosts the aim modes); taken from
+  the active behaviour's mode (heap `ZCameraEntity` found 12 s after the first scan hit), the tree walk then follows new
+  behaviours with no gap (a blend of two `_Offset` behaviours, then a switch, gyro on throughout 74 s). Turns 86-101/s
+  at 120 FPS (3594 presents in 30 s), 99% turned, 0 stalls, ~138 us a frame. No aiming in this run (FOV stayed 55).
+- Pacing diagnostics (gyro only, 120 FPS): turns 119-120/s (the "merged" ones are the camera matrix ~1 ms after the
+  shot), but 5-7% of the writes lost (139-170 of ~2500 a 30 s: the game's update overwrote the turn written from
+  Gyro4All's thread) and the update spacing seen from the 1 ms poll spread 5-12 ms around the real 8.3 ms (each turn
+  covered an uneven time): the visible jitter. Fix: `ZCameraBehavior_Rotation::UpdateInternal` hooked through vtable
+  slot 8 of `ZCameraBehavior_AimRotation` and `_Offset` (a data pointer, no code patched under Denuvo); its first call
+  each frame runs Gyro4All's frame on the game thread before the update reads the angles. The frame thread only stands
+  in when no update ran for 50 ms (menus, panel); an SRW lock keeps the two from overlapping.
+- Game-thread frame test: the vtable hook works under Denuvo (no close), but `UpdateInternal` runs on the game's job
+  workers (8 different threads in 0.5 s), and Gyro4All's frame stalled for good on the first of them (no status line
+  from then on; most likely a core call that needs a pumping thread). So the frame stays on Gyro4All's thread: the
+  first behaviour update of each frame takes the pending turn and wakes that thread with an event (exact update times),
+  and each update adds the frame's turn to its own player behaviour's angles before the game reads them (no lost
+  writes). The 1 ms poll stays only for DXMD and for a failed hook.
+- Event-paced test (gyro only): no closes, update intervals 5-10 ms when the hook runs, but at 84-131 FPS the hook ran
+  only 44-72 frames/s: for up to 19 s of 30 the aim behaviours got no update (20 ms timeouts) while their angles still
+  followed the view (aiming, FOV 41-55; recoil-like pitch swings), so another behaviour class drives the camera then.
+  The turn left pending in those stretches landed all at once when they updated again: the involuntary turns. Now
+  those stretches count as "gyro waits" (pending dropped), and the log lists the camera modes' behaviour classes.
+- Freeze (image stuck, process alive) 2.5 min into a session with the pending-drop build: camera updates and presents
+  stopped at once, Gyro4All's thread kept running. No dump of the hung process (WER's gotg.exe.<pid>.dmp files are a
+  startup exception in a thread's init, present in every session, before GyroLib loads). Unknown: hook, Denuvo or the
+  game. (A `DawnUpdateHook=0` A/B switch was added, then removed unused.)
+- 22 min session with the hook (pending-drop build): no freeze. In gameplay one turn per frame exactly (hook frames =
+  presents in 30 s windows, e.g. 4161/4160, 3766/3766, 4882/4882 at 125-160 FPS); several behaviour updates per frame
+  in blends (up to 8978 in 30 s); stretches with presents but no aim update were dialogues/cutscenes (modes with
+  `ZCameraBehavior_GuardianLookAt`), gyro waiting (15 times), no view jumps logged.
+- Diagnostics removed after that session: the pacing histograms and hook counters in the status line, the "game
+  turned behaviour" / "view moved" lines, the mode-tree and missed-tree dumps, the active-behaviour list and the
+  `DawnUpdateHook` switch. Kept: hook installed, frame thread, player camera found, gyro on/waits changes, FOV.
+  Not re-tested in game after the removal.
+- Quieter log: the heap scan line only when its counts change (cutscenes and menus rescan every 2 s with the same
+  result), gyro on/waits lines capped at 100, FOV lines at 50 (was 200). Builds, not tested in game.
