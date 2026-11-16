@@ -17,7 +17,7 @@ The purpose of this project is to provide a mod that natively enables gyro in ga
 
 - **Native gyro camera**: the gyro turns the game's own camera directly in memory, on top of the sticks. No mouse
   emulation, no Steam Input needed, no mixed-input UI flicker.
-- **In-game settings panel (`F10` / `start`+`select`)**: sensitivity, activation (always on, hold, toggle, Steam Controller grip sense), invert, smoothing,
+- **In-game settings panel (`F10` / `start`+`select`)**: sensitivity, activation (always on, hold, toggle), invert, smoothing,
   acceleration curves, calibration.
 - **Customizable sensitivity profiles** for aiming down sights, scopes and more (ADS, ALT_ADS, OTHER), on a hold or toggle button.
 - **Flick stick** and an optional **camera recenter** button.
