@@ -31,6 +31,7 @@
 #include <gyrolib/version.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cmath>
@@ -41,6 +42,7 @@
 #include <format>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -229,26 +231,49 @@ bool profile_button_down(SDL_Gamepad* pad, int button) {
     return SDL_GetGamepadButton(pad, SDL_GamepadButton(button));
 }
 
-// Steam Controller (2026): SDL reports the capacitive grips as plain buttons (misc5 = raw b21 left, misc6 = raw b20
-// right; measured on the puck). GyroLib only offers its GRIP SENSOR activation for buttons whose joystick property
-// marks them as grips, which SDL doesn't set: Gyro4All sets it (GyroLib re-reads it within 500 ms). The mapping
-// check keeps other layouts out.
+// We mark the Steam Controller's grip buttons (raw 21 left, 20 right) on its SDL joystick
+// so GyroLib offers its GRIP SENSOR activation for them.
+// This is needed because SDL reports the grips as plain buttons and GyroLib only treats
+// a button as a grip when this property is set.
 void mark_grip_sensors(SDL_Gamepad* pad) {
-    static SDL_JoystickID marked = 0;
-    const SDL_JoystickID id = pad ? SDL_GetGamepadID(pad) : 0;
-    if (!pad || id == marked || SDL_GetGamepadVendor(pad) != 0x28DE) return;
-    marked = id;
+    constexpr std::uint16_t kValveVendorId = 0x28DE;
+    // We name the grips by their raw joystick buttons and only mark pads whose mapping has them,
+    // because other Valve controllers (such as Steam's virtual pad) have a different button layout.
+    constexpr std::array<std::string_view, 2> kGripMappingEntries = {"misc5:b21,", "misc6:b20,"};
+
+    static SDL_JoystickID last_checked_pad = 0;
+
+    if (!pad || SDL_GetGamepadVendor(pad) != kValveVendorId) {
+        return;
+    }
+
+    const SDL_JoystickID pad_id = SDL_GetGamepadID(pad);
+
+    if (pad_id == last_checked_pad) {
+        return;
+    }
+
+    last_checked_pad = pad_id;
+
+    SDL_Joystick* joystick = SDL_GetGamepadJoystick(pad);
+
     char* mapping = SDL_GetGamepadMapping(pad);
-    const bool layout = mapping && std::strstr(mapping, "misc5:b21,") && std::strstr(mapping, "misc6:b20,");
-    if (!layout)
-        log("gyro: Valve controller %04X:%04X, %d raw buttons, not marked for grip sensors (mapping %s)",
-            SDL_GetGamepadVendor(pad), SDL_GetGamepadProduct(pad), SDL_GetNumJoystickButtons(SDL_GetGamepadJoystick(pad)),
-            mapping ? mapping : "none");
+    const std::string mapping_text = mapping ? mapping : "none";
     SDL_free(mapping);
-    if (!layout) return;
-    const SDL_PropertiesID props = SDL_GetJoystickProperties(SDL_GetGamepadJoystick(pad));
-    SDL_SetNumberProperty(props, "gyrolib.controls.button.21.grip_touch", GL_LEFT);
-    SDL_SetNumberProperty(props, "gyrolib.controls.button.20.grip_touch", GL_RIGHT);
+
+    const bool has_grip_layout = std::ranges::all_of(
+        kGripMappingEntries, [&](std::string_view entry) { return mapping_text.find(entry) != std::string::npos; });
+
+    if (!has_grip_layout) {
+        log("gyro: Valve controller %04X:%04X, %d raw buttons, not marked for grip sensors (mapping %s)",
+            SDL_GetGamepadVendor(pad), SDL_GetGamepadProduct(pad), SDL_GetNumJoystickButtons(joystick), mapping_text.c_str());
+
+        return;
+    }
+
+    const SDL_PropertiesID joystick_properties = SDL_GetJoystickProperties(joystick);
+    SDL_SetNumberProperty(joystick_properties, "gyrolib.controls.button.21.grip_touch", GL_LEFT);
+    SDL_SetNumberProperty(joystick_properties, "gyrolib.controls.button.20.grip_touch", GL_RIGHT);
     log("gyro: Steam Controller grip sensors marked (GRIP SENSOR activation available)");
 }
 
@@ -441,27 +466,60 @@ void register_views() {
     sync_zoom_support(views);
 }
 
-// Steam hides the controllers it handles from the game's SDL (SDL_GAMECONTROLLER_IGNORE_DEVICES, "0xVVVV/0xPPPP,...")
-// and shows its virtual pad instead. For the Steam Controller (2026), whose Steam Input can't be turned off, that
-// virtual pad has no grip sensors: un-hide the real one (wired 1302, puck 1304) for GyroLib's SDL, read when GyroLib
-// loads it. The game still gets Steam's virtual pad (XInput translation stays off: a real XInput pad is connected).
+// We unhide the real Steam Controller (1302/1304) from SDL so GyroLib
+// can read its grip sensors, while the game continues using Steam's virtual gamepad.
+// This is needed because Steam Input can't be disabled and its virtual pad doesn't
+// expose the grip sensors.
 void unhide_steam_controller() {
-    wchar_t list[4096] = {};
-    const DWORD n = GetEnvironmentVariableW(L"SDL_GAMECONTROLLER_IGNORE_DEVICES", list, 4096);
-    if (n == 0 || n >= 4096) return;
-    std::wstring kept, removed;
-    for (const wchar_t* p = list; *p;) {
-        const wchar_t* end = std::wcschr(p, L',');
-        std::wstring item(p, end ? end - p : std::wcslen(p));
-        p = end ? end + 1 : p + item.size();
-        std::wstring upper = item;
-        std::transform(upper.begin(), upper.end(), upper.begin(), ::towupper);
-        auto& out = upper == L"0X28DE/0X1302" || upper == L"0X28DE/0X1304" ? removed : kept;
-        if (!item.empty()) out += (out.empty() ? L"" : L",") + item;
+    // We match Steam's "0xVVVV/0xPPPP" entries upper-cased against the wired and puck IDs,
+    // because Steam writes them in lower case.
+    constexpr std::array<std::string_view, 2> kSteamControllerIds = {"0X28DE/0X1302", "0X28DE/0X1304"};
+
+    std::array<char, 4096> ignore_list{};
+
+    const DWORD length = GetEnvironmentVariableA(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES, ignore_list.data(),
+                                                 static_cast<DWORD>(ignore_list.size()));
+
+    if (length == 0 || length >= ignore_list.size()) {
+        return;
     }
-    log("gyro: Steam hides from SDL: %s%s", narrow(list).c_str(),
-        removed.empty() ? "" : (" (Steam Controller " + narrow(removed) + " shown to GyroLib for its grip sensors)").c_str());
-    if (!removed.empty()) SetEnvironmentVariableW(L"SDL_GAMECONTROLLER_IGNORE_DEVICES", kept.c_str());
+
+    std::string still_hidden, unhidden;
+    std::string_view remaining(ignore_list.data(), length);
+
+    while (!remaining.empty()) {
+        const std::size_t comma = remaining.find(',');
+        const std::string_view device_id = remaining.substr(0, comma);
+
+        remaining = comma == std::string_view::npos ? std::string_view() : remaining.substr(comma + 1);
+
+        if (device_id.empty()) {
+            continue;
+        }
+
+        std::string upper_id(device_id);
+        std::ranges::transform(upper_id, upper_id.begin(),
+                               [](unsigned char character) { return static_cast<char>(std::toupper(character)); });
+
+        const bool is_steam_controller = std::ranges::find(kSteamControllerIds, upper_id) != kSteamControllerIds.end();
+
+        std::string& destination = is_steam_controller ? unhidden : still_hidden;
+
+        if (!destination.empty()) {
+            destination += ',';
+        }
+
+        destination += device_id;
+    }
+
+    const std::string unhidden_note =
+        unhidden.empty() ? "" : " (Steam Controller " + unhidden + " shown to GyroLib for its grip sensors)";
+
+    log("gyro: Steam hides from SDL: %s%s", ignore_list.data(), unhidden_note.c_str());
+
+    if (!unhidden.empty()) {
+        SetEnvironmentVariableA(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES, still_hidden.c_str());
+    }
 }
 
 bool start_gyro() {
