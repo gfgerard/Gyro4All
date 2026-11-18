@@ -45,7 +45,8 @@
 | DOOM Eternal | ✅ Works (tested on the Steam version) | id Tech 7 | Install next to `DOOMEternalx64vk.exe` in the game's main folder. Turn Steam Input off for the game. Campaign only: never play BattleMode online with it. |
 | DOOM: The Dark Ages | ✅ Works (tested on the Steam version) | id Tech 8 | Install next to `DOOMTheDarkAges.exe` in the game's main folder. Turn Steam Input off for the game. |
 | DUSK | ✅ Works (tested on the Steam version) | Unity | Install next to `DUSK.exe` in the game's main folder. For the controller, set `controllermode = ds4` in the game's `mappings\*.ini` files (they ship as `xbox360`: with a PlayStation pad the camera looks up and spins). |
-| EVERSPACE 2 | ✅ Works (tested on the Steam version) | Unreal Engine 5 | Install in `ES2\Binaries\Win64`, next to `ES2-Win64-Shipping.exe`. Turns the ship (its profile). |
+| EVERSPACE | ✅ Works | Unreal Engine | Install next to `RSG-Win64-Shipping.exe`. |
+| EVERSPACE 2 | ✅ Works | Unreal Engine 5 | Install in `ES2\Binaries\Win64`, next to `ES2-Win64-Shipping.exe`. |
 | The Forest | ✅ Works | Unity (Mono) | Install next to `TheForest.exe` in the game's main folder. Single-player only: never play multiplayer with it. |
 | Gears of War: E-Day (Game Pass) | ⚠️ Campaign only, **with EasyAntiCheat disabled**. Only usable with "snap" aim assist | Unreal Engine 5.6.1 | Install in `Binaries\WinGDK`. The gyro starts a few seconds after the main menu appears. Never play online with it. |
 | Ghostrunner | ✅ Works | Unreal Engine 4.26.2 | |

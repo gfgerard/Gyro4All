@@ -200,7 +200,8 @@ int object_array_stride(uintptr_t a, uintptr_t* chunk0_out = nullptr, int* objec
     int32_t max = 0, num = 0, max_chunks = 0, num_chunks = 0;
     if (!rd(a + 0x10, max) || !rd(a + 0x14, num) || !rd(a + 0x18, max_chunks) || !rd(a + 0x1C, num_chunks)) return 0;
     if (num <= 1000 || num > max || max < 0x10000 || max > 0x10000000) return 0;
-    if (max_chunks != (max + 65535) / 65536) return 0;
+    // MaxChunks is MaxElements / 65536 rounded up; EVERSPACE (UE 4.20, MaxElements 2129920) rounds it down.
+    if (max_chunks != (max + 65535) / 65536 && max_chunks != max / 65536) return 0;
     if (num_chunks < (num + 65535) / 65536 || num_chunks > max_chunks) return 0;
     const uintptr_t chunks = rdp(a);
     const uintptr_t chunk0 = chunks ? rdp(chunks) : 0;
@@ -1431,9 +1432,11 @@ bool executable_code(uintptr_t p) {
     return mbi.State == MEM_COMMIT && (mbi.Protect & exec);
 }
 
-// UStruct::Children (UField*: functions in UE 4.25+, before ChildProperties) and UField::Next (right after UObject).
+// UStruct::Children (UField*) and UField::Next (right after UObject). UE 4.25+: the functions, just before
+// ChildProperties (FField properties). UE <= 4.24: properties and functions in one list, the one found as
+// "ChildProperties" (EVERSPACE, UE 4.20: +0x38, right after SuperStruct).
 Obj find_function(Obj cls, const char* name) {
-    const int children = g_child_props - 8, next = g_obj_outer + 8;
+    const int children = g_field_class_name ? g_child_props : g_child_props - 8, next = g_obj_outer + 8;
     for (int depth = 0; cls && depth < 64; ++depth, cls = rdp(cls + g_super)) {
         Obj f = rdp(cls + children);
         for (int i = 0; f && i < 2000; ++i, f = rdp(f + next))
