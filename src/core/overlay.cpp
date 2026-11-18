@@ -20,12 +20,14 @@
 #include <gyrolib/overlay.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <fstream>
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace gyro4all::overlay {
@@ -128,6 +130,46 @@ int32_t g_last_render_result = GL_OK;
 uint32_t g_last_capture = 0;
 bool g_last_panel_open = false;
 void* g_foreign_swapchain = nullptr;
+
+// A captured DX12 swapchain with its command queue, window, colour space and the number of references we hold on it.
+struct SwapchainCapture {
+    IDXGISwapChain3* swapchain = nullptr;
+    ID3D12CommandQueue* queue = nullptr;
+    IDXGISwapChain3* render_swapchain = nullptr;
+    ID3D12CommandQueue* render_queue = nullptr;
+    HWND hwnd = nullptr;
+    ULONG held_refs = 0;
+    uint32_t color_space = G4A_COLOR_SPACE_UNKNOWN;
+};
+
+// We keep the previously captured swapchain and its references, because a second swapchain can be created while the
+// game keeps presenting the first one.
+SwapchainCapture g_previous_capture;
+
+// The time of the last Present on the captured DX12 swapchain, in milliseconds.
+std::atomic<ULONGLONG> g_captured_present_ms{0};
+
+// We wait this many milliseconds without a Present on the captured swapchain before capturing the swapchain the game
+// presents instead.
+constexpr ULONGLONG kAdoptIdleMs = 500;
+
+// Only call this while holding g_mutex.
+SwapchainCapture current_capture() {
+    return {g_swapchain, g_queue, g_render_swapchain, g_render_queue, g_hwnd, g_held_refs, g_dx12_color_space.load()};
+}
+
+void release_capture(SwapchainCapture& capture) {
+    const std::array<IUnknown*, 4> objects = {capture.render_swapchain, capture.render_queue, capture.queue,
+                                              capture.swapchain};
+
+    for (IUnknown* object : objects) {
+        if (object) {
+            object->Release();
+        }
+    }
+
+    capture = {};
+}
 
 // ---------------------------------------------------------------- render worker
 //
@@ -278,6 +320,45 @@ void note_present() {
 }
 
 bool adopt_presented(IDXGISwapChain* sc);
+std::string describe(const void* object);
+
+// We capture the previous swapchain again when the game presents it and the captured swapchain has stopped presenting,
+// because the overlay only renders on the captured swapchain.
+bool recapture_previous_swapchain(IDXGISwapChain* swapchain) {
+    const ULONGLONG idle_ms = GetTickCount64() - g_captured_present_ms.load();
+
+    if (idle_ms < kAdoptIdleMs) {
+        return false;
+    }
+
+    {
+        std::lock_guard lock(g_mutex);
+
+        const bool is_previous = g_previous_capture.swapchain &&
+                                 static_cast<IUnknown*>(swapchain) == static_cast<IUnknown*>(g_previous_capture.swapchain);
+
+        if (!is_previous) {
+            return false;
+        }
+
+        const SwapchainCapture previous = std::exchange(g_previous_capture, current_capture());
+
+        g_swapchain = previous.swapchain;
+        g_queue = previous.queue;
+        g_render_swapchain = previous.render_swapchain;
+        g_render_queue = previous.render_queue;
+        g_hwnd = previous.hwnd;
+        g_held_refs = previous.held_refs;
+        g_dx12_color_space = previous.color_space;
+        g_reinit = true;
+    }
+
+    log("overlay: the game presents swapchain %s while the captured swapchain has not presented for %llu ms, so the "
+        "previous swapchain is captured again",
+        describe(swapchain).c_str(), idle_ms);
+
+    return true;
+}
 
 void render(IDXGISwapChain* sc) {
     if (panel_host::is_dxgi_target(sc) || adopt_presented(sc)) {  // D3D10/D3D11: gyro4all.dll draws the static panel
@@ -285,13 +366,16 @@ void render(IDXGISwapChain* sc) {
         return;
     }
     if (!g_overlay.load() || g_renderer_failed) return;
-    if (!is_captured(sc)) {
+    if (!is_captured(sc) && !recapture_previous_swapchain(sc)) {
         if (g_foreign_swapchain != sc) {
             g_foreign_swapchain = sc;
             log("overlay: Present on a swapchain that wasn't captured (%p); panel not drawn there", static_cast<void*>(sc));
         }
         return;
     }
+
+    g_captured_present_ms = GetTickCount64();
+
     on_worker(&render_job);
 }
 
@@ -639,18 +723,26 @@ void on_swapchain(IUnknown* device, HWND hwnd, IUnknown* created) {
     if (render_queue == queue) queue->AddRef();
     hook_dx12_swapchain(sc3);
     const ULONG held = render_sc == sc3 ? 2 : 1;
+    SwapchainCapture older_capture;
     {
         std::lock_guard lock(g_mutex);
+
+        if (g_swapchain) {
+            g_reinit = true;  // replaced swapchain: old buffers are released on the render worker
+            older_capture = std::exchange(g_previous_capture, current_capture());
+        }
+
         g_held_refs = held;
         g_dx12_color_space = G4A_COLOR_SPACE_UNKNOWN;
-        if (g_swapchain) g_reinit = true;  // replaced swapchain: old buffers are released on the render worker
         std::swap(g_swapchain, sc3);
         std::swap(g_queue, queue);
         std::swap(g_render_swapchain, render_sc);
         std::swap(g_render_queue, render_queue);
         g_hwnd = hwnd;
     }
-    // Old references are released only after the render thread re-inits (they stay valid until then).
+    // We release the capture before the previous one here, because GyroLib holds its own references to the swapchain it
+    // still renders with.
+    release_capture(older_capture);
     log("overlay: captured D3D12 swapchain for window %p", static_cast<void*>(hwnd));
 }
 
@@ -688,7 +780,6 @@ bool lazy_native_factory(const void* factory) {
 // D3D10/D3D11 one, made where the factory hooks didn't see it: the panel moves to it (and its input to its window).
 // Also before the panel DLL is in: attach() waits for a target that presents, so a swapchain made after the game's and
 // never presented (a throwaway one on a hidden window) would otherwise keep the panel out for good.
-constexpr ULONGLONG kAdoptIdleMs = 500;
 std::atomic<IDXGISwapChain*> g_not_adopted{nullptr};  // the last one found not to be D3D10/D3D11 or windowless
 
 bool adopt_presented(IDXGISwapChain* sc) {
@@ -778,8 +869,10 @@ void release_job() {
     IUnknown* objects[4];
     IUnknown* released = nullptr;
     IDXGISwapChain3* native = nullptr;  // under Streamline's proxy: its references left are logged
+    SwapchainCapture previous_capture;
     {
         std::lock_guard lock(g_mutex);
+        std::swap(previous_capture, g_previous_capture);
         native = native_of(g_swapchain);
         released = g_swapchain;
         objects[0] = g_render_swapchain, objects[1] = g_render_queue, objects[2] = g_queue, objects[3] = g_swapchain;
@@ -790,6 +883,7 @@ void release_job() {
     for (IUnknown* o : objects)
         if (o) left = o->Release();  // the captured swapchain last: what is left of it is the game's or a wrapper's
     const ULONG native_left = native ? native->Release() : 0;
+    release_capture(previous_capture);
     log("overlay: %s: released swapchain %p (%lu references left; native swapchain %p: %lu)", g_release_reason,
         static_cast<void*>(released), left, static_cast<void*>(native), native_left);
     t_releasing = false;
