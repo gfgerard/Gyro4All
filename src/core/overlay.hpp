@@ -27,6 +27,10 @@ unsigned capture();
 // buttons or wheel): games that read Raw Input themselves (GetRawInputData in their own pump before any dispatch, or
 // GetRawInputBuffer, Zombie Army 4) never reach the window procedure that keeps the mouse from them.
 void filter_raw_input(void* raw_input);
+
+// A controller read through the game's old Steam Input (SDL ordinals): its d-pad, cross and circle drive GyroLib's panel
+// as keys while the panel captures the controller. Game thread (the window thread), once per frame.
+void steam_pad_navigation(uint32_t sdl_buttons, uint64_t now_ns);
 // True once GyroLib's DX12 panel is attached (it brings GyroLib's own Steam Input mouse option).
 bool gyrolib_panel();
 // Game thread: poll the configured F-key (gl_get_menu_key) and toggle the panel on its press.

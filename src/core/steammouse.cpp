@@ -3,6 +3,7 @@
 #include "dinputpad.hpp"
 #include "hooks.hpp"
 #include "log.hpp"
+#include "overlay.hpp"
 
 #include <windows.h>
 
@@ -80,6 +81,7 @@ std::atomic<HRAWINPUT> g_counted{nullptr};
 
 UINT WINAPI hk_get_data(HRAWINPUT input, UINT command, LPVOID data, PUINT size, UINT header_size) {
     const UINT n = g_get_data(input, command, data, size, header_size);
+    if (command == RID_INPUT && data && n != UINT(-1) && n >= sizeof(RAWINPUTHEADER)) overlay::filter_raw_input(data);
     if (command == RID_INPUT && data && n != UINT(-1) && n >= sizeof(RAWINPUTHEADER) + sizeof(RAWMOUSE) && blocking_now()) {
         zero_injected(static_cast<RAWINPUT*>(data), g_counted.exchange(input) != input);
     }
@@ -88,10 +90,12 @@ UINT WINAPI hk_get_data(HRAWINPUT input, UINT command, LPVOID data, PUINT size, 
 
 UINT WINAPI hk_get_buffer(PRAWINPUT data, PUINT size, UINT header_size) {
     const UINT n = g_get_buffer(data, size, header_size);
-    if (data && n != UINT(-1) && n && blocking_now()) {
+    if (data && n != UINT(-1) && n) {
+        const bool blocking = blocking_now();
         PRAWINPUT block = data;
         for (UINT i = 0; i < n; ++i) {  // NEXTRAWINPUTBLOCK: each block starts 8-byte aligned after the previous one
-            zero_injected(block);
+            overlay::filter_raw_input(block);
+            if (blocking) zero_injected(block);
             block = reinterpret_cast<PRAWINPUT>((reinterpret_cast<uintptr_t>(block) + block->header.dwSize + 7) & ~uintptr_t(7));
         }
     }
@@ -113,7 +117,10 @@ void* raw_function(const char* nt_name, const char* name, const char*& from) {
     return user32 ? reinterpret_cast<void*>(GetProcAddress(user32, name)) : nullptr;
 }
 
+bool g_raw_hooked = false;
 void hook_raw_input() {
+    if (g_raw_hooked) return;
+    g_raw_hooked = true;
     const char *data_from = "", *buffer_from = "";
     void* data = raw_function("NtUserGetRawInputData", "GetRawInputData", data_from);
     void* buffer = raw_function("NtUserGetRawInputBuffer", "GetRawInputBuffer", buffer_from);
@@ -187,6 +194,9 @@ bool start_hook() {
 
 void frame(const Frame& f, double& pitch, double& yaw) {
     pitch = yaw = 0;
+    // The panel's mouse filter on every Raw Input read too (inline): Horizon Zero Dawn's reads miss the import hooks, so
+    // its clicks went through the open panel.
+    if (f.panel_mouse) hook_raw_input();
     // GyroLib's own row (input.steam_mouse, per view) is the setting: GyroLib shows it while its mouse bridge exists
     // (overlay.cpp keeps one, never fed, next to gyro4all.dll's panel). The view in front, else the last one seen.
     static uint32_t view = 1;
@@ -196,8 +206,9 @@ void frame(const Frame& f, double& pitch, double& yaw) {
     double value = GL_STEAM_MOUSE_BLOCK;
     if (f.ctx && gl_setting_get(f.ctx, id, &value) != GL_OK) value = GL_STEAM_MOUSE_BLOCK;
     const int mode = int(value);
-    const bool steam = f.pad && SDL_GetGamepadSteamHandle(f.pad) != 0;
-    const bool block = mode != GL_STEAM_MOUSE_PASSTHROUGH && f.focused && !f.gyrolib_panel && steam;
+    const bool steam = f.legacy_steam || (f.pad && SDL_GetGamepadSteamHandle(f.pad) != 0);
+    const bool ours = !f.gyrolib_panel || f.legacy_steam;
+    const bool block = mode != GL_STEAM_MOUSE_PASSTHROUGH && f.focused && ours && steam;
     static bool blocking = false;
     static uint32_t acquires = 0;
     if (block && start_hook()) {
@@ -220,7 +231,7 @@ void frame(const Frame& f, double& pitch, double& yaw) {
     }
     char state[96];
     std::snprintf(state, sizeof(state), "%s",
-                  f.gyrolib_panel ? "left to GyroLib's own option (DX12 panel)"
+                  !ours ? "left to GyroLib's own option (DX12 panel)"
                   : !steam        ? "passes through (the controller isn't under Steam Input)"
                   : g_hook_failed ? "passes through (no low-level mouse hook)"
                   : mode == GL_STEAM_MOUSE_PASSTHROUGH ? "passes through (Pass through)"

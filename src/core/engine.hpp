@@ -119,6 +119,10 @@ public:
     virtual bool views_changed() { return false; }
     // The gyro must not turn the camera now, although the view allows it (e.g. while a camera probe captures).
     virtual bool hold_gyro() const { return false; }
+    // The game holds its camera still until it sees right-stick input (Horizon Zero Dawn for about two seconds after the
+    // bow is drawn with L2): the core then gives the game a brief right-stick touch when the gyro starts turning.
+    // 0 when not; otherwise a number that changes with every new hold (each one gets its touch).
+    virtual uint32_t camera_waits_for_stick() const { return 0; }
     // Before apply: trims the turn (degrees, the gyro's senses) to what the active view can still take, e.g. up to the
     // game's pitch limit, so a turn stopped there isn't judged as a write the game undid (the stick fallback).
     virtual void limit_turn(double& /*pitch*/, double& /*yaw*/) {}

@@ -6,6 +6,7 @@
 #include "hooks.hpp"
 #include "log.hpp"
 #include "longpress.hpp"
+#include "com.hpp"
 #include "dinputpad.hpp"
 #include "steammouse.hpp"
 #include "stick_camera.hpp"
@@ -1005,24 +1006,470 @@ void log_gyro_changes(bool focused, const gl_gyro_state& gs) {
     restore_after_reopen(d, now, reopened);
 }
 
+// Steamworks SDKs before 1.48 (Horizon Zero Dawn's steam_api64.dll) export no SteamAPI_SteamInput_v00N accessor, which
+// GyroLib's reader looks for. Their public SteamInternal_FindOrCreateUserInterface (what the SDK's SteamInput() calls)
+// gives SteamInput001, the only version such a DLL's flat functions were built for; it feeds GyroLib's provider adapter
+// (gl_steam_create). Not SteamClient(): that legacy export's interface version doesn't match the flat functions'.
+namespace legacy_steam {
+struct MotionData {  // InputMotionData_t
+    float quat_x, quat_y, quat_z, quat_w;
+    float accel_x, accel_y, accel_z;  // +/-32768 = +/-2 g
+    float vel_x, vel_y, vel_z;        // +/-32768 = +/-2000 deg/s
+};
+using Handle_t = int32_t(__cdecl*)();
+using FindInterface_t = void*(__cdecl*)(int32_t user, const char* version);
+using Connected_t = int(__cdecl*)(void* input, uint64_t* handles);
+using Motion_t = MotionData(__cdecl*)(void* input, uint64_t handle);
+
+void* g_input = nullptr;
+Connected_t g_connected = nullptr;
+Motion_t g_motion = nullptr;
+gl_steam* g_reader = nullptr;
+int g_pads_connected = 0;  // controllers this reader's Steam Input reported at its last poll
+
+bool has_accessor(HMODULE steam) {
+    for (int v = 1; v <= 9; ++v) {
+        char name[32];
+        std::snprintf(name, sizeof name, "SteamAPI_SteamInput_v%03d", v);
+        if (GetProcAddress(steam, name)) return true;
+    }
+    return false;
+}
+
+std::atomic<bool> g_faulted{false};  // an access violation in the game's Steam DLL: the reader reports nothing more
+
+int connected(uint64_t* all) {
+    if (g_faulted) return 0;
+    __try {
+        return g_connected(g_input, all);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_faulted = true;
+        return 0;
+    }
+}
+
+bool read_motion(uint64_t handle, MotionData* m) {
+    if (g_faulted) return false;
+    __try {
+        *m = g_motion(g_input, handle);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_faulted = true;
+        return false;
+    }
+}
+
+uint32_t GL_CALL handles(void*, uint64_t* out, uint32_t capacity) {
+    uint64_t all[16] = {};  // STEAM_INPUT_MAX_COUNT
+    const int n = std::clamp(connected(all), 0, 16);
+    const uint32_t count = std::min(uint32_t(n), capacity);
+    std::memcpy(out, all, count * sizeof(uint64_t));
+    g_pads_connected = n;
+    return count;
+}
+
+extern uint64_t g_now_ns;  // this frame's poll time (defined with the controls below)
+
+uint32_t GL_CALL motion(void*, uint64_t handle, gl_steam_motion* out) {
+    MotionData m{};
+    if (!read_motion(handle, &m)) return 0;
+    *out = {m.accel_x, m.accel_y, m.accel_z, m.vel_x, m.vel_y, m.vel_z};
+    return 1;
+}
+
+// Controls. These old DLLs have no raw button state, only the game's own actions. The ones read here are Horizon Zero
+// Dawn's (action set GamepadSetting), named after the Xbox-style button they stand for; under its official layout each one
+// is that physical button. A button counts only while its action is bound to a physical origin, and its label is that
+// origin's name from Steam, so a remapped layout still shows which button is read.
+#pragma pack(push, 1)  // isteaminput.h packs these to 1
+struct DigitalData {
+    bool state, active;
+};
+struct AnalogData {
+    int32_t mode;
+    float x, y;
+    bool active;
+};
+#pragma pack(pop)
+static_assert(sizeof(DigitalData) == 2 && sizeof(AnalogData) == 13);
+using ActionHandle_t = uint64_t(__cdecl*)(void* input, const char* name);
+using Digital_t = DigitalData(__cdecl*)(void* input, uint64_t handle, uint64_t action);
+using Analog_t = AnalogData(__cdecl*)(void* input, uint64_t handle, uint64_t action);
+using CurrentSet_t = uint64_t(__cdecl*)(void* input, uint64_t handle);
+using Origins_t = int(__cdecl*)(void* input, uint64_t handle, uint64_t set, uint64_t action, int32_t* origins);
+using OriginName_t = const char*(__cdecl*)(void* input, int32_t origin);
+
+struct Button {
+    const char* action;
+    uint32_t ordinal;  // SDL_GamepadButton
+};
+constexpr Button kButtons[] = {
+    {"button_a", SDL_GAMEPAD_BUTTON_SOUTH},
+    {"button_b", SDL_GAMEPAD_BUTTON_EAST},
+    {"button_x", SDL_GAMEPAD_BUTTON_WEST},
+    {"button_y", SDL_GAMEPAD_BUTTON_NORTH},
+    {"button_start", SDL_GAMEPAD_BUTTON_START},
+    {"button_touchpad", SDL_GAMEPAD_BUTTON_TOUCHPAD},
+    // The game has no action for Back (DualSense Create): its touchpad click is the map, Back's place on an Xbox pad. Read
+    // as Back too, so GyroLib's Start + Back panel shortcut (shown only when both exist) is Options + touchpad here.
+    {"button_touchpad", SDL_GAMEPAD_BUTTON_BACK},
+    {"left_stick_click", SDL_GAMEPAD_BUTTON_LEFT_STICK},
+    {"right_stick_click", SDL_GAMEPAD_BUTTON_RIGHT_STICK},
+    {"left_bumper", SDL_GAMEPAD_BUTTON_LEFT_SHOULDER},
+    {"right_bumper", SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER},
+    {"dpad_up", SDL_GAMEPAD_BUTTON_DPAD_UP},
+    {"dpad_down", SDL_GAMEPAD_BUTTON_DPAD_DOWN},
+    {"dpad_left", SDL_GAMEPAD_BUTTON_DPAD_LEFT},
+    {"dpad_right", SDL_GAMEPAD_BUTTON_DPAD_RIGHT},
+    {"right_back_panel", SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1},
+    {"left_back_panel", SDL_GAMEPAD_BUTTON_LEFT_PADDLE1},
+};
+enum { kLeftStick, kRightStick, kLeftTrigger, kRightTrigger, kAnalogs };
+constexpr const char* kAnalogNames[kAnalogs] = {"left_stick", "right_stick", "left_trigger", "right_trigger"};
+constexpr int kMaxOrigins = 8;  // STEAM_INPUT_MAX_ORIGINS
+
+ActionHandle_t g_digital_handle = nullptr, g_analog_handle = nullptr;
+Digital_t g_digital = nullptr;
+Analog_t g_analog = nullptr;
+CurrentSet_t g_current_set = nullptr;
+Origins_t g_digital_origins = nullptr, g_analog_origins = nullptr;
+OriginName_t g_origin_name = nullptr;
+
+uint64_t g_digital_actions[std::size(kButtons)] = {};
+uint64_t g_analog_actions[kAnalogs] = {};
+bool g_actions_ready = false;
+ULONGLONG g_next_action_lookup = 0;
+uint64_t g_now_ns = 0;
+
+struct Pad {
+    uint64_t handle = 0;
+    uint32_t buttons = 0;   // bound buttons, SDL ordinal bits
+    uint32_t analogs = 0;   // bound analog actions, 1 << kLeftStick...
+    ULONGLONG next_origins = 0;
+    std::array<std::string, 32> labels;
+    std::string trigger_labels[2];
+};
+std::array<Pad, 16> g_pads;
+uint32_t g_nav_buttons = 0;  // the first controller's buttons and axes this frame, for the panel's navigation
+int16_t g_nav_axes[6] = {};
+bool g_nav_seen = false;
+
+// While a panel captures the gamepad, the game's own reads of its actions return released buttons and centred axes. The
+// game calls Steam Input through the interface object (C++ virtuals), not the flat functions Gyro4All calls, so the
+// object gets a private vtable (com::make_private) with these two slots replaced; Gyro4All's own reads (t_ours) pass.
+std::atomic<bool> g_block_game{false};
+thread_local bool t_ours = false;
+using VDigital_t = DigitalData*(__fastcall*)(void* self, DigitalData* ret, uint64_t handle, uint64_t action);
+using VAnalog_t = AnalogData*(__fastcall*)(void* self, AnalogData* ret, uint64_t handle, uint64_t action);
+int g_digital_slot = -1, g_analog_slot = -1;
+VDigital_t g_vdigital = nullptr;
+VAnalog_t g_vanalog = nullptr;
+
+DigitalData* __fastcall hk_vdigital(void* self, DigitalData* ret, uint64_t handle, uint64_t action) {
+    DigitalData* r = com::original_of(self, g_digital_slot, g_vdigital)(self, ret, handle, action);
+    if (!t_ours && g_block_game.load(std::memory_order_relaxed) && r) r->state = false;
+    return r;
+}
+// A brief right-stick touch the game gets (camera_waits_for_stick): until this time, this deflection.
+std::atomic<uint64_t> g_nudge_until{0};
+std::atomic<float> g_nudge_x{0}, g_nudge_y{0};
+AnalogData* __fastcall hk_vanalog(void* self, AnalogData* ret, uint64_t handle, uint64_t action) {
+    AnalogData* r = com::original_of(self, g_analog_slot, g_vanalog)(self, ret, handle, action);
+    if (!t_ours && g_block_game.load(std::memory_order_relaxed) && r) r->x = r->y = 0;
+    else if (!t_ours && r && action && action == g_analog_actions[kRightStick] &&
+             g_now_ns < g_nudge_until.load(std::memory_order_relaxed) && std::fabs(r->x) + std::fabs(r->y) < 0.2f) {
+        r->x = g_nudge_x.load(std::memory_order_relaxed);
+        r->y = g_nudge_y.load(std::memory_order_relaxed);
+        r->active = true;
+    }
+    return r;
+}
+
+// The vtable slot a flat function calls: its first call/jmp through [rax+disp] (mov rax,[rcx] first).
+int flat_slot(const void* flat) {
+    const uint8_t* c = static_cast<const uint8_t*>(flat);
+    uint8_t b[96] = {};
+    SIZE_T got = 0;
+    if (!c || !ReadProcessMemory(GetCurrentProcess(), c, b, sizeof b, &got) || got != sizeof b) return -1;
+    for (int i = 0; i + 2 < int(sizeof b); ++i) {
+        if (b[i] != 0xFF) continue;
+        const uint8_t m = b[i + 1];
+        if (m == 0x50 || m == 0x60) return b[i + 2] / 8;  // call/jmp [rax+disp8]
+        if ((m == 0x90 || m == 0xA0) && i + 6 <= int(sizeof b)) {  // call/jmp [rax+disp32]
+            int32_t d = 0;
+            std::memcpy(&d, b + i + 2, 4);
+            return d / 8;
+        }
+    }
+    return -1;
+}
+
+void hook_game_reads(void* digital_flat, void* analog_flat) {
+    g_digital_slot = flat_slot(digital_flat);
+    g_analog_slot = flat_slot(analog_flat);
+    if (g_digital_slot < 0 || g_analog_slot < 0 || g_digital_slot > 64 || g_analog_slot > 64) {
+        log("gyro: Steam Input: action data slots not found (%d, %d); the game keeps the controller under the panel",
+            g_digital_slot, g_analog_slot);
+        return;
+    }
+    void** vt = com::vtable_of(g_input);
+    g_vdigital = reinterpret_cast<VDigital_t>(vt[g_digital_slot]);
+    g_vanalog = reinterpret_cast<VAnalog_t>(vt[g_analog_slot]);
+    const com::SlotHook hooks[] = {{g_digital_slot, reinterpret_cast<void*>(&hk_vdigital)},
+                                   {g_analog_slot, reinterpret_cast<void*>(&hk_vanalog)}};
+    const bool ok = com::make_private(g_input, hooks, std::size(hooks));
+    log("gyro: Steam Input: the game's action reads %s (slots %d, %d): held back while a panel captures the controller",
+        ok ? "hooked" : "not hooked", g_digital_slot, g_analog_slot);
+}
+
+// One guarded call into the game's Steam DLL: an access violation turns the reader off instead of closing the game.
+template <class F>
+bool guarded(F&& call) {
+    if (g_faulted) return false;
+    t_ours = true;
+    __try {
+        call();
+        t_ours = false;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        t_ours = false;
+        g_faulted = true;
+        return false;
+    }
+}
+
+// The action handles exist once the game has loaded its action manifest; looked up again once a second until then.
+bool actions_ready() {
+    if (g_actions_ready) return true;
+    if (!g_digital_handle || !g_analog_handle || !g_digital || !g_analog) return false;
+    const ULONGLONG now = GetTickCount64();
+    if (now < g_next_action_lookup) return false;
+    g_next_action_lookup = now + 1000;
+    int found = 0;
+    for (size_t i = 0; i < std::size(kButtons); ++i)
+        if (guarded([&] { g_digital_actions[i] = g_digital_handle(g_input, kButtons[i].action); }) && g_digital_actions[i])
+            ++found;
+    for (int i = 0; i < kAnalogs; ++i)
+        if (guarded([&] { g_analog_actions[i] = g_analog_handle(g_input, kAnalogNames[i]); }) && g_analog_actions[i])
+            ++found;
+    if (!found) return false;
+    g_actions_ready = true;
+    log("gyro: Steam Input controls: %d of %zu of the game's action handles found", found, std::size(kButtons) + kAnalogs);
+    return true;
+}
+
+Pad& pad(uint64_t handle) {
+    for (Pad& p : g_pads)
+        if (p.handle == handle) return p;
+    for (Pad& p : g_pads)
+        if (!p.handle) return p = Pad{handle};
+    return g_pads[0] = Pad{handle};
+}
+
+std::string origin_name(int32_t origin) {
+    const char* name = nullptr;
+    if (g_origin_name) guarded([&] { name = g_origin_name(g_input, origin); });
+    return name ? name : "";
+}
+
+// Which actions have a physical origin in the current action set, and that origin's name. Once a second: layouts change.
+void refresh_origins(Pad& p) {
+    const ULONGLONG now = GetTickCount64();
+    if (now < p.next_origins) return;
+    p.next_origins = now + 1000;
+    uint64_t set = 0;
+    if (!g_current_set || !g_digital_origins || !guarded([&] { set = g_current_set(g_input, p.handle); }) || !set) return;
+    uint32_t buttons = 0, analogs = 0;
+    for (size_t i = 0; i < std::size(kButtons); ++i) {
+        int32_t origins[kMaxOrigins] = {};
+        int n = 0;
+        if (!g_digital_actions[i] ||
+            !guarded([&] { n = g_digital_origins(g_input, p.handle, set, g_digital_actions[i], origins); }) || n <= 0)
+            continue;
+        buttons |= 1u << kButtons[i].ordinal;
+        p.labels[kButtons[i].ordinal] = origin_name(origins[0]);
+    }
+    for (int i = 0; i < kAnalogs && g_analog_origins; ++i) {
+        int32_t origins[kMaxOrigins] = {};
+        int n = 0;
+        if (!g_analog_actions[i] ||
+            !guarded([&] { n = g_analog_origins(g_input, p.handle, set, g_analog_actions[i], origins); }) || n <= 0)
+            continue;
+        analogs |= 1u << i;
+        if (i >= kLeftTrigger) p.trigger_labels[i - kLeftTrigger] = origin_name(origins[0]);
+    }
+    if (buttons != p.buttons || analogs != p.analogs)
+        log("gyro: Steam Input controls of %016llx: buttons %08x, sticks %s%s, triggers %s%s", (unsigned long long)p.handle,
+            buttons, analogs & 1 << kLeftStick ? "L" : "", analogs & 1 << kRightStick ? "R" : "",
+            analogs & 1 << kLeftTrigger ? "L" : "", analogs & 1 << kRightTrigger ? "R" : "");
+    p.buttons = buttons;
+    p.analogs = analogs;
+}
+
+bool read_analog(uint64_t handle, int index, AnalogData* a) {
+    *a = {};
+    return g_analog_actions[index] && guarded([&] { *a = g_analog(g_input, handle, g_analog_actions[index]); }) &&
+           a->active && std::isfinite(a->x) && std::isfinite(a->y);
+}
+
+uint32_t GL_CALL controls(void*, uint64_t handle, gl_capabilities* caps, gl_controls* out) {
+    if (!actions_ready()) return 0;
+    Pad& p = pad(handle);
+    refresh_origins(p);
+    uint32_t pressed = 0;
+    for (size_t i = 0; i < std::size(kButtons); ++i) {
+        const uint32_t bit = 1u << kButtons[i].ordinal;
+        DigitalData d{};
+        if ((p.buttons & bit) && guarded([&] { d = g_digital(g_input, handle, g_digital_actions[i]); }) && d.active &&
+            d.state)
+            pressed |= bit;
+    }
+    caps->buttons = p.buttons;
+    caps->sticks = (p.analogs & 1 << kLeftStick ? GL_LEFT : 0) | (p.analogs & 1 << kRightStick ? GL_RIGHT : 0);
+    *out = {};
+    out->timestamp_ns = g_now_ns;
+    out->buttons = pressed;
+    AnalogData a{};
+    if ((p.analogs & 1 << kLeftStick) && read_analog(handle, kLeftStick, &a)) {
+        out->left_x = std::clamp(a.x, -1.f, 1.f);
+        out->left_y = std::clamp(a.y, -1.f, 1.f);
+    }
+    if ((p.analogs & 1 << kRightStick) && read_analog(handle, kRightStick, &a)) {
+        out->right_x = std::clamp(a.x, -1.f, 1.f);
+        out->right_y = std::clamp(a.y, -1.f, 1.f);
+    }
+    if (&p == &g_pads[0] || !g_pads[0].handle) {  // the panel's navigation: the first controller, SDL ranges (down = +Y)
+        g_nav_buttons = pressed;
+        auto axis = [](float v) { return int16_t(std::clamp(v, -1.f, 1.f) * 32767); };
+        g_nav_axes[0] = axis(out->left_x);
+        g_nav_axes[1] = axis(-out->left_y);
+        g_nav_axes[2] = axis(out->right_x);
+        g_nav_axes[3] = axis(-out->right_y);
+        g_nav_seen = true;
+    }
+    return 1;
+}
+
+const char* GL_CALL button_label(void*, uint64_t handle, uint32_t button) {
+    for (const Pad& p : g_pads)
+        if (p.handle == handle && button < 32 && (p.buttons & 1u << button) && !p.labels[button].empty())
+            return p.labels[button].c_str();
+    return nullptr;
+}
+
+// Triggers go beside the provider (it has no trigger field): their travel, and their names, for each pad Steam reads.
+void submit_triggers(gl_context* ctx, gl_steam* reader) {
+    for (const Pad& p : g_pads) {
+        if (!p.handle || !(p.analogs & (1 << kLeftTrigger | 1 << kRightTrigger))) continue;
+        const uint64_t endpoint = gl_steam_endpoint_for_handle(reader, p.handle);
+        if (!endpoint) continue;
+        gl_trigger_input t{};
+        t.timestamp_ns = g_now_ns;
+        AnalogData a{};
+        if ((p.analogs & 1 << kLeftTrigger) && read_analog(p.handle, kLeftTrigger, &a)) {
+            t.available |= GL_LEFT;
+            t.left = std::clamp(a.x, 0.f, 1.f);
+        }
+        if ((p.analogs & 1 << kRightTrigger) && read_analog(p.handle, kRightTrigger, &a)) {
+            t.available |= GL_RIGHT;
+            t.right = std::clamp(a.x, 0.f, 1.f);
+        }
+        if (t.available) gl_submit_trigger_input(ctx, endpoint, &t);
+        for (int side = 0; side < 2; ++side)
+            if (!p.trigger_labels[side].empty())
+                gl_set_trigger_label(ctx, endpoint, side ? GL_RIGHT : GL_LEFT, p.trigger_labels[side].c_str());
+    }
+}
+
+// True when the first connected controller's motion differs from the last call's (a new Steam frame), or there is none.
+bool new_steam_frame() {
+    uint64_t all[16] = {};
+    if (connected(all) <= 0) return true;
+    MotionData m{};
+    if (!read_motion(all[0], &m)) return true;
+    static MotionData last{};
+    if (std::memcmp(&m, &last, sizeof m) == 0) return false;
+    last = m;
+    return true;
+}
+
+// The interface from the old route, in its own frame: an access violation inside the game's Steam DLL turns the reader off
+// instead of closing the game.
+void* query_input(Handle_t user, FindInterface_t find) {
+    __try {
+        const int32_t u = user();
+        return u ? find(u, "SteamInput001") : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
+// Null when the DLL has an accessor (GyroLib's own reader then) or lacks the old route.
+gl_steam* create(HMODULE steam) {
+    if (has_accessor(steam)) return nullptr;
+    auto user = reinterpret_cast<Handle_t>(GetProcAddress(steam, "SteamAPI_GetHSteamUser"));
+    auto find = reinterpret_cast<FindInterface_t>(GetProcAddress(steam, "SteamInternal_FindOrCreateUserInterface"));
+    g_connected = reinterpret_cast<Connected_t>(GetProcAddress(steam, "SteamAPI_ISteamInput_GetConnectedControllers"));
+    g_motion = reinterpret_cast<Motion_t>(GetProcAddress(steam, "SteamAPI_ISteamInput_GetMotionData"));
+    if (!user || !find || !g_connected || !g_motion) return nullptr;
+    log("gyro: the game's steam_api64.dll predates SDK 1.48; asking it for SteamInput001");
+    g_input = query_input(user, find);
+    log("gyro: SteamInput001 %s", g_input ? "found" : "not available");
+    if (!g_input) return nullptr;
+    g_digital_handle = reinterpret_cast<ActionHandle_t>(GetProcAddress(steam, "SteamAPI_ISteamInput_GetDigitalActionHandle"));
+    g_analog_handle = reinterpret_cast<ActionHandle_t>(GetProcAddress(steam, "SteamAPI_ISteamInput_GetAnalogActionHandle"));
+    g_digital = reinterpret_cast<Digital_t>(GetProcAddress(steam, "SteamAPI_ISteamInput_GetDigitalActionData"));
+    g_analog = reinterpret_cast<Analog_t>(GetProcAddress(steam, "SteamAPI_ISteamInput_GetAnalogActionData"));
+    g_current_set = reinterpret_cast<CurrentSet_t>(GetProcAddress(steam, "SteamAPI_ISteamInput_GetCurrentActionSet"));
+    g_digital_origins = reinterpret_cast<Origins_t>(GetProcAddress(steam, "SteamAPI_ISteamInput_GetDigitalActionOrigins"));
+    g_analog_origins = reinterpret_cast<Origins_t>(GetProcAddress(steam, "SteamAPI_ISteamInput_GetAnalogActionOrigins"));
+    g_origin_name = reinterpret_cast<OriginName_t>(GetProcAddress(steam, "SteamAPI_ISteamInput_GetStringForActionOrigin"));
+    static const gl_steam_provider provider{nullptr, &handles, &motion, &controls};
+    gl_steam* reader = gl_steam_create(g_gyro->get(), &provider);
+    if (reader) gl_steam_set_button_label_provider(reader, &button_label, nullptr);
+    if (reader && g_digital && g_analog) hook_game_reads(reinterpret_cast<void*>(g_digital), reinterpret_cast<void*>(g_analog));
+    return reader;
+}
+}  // namespace legacy_steam
+
 // Game thread, after the SDL poll and before gl_update, once per frame (the game updates Steam once per frame too).
 void poll_steam(uint64_t now_ns) {
-    if (!g_steam) {
+    if (!g_steam && !legacy_steam::g_reader) {
         const ULONGLONG now = GetTickCount64();
         if (now < g_next_steam_check) return;
         g_next_steam_check = now + 1000;
-        if (!GetModuleHandleW(L"steam_api64.dll")) return;
-        g_steam = gl_steam_runtime_create(g_gyro->get());
-        log("gyro: Steam Input reader %s (the game's steam_api64.dll)", g_steam ? "started" : "unavailable");
-        if (!g_steam) {
+        HMODULE steam = GetModuleHandleW(L"steam_api64.dll");
+        if (!steam) return;
+        legacy_steam::g_reader = legacy_steam::create(steam);
+        if (legacy_steam::g_reader) {
+            log("gyro: Steam Input reader started (the game's steam_api64.dll predates SDK 1.48: SteamInput001)");
+        } else {
+            g_steam = gl_steam_runtime_create(g_gyro->get());
+            log("gyro: Steam Input reader %s (the game's steam_api64.dll)", g_steam ? "started" : "unavailable");
+        }
+        if (!g_steam && !legacy_steam::g_reader) {
             g_next_steam_check = ~0ull;
             return;
         }
     }
-    const int32_t r = gl_steam_runtime_poll(g_steam, now_ns, ++g_steam_frame);
+    // The old DLLs' motion changes once per game Steam frame (SteamAPI_RunFrame), and Gyro4All's frame can run several
+    // times between two (Horizon Zero Dawn: about 660 polls a second at 145 fps): every poll was a new sample to
+    // GyroLib, and the turn came out ~4.7 times too large. Polled only when the first controller's data changed.
+    if (legacy_steam::g_reader && !legacy_steam::new_steam_frame()) return;
+    legacy_steam::g_now_ns = now_ns;
+    const int32_t r = legacy_steam::g_reader ? gl_steam_poll(legacy_steam::g_reader, now_ns, ++g_steam_frame)
+                                             : gl_steam_runtime_poll(g_steam, now_ns, ++g_steam_frame);
+    if (legacy_steam::g_reader && r == GL_OK) legacy_steam::submit_triggers(g_gyro->get(), legacy_steam::g_reader);
+    if (legacy_steam::g_reader)
+        panel_host::set_steam_pad(legacy_steam::g_pads_connected > 0 && legacy_steam::g_nav_seen, legacy_steam::g_nav_buttons,
+                                  legacy_steam::g_nav_axes);
+    if (legacy_steam::g_reader)
+        overlay::steam_pad_navigation(legacy_steam::g_pads_connected > 0 ? legacy_steam::g_nav_buttons : 0, now_ns);
     static int32_t last = 1;
     static std::string last_error;
-    const char* error = gl_steam_runtime_error(g_steam);
+    const char* error = g_steam                      ? gl_steam_runtime_error(g_steam)
+                        : legacy_steam::g_faulted    ? "access violation in the game's steam_api64.dll; reader off"
+                                                     : nullptr;
     const std::string text = error ? error : "";
     if (r != last || text != last_error) {
         last = r;
@@ -1134,10 +1581,17 @@ void frame() {
     {
         static bool expand_chord = false;
         const bool both_sticks =
-            pad && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_STICK) &&
-            SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_STICK);
-        if (both_sticks && !expand_chord && (gl_panel_open(g_gyro->get()) || settings_open))
-            panel_host::expand_toggle();
+            (pad && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_STICK) &&
+             SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_RIGHT_STICK)) ||
+            (legacy_steam::g_reader && legacy_steam::g_pads_connected > 0 &&
+             (~legacy_steam::g_nav_buttons & (1u << SDL_GAMEPAD_BUTTON_LEFT_STICK | 1u << SDL_GAMEPAD_BUTTON_RIGHT_STICK)) == 0);
+        if (both_sticks && !expand_chord) {
+            const bool open = gl_panel_open(g_gyro->get()) || settings_open || overlay::capture() != 0;
+            static int logged = 0;
+            if (logged++ < 8)
+                log("panel: L3+R3 %s", open ? "folds or unfolds the Gyro4All settings window" : "ignored: no panel open");
+            if (open) panel_host::expand_toggle();
+        }
         expand_chord = both_sticks;
     }
     const bool neutral = panel_has_pad(g_gyro->get(), pad);
@@ -1166,6 +1620,14 @@ void frame() {
     nativepad::set_neutral(neutral);
     dinputpad::frame(neutral, pad);
     const unsigned panel_capture = overlay::capture();
+    // Held until every button is released after the panel lets go: the press that closed it (cross on its close button,
+    // circle, the shortcut) doesn't reach the game.
+    {
+        static bool blocking = false;
+        const bool captured = (panel_capture & GL_OVERLAY_CAPTURE_GAMEPAD) != 0;
+        blocking = captured || (blocking && legacy_steam::g_nav_buttons != 0);
+        legacy_steam::g_block_game.store(blocking, std::memory_order_relaxed);
+    }
     dinputpad::set_capture((panel_capture & GL_OVERLAY_CAPTURE_MOUSE) != 0, (panel_capture & GL_OVERLAY_CAPTURE_KEYBOARD) != 0);
     // Steam Input's mouse, per GyroLib's input.steam_mouse row (Convert's turn joins the gyro's below).
     double mouse_pitch = 0, mouse_yaw = 0;
@@ -1177,6 +1639,8 @@ void frame() {
         m.focused = host.focused;
         m.camera = view && host.camera_allowed && host.focused && !f.paused && !g_engine->hold_gyro();
         m.gyrolib_panel = overlay::gyrolib_panel();
+        m.panel_mouse = (panel_capture & GL_OVERLAY_CAPTURE_MOUSE) != 0;
+        m.legacy_steam = legacy_steam::g_reader && legacy_steam::g_pads_connected > 0;
         steammouse::frame(m, mouse_pitch, mouse_yaw);
     }
     // Long-press blocking: the activation button's press is held back from the game, or given to it as a short tap,
@@ -1243,10 +1707,44 @@ void frame() {
         const bool camera = view && host.camera_allowed && gs.enabled;
         log_gyro_changes(host.focused, gs);
         // Played back in sensor time while the gyro may turn the camera; otherwise what wasn't played back is dropped.
-        if (camera && !g_engine->hold_gyro()) g_pacer.frame(now_ns, pitch, yaw);
+        // Not Steam's motion: it has no sensor timestamps (GyroLib stamps it on arrival), and played back with the
+        // pacer's extrapolation it turned about 1.3 times too far (Horizon Zero Dawn's reader for old Steamworks DLLs,
+        // whose motion GyroLib reports as source SDL).
+        if (camera && !g_engine->hold_gyro() && !legacy_steam::g_reader) g_pacer.frame(now_ns, pitch, yaw);
         else g_pacer.reset();
         g_delivery.on_update(camera, gs.new_samples, out.yaw_degrees != 0 || out.pitch_degrees != 0);
         trace_frame(now_ns, camera, gs.new_samples, out, pitch, yaw);
+    }
+    // The game holds its camera until it sees the right stick (camera_waits_for_stick): when the gyro starts turning in
+    // that time, the game sees a right-stick touch toward the turn for kNudgeNs: in its old Steam Input reads (Horizon
+    // Zero Dawn), else in the pad input it reads itself (its own HID reports, XInput, DirectInput; Horizon Forbidden
+    // West), through the stick outputs below.
+    static uint64_t pad_nudge_until = 0;
+    static float pad_nudge_x = 0, pad_nudge_y = 0;
+    {
+        static uint32_t waited = 0;
+        static bool nudged = false;
+        const uint32_t waits = view && host.camera_allowed ? g_engine->camera_waits_for_stick() : 0;
+        if (waits && waits != waited) nudged = false;
+        waited = waits;
+        if (waits && !nudged && std::fabs(yaw) + std::fabs(pitch) > 0.02) {
+            nudged = true;
+            constexpr uint64_t kNudgeNs = 100'000'000;
+            constexpr float kNudge = 0.3f;
+            const double n = std::max(std::fabs(yaw), std::fabs(pitch));
+            const float x = float(kNudge * yaw / n), y = float(kNudge * pitch / n);
+            if (legacy_steam::g_reader) {
+                legacy_steam::g_nudge_x = x;
+                legacy_steam::g_nudge_y = y;
+                legacy_steam::g_nudge_until = now_ns + kNudgeNs;
+            } else {
+                pad_nudge_x = x;
+                pad_nudge_y = y;
+                pad_nudge_until = now_ns + kNudgeNs;
+            }
+            static int logged = 0;
+            if (logged++ < 3) log("gyro: the game holds its camera until the right stick moves: a %d ms touch given", int(kNudgeNs / 1'000'000));
+        }
     }
     // Stick fallback: when the game undoes the gyro's camera writes, its turn goes to the game as right-stick input;
     // when the engine has no hook for the game's camera at all, always (blind). StickFallback=0: never.
@@ -1315,6 +1813,10 @@ void frame() {
     if (!g_stick_fallback.stick(stick_x, stick_y) || neutral) stick_x = stick_y = 0;
     if (f.stick_nudge_x != 0 && stick_x == 0 && stick_y == 0 && !neutral && host.focused && !f.paused)
         stick_x = std::clamp(f.stick_nudge_x, -1.0f, 1.0f);
+    if (now_ns < pad_nudge_until && stick_x == 0 && stick_y == 0 && !neutral && host.focused && !f.paused) {
+        stick_x = pad_nudge_x;
+        stick_y = pad_nudge_y;
+    }
     trace_stick();
     save_stick_model();
     dinputpad::set_stick(stick_x, stick_y);

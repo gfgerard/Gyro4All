@@ -1057,6 +1057,27 @@ BOOL WINAPI hk_clip_cursor(const RECT* rect) {
     return g_clip_cursor(rect);
 }
 
+// Games that poll the mouse buttons (Horizon Zero Dawn: GetAsyncKeyState/GetKeyState) clicked behind the panel: while it
+// has the mouse, the mouse buttons read as up. Inline, with the cursor hooks; the panels take clicks from messages.
+using KeyState_t = SHORT(WINAPI*)(int);
+KeyState_t g_get_async_key_state = nullptr, g_get_key_state = nullptr;
+bool is_mouse_button(int vk) {
+    return vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2;
+}
+std::atomic<int> g_held_async{0}, g_held_state{0}, g_held_raw{0}, g_click_messages{0}, g_held_hook{0};
+SHORT WINAPI hk_get_async_key_state(int vk) {
+    const SHORT v = g_get_async_key_state(vk);
+    if (!g_mouse_captured.load(std::memory_order_relaxed) || !is_mouse_button(vk)) return v;
+    if (v & 0x8001) g_held_async.fetch_add(1, std::memory_order_relaxed);
+    return 0;
+}
+SHORT WINAPI hk_get_key_state(int vk) {
+    const SHORT v = g_get_key_state(vk);
+    if (!g_mouse_captured.load(std::memory_order_relaxed) || !is_mouse_button(vk)) return v;
+    if (v & 0x8000) g_held_state.fetch_add(1, std::memory_order_relaxed);
+    return SHORT(v & 1);  // toggle bit kept
+}
+
 // First capture: hook both exports; the clip already in place counts as the game's.
 bool hook_cursor_moves() {
     static const bool ok = [] {
@@ -1076,6 +1097,14 @@ bool hook_cursor_moves() {
                                                  reinterpret_cast<void**>(&g_set_cursor_pos)) &&
                             hooks::hook_function(clip_fn, reinterpret_cast<void*>(&hk_clip_cursor),
                                                  reinterpret_cast<void**>(&g_clip_cursor));
+        void* async_fn = user32 ? reinterpret_cast<void*>(GetProcAddress(user32, "GetAsyncKeyState")) : nullptr;
+        void* state_fn = user32 ? reinterpret_cast<void*>(GetProcAddress(user32, "GetKeyState")) : nullptr;
+        const bool keys = hooks::hook_function(async_fn, reinterpret_cast<void*>(&hk_get_async_key_state),
+                                               reinterpret_cast<void**>(&g_get_async_key_state)) &&
+                          hooks::hook_function(state_fn, reinterpret_cast<void*>(&hk_get_key_state),
+                                               reinterpret_cast<void**>(&g_get_key_state));
+        log("panel: GetAsyncKeyState/GetKeyState %s: mouse buttons read as up while the panel has the mouse",
+            keys ? "hooked" : "hook failed");
         log(hooked ? "panel: SetCursorPos/ClipCursor hooked: the game can't recentre or clip the cursor while the panel has the mouse"
                    : "panel: SetCursorPos/ClipCursor hook failed: the game may keep recentring the cursor in the panel");
         return hooked;
@@ -1092,6 +1121,11 @@ void mouse_capture_changed(bool captured) {
         return;
     }
     if (g_game_clips) g_clip_cursor(&g_game_clip);
+    // Which route the game's clicks took while the panel had the mouse (each held back there).
+    const int async = g_held_async.exchange(0), state = g_held_state.exchange(0), raw = g_held_raw.exchange(0),
+              msgs = g_click_messages.exchange(0), hook = g_held_hook.exchange(0);
+    log("panel: while it had the mouse, mouse buttons held back: %d GetAsyncKeyState, %d GetKeyState, %d Raw Input "
+        "packets, %d window messages, %d mouse hook events", async, state, raw, msgs, hook);
     const int moves = g_blocked_moves.exchange(0), clips = g_blocked_clips.exchange(0);
     if (moves || clips) log("panel: while it had the mouse, the game's %d cursor moves and %d clips were held back", moves, clips);
 }
@@ -1123,11 +1157,57 @@ LRESULT CALLBACK hk_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             cap |= gl_overlay_win32_message(overlay, hwnd, msg, wp, lp);
         }
     }
+    if ((cap & GL_OVERLAY_CAPTURE_MOUSE) && (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN))
+        g_click_messages.fetch_add(1, std::memory_order_relaxed);
     if (((cap & GL_OVERLAY_CAPTURE_MOUSE) && is_mouse(msg)) || ((cap & GL_OVERLAY_CAPTURE_KEYBOARD) && is_keyboard(msg) && !alt_f4)) {
         if (msg == WM_INPUT) DefWindowProcW(hwnd, msg, wp, lp);  // a consumed WM_INPUT still needs its cleanup
         return 0;  // consumed by a panel (GyroLib already cleaned up WM_INPUT)
     }
     return CallWindowProcW(g_wndproc, hwnd, msg, wp, lp);
+}
+
+// Games that take mouse buttons from a Windows hook (Horizon Zero Dawn imports SetWindowsHookExA): while the panel has
+// the mouse, mouse hooks see no button events (the chain still runs). Registered at start, before the game sets its hook.
+using SetHook_t = HHOOK(WINAPI*)(int, HOOKPROC, HINSTANCE, DWORD);
+SetHook_t g_set_hook_a = nullptr, g_set_hook_w = nullptr;
+constexpr int kMaxMouseHooks = 4;
+std::atomic<HOOKPROC> g_mouse_procs[2][kMaxMouseHooks]{};  // [low-level][slot]
+bool is_button_event(WPARAM wp) {
+    return wp == WM_LBUTTONDOWN || wp == WM_LBUTTONUP || wp == WM_RBUTTONDOWN || wp == WM_RBUTTONUP ||
+           wp == WM_MBUTTONDOWN || wp == WM_MBUTTONUP || wp == WM_XBUTTONDOWN || wp == WM_XBUTTONUP ||
+           wp == WM_LBUTTONDBLCLK || wp == WM_RBUTTONDBLCLK || wp == WM_MBUTTONDBLCLK || wp == WM_XBUTTONDBLCLK;
+}
+template <int LL, int I>
+LRESULT CALLBACK mouse_proc(int code, WPARAM wp, LPARAM lp) {
+    if (code >= 0 && g_mouse_captured.load(std::memory_order_relaxed) && is_button_event(wp)) {
+        g_held_hook.fetch_add(1, std::memory_order_relaxed);
+        return CallNextHookEx(nullptr, code, wp, lp);
+    }
+    return g_mouse_procs[LL][I].load()(code, wp, lp);
+}
+template <int LL>
+HOOKPROC wrap_mouse_proc(HOOKPROC proc) {
+    static constexpr HOOKPROC wrappers[kMaxMouseHooks] = {&mouse_proc<LL, 0>, &mouse_proc<LL, 1>, &mouse_proc<LL, 2>,
+                                                          &mouse_proc<LL, 3>};
+    for (int i = 0; i < kMaxMouseHooks; ++i) {
+        HOOKPROC expected = nullptr;
+        if (g_mouse_procs[LL][i].compare_exchange_strong(expected, proc) || expected == proc) return wrappers[i];
+    }
+    return proc;
+}
+HHOOK set_hook(SetHook_t real, int id, HOOKPROC proc, HINSTANCE module, DWORD thread, const char* name) {
+    if (proc && (id == WH_MOUSE || id == WH_MOUSE_LL)) {
+        log("overlay: the game sets a %s Windows hook (%s): no mouse buttons reach it while the panel has the mouse",
+            id == WH_MOUSE_LL ? "low-level mouse" : "mouse", name);
+        proc = id == WH_MOUSE_LL ? wrap_mouse_proc<1>(proc) : wrap_mouse_proc<0>(proc);
+    }
+    return real ? real(id, proc, module, thread) : nullptr;
+}
+HHOOK WINAPI hk_set_hook_a(int id, HOOKPROC proc, HINSTANCE module, DWORD thread) {
+    return set_hook(g_set_hook_a ? g_set_hook_a : &SetWindowsHookExA, id, proc, module, thread, "SetWindowsHookExA");
+}
+HHOOK WINAPI hk_set_hook_w(int id, HOOKPROC proc, HINSTANCE module, DWORD thread) {
+    return set_hook(g_set_hook_w ? g_set_hook_w : &SetWindowsHookExW, id, proc, module, thread, "SetWindowsHookExW");
 }
 
 // ---------------------------------------------------------------- settings gate
@@ -1416,6 +1496,10 @@ bool loads_graphics_api_itself() {
 }  // namespace
 
 void install(const std::wstring& settings_path) {
+    hooks::add("user32.dll", "SetWindowsHookExA", reinterpret_cast<void*>(&hk_set_hook_a),
+               reinterpret_cast<void**>(&g_set_hook_a));
+    hooks::add("user32.dll", "SetWindowsHookExW", reinterpret_cast<void*>(&hk_set_hook_w),
+               reinterpret_cast<void**>(&g_set_hook_w));
     std::string why;
     g_enabled = panel_enabled_in_ini(settings_path, why);
     if (!g_enabled) {
@@ -1630,12 +1714,56 @@ void filter_raw_input(void* raw_input) {
     if (!raw || raw->header.dwType != RIM_TYPEMOUSE || !g_mouse_captured.load(std::memory_order_relaxed)) return;
     static std::atomic<bool> logged{false};
     if (!logged.exchange(true)) log("overlay: the game reads Raw Input mouse data itself: emptied while the panel has the mouse");
+    if (raw->data.mouse.usButtonFlags & 0x3FF) g_held_raw.fetch_add(1, std::memory_order_relaxed);  // button downs/ups
     raw->data.mouse.lLastX = raw->data.mouse.lLastY = 0;
     raw->data.mouse.usButtonFlags = 0;
     raw->data.mouse.usButtonData = 0;
     raw->data.mouse.ulRawButtons = 0;
     // MOUSE_MOVE_ABSOLUTE blocks (remote desktop, tablets) would jump to (0,0): relative zero moves nothing.
     raw->data.mouse.usFlags = MOUSE_MOVE_RELATIVE;
+}
+
+// GyroLib's overlay navigates with the controller it acquired from SDL; a controller read only through the game's old
+// Steam Input (Horizon Zero Dawn's reader) doesn't navigate it. Its d-pad, cross and circle are given to the overlay as
+// the arrow keys, Enter and Escape while the overlay captures the controller, with key repeat while held.
+void steam_pad_navigation(uint32_t sdl_buttons, uint64_t now_ns) {
+    gl_overlay* overlay = g_overlay.load();
+    const HWND hwnd = g_subclassed_hwnd ? g_subclassed_hwnd : g_hwnd;
+    const bool open = overlay && hwnd && (gl_overlay_capture(overlay) & GL_OVERLAY_CAPTURE_GAMEPAD);
+    static const struct {
+        int button;
+        UINT vk;
+    } kKeys[] = {{11, VK_UP}, {12, VK_DOWN}, {13, VK_LEFT}, {14, VK_RIGHT}, {0, VK_RETURN}, {1, VK_ESCAPE}};
+    static uint32_t held = 0;
+    static uint64_t repeat_at[std::size(kKeys)] = {};
+    static bool logged = false;
+    auto send = [&](UINT vk, bool down, bool repeat) {
+        const UINT scan = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+        LPARAM lp = 1 | LPARAM(scan) << 16;
+        if (vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT) lp |= LPARAM(1) << 24;  // extended
+        if (repeat) lp |= LPARAM(1) << 30;
+        if (!down) lp |= LPARAM(3) << 30;
+        gl_overlay_win32_message(overlay, hwnd, down ? WM_KEYDOWN : WM_KEYUP, vk, lp);
+    };
+    for (size_t i = 0; i < std::size(kKeys); ++i) {
+        const uint32_t bit = 1u << kKeys[i].button;
+        const bool now = open && (sdl_buttons & bit);
+        const bool was = (held & bit) != 0;
+        if (now && !was) {
+            if (!logged) {
+                logged = true;
+                log("overlay: the Steam Input controller navigates GyroLib's panel as arrow keys, Enter and Escape");
+            }
+            send(kKeys[i].vk, true, false);
+            repeat_at[i] = now_ns + 400000000ull;
+        } else if (now && now_ns >= repeat_at[i]) {
+            send(kKeys[i].vk, true, true);
+            repeat_at[i] = now_ns + 80000000ull;
+        } else if (!now && was && overlay && hwnd) {
+            send(kKeys[i].vk, false, false);
+        }
+        held = now ? held | bit : held & ~bit;
+    }
 }
 
 unsigned capture() {

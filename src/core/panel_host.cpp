@@ -413,11 +413,51 @@ const g4a_api* api() { return g_api.load(); }
 
 HWND window() { return g_window.load(); }
 
+namespace {
+bool g_steam_connected = false;
+uint32_t g_steam_buttons = 0;
+int16_t g_steam_axes[G4A_AXIS_COUNT] = {};
+}  // namespace
+
+void set_steam_pad(bool connected, uint32_t sdl_buttons, const int16_t axes[6]) {
+    g_steam_connected = connected;
+    g_steam_buttons = connected ? sdl_buttons : 0;
+    for (int i = 0; i < G4A_AXIS_COUNT; ++i) g_steam_axes[i] = connected && axes ? axes[i] : 0;
+}
+
 void frame(SDL_Gamepad* pad) {
     const g4a_api* a = g_api.load();
     if (!a) return;
     g4a_gamepad gp{};
-    if (pad) {
+    // The game's old Steam Input reader first: SDL may still hand over a controller with no input (Steam's own virtual
+    // one), which left the Gyro4All window without navigation in Horizon Zero Dawn.
+    {
+        static int source = -1;
+        const int now = g_steam_connected ? 2 : pad ? 1 : 0;
+        if (now != source) {
+            source = now;
+            log("panel: its controller navigation comes from %s%s", now == 2 ? "the game's Steam Input" : now ? "SDL" : "no controller",
+                now == 2 && pad ? " (an SDL controller is also open)" : "");
+        }
+    }
+    if (g_steam_connected) {
+        static const struct {
+            uint32_t sdl, bit;
+        } kMap[] = {
+            {SDL_GAMEPAD_BUTTON_SOUTH, G4A_PAD_SOUTH}, {SDL_GAMEPAD_BUTTON_EAST, G4A_PAD_EAST},
+            {SDL_GAMEPAD_BUTTON_WEST, G4A_PAD_WEST}, {SDL_GAMEPAD_BUTTON_NORTH, G4A_PAD_NORTH},
+            {SDL_GAMEPAD_BUTTON_BACK, G4A_PAD_BACK}, {SDL_GAMEPAD_BUTTON_START, G4A_PAD_START},
+            {SDL_GAMEPAD_BUTTON_LEFT_STICK, G4A_PAD_LEFT_STICK}, {SDL_GAMEPAD_BUTTON_RIGHT_STICK, G4A_PAD_RIGHT_STICK},
+            {SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, G4A_PAD_LEFT_SHOULDER},
+            {SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, G4A_PAD_RIGHT_SHOULDER}, {SDL_GAMEPAD_BUTTON_DPAD_UP, G4A_PAD_DPAD_UP},
+            {SDL_GAMEPAD_BUTTON_DPAD_DOWN, G4A_PAD_DPAD_DOWN}, {SDL_GAMEPAD_BUTTON_DPAD_LEFT, G4A_PAD_DPAD_LEFT},
+            {SDL_GAMEPAD_BUTTON_DPAD_RIGHT, G4A_PAD_DPAD_RIGHT},
+        };
+        gp.connected = 1;
+        for (const auto& m : kMap)
+            if (g_steam_buttons & (1u << m.sdl)) gp.buttons |= m.bit;
+        for (int i = 0; i < G4A_AXIS_COUNT; ++i) gp.axes[i] = g_steam_axes[i];
+    } else if (pad) {
         gp.connected = 1;
         static const struct {
             SDL_GamepadButton button;

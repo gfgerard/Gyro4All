@@ -49,6 +49,9 @@ HWND window();
 
 // Game thread, after gl_update: the panel's frame, navigated with GyroLib's selected controller.
 void frame(SDL_Gamepad* pad);
+// A controller without an SDL pad (Gyro4All's reader for old Steamworks DLLs): its SDL button bits and axes (SDL ranges)
+// navigate the panel while frame() gets no pad. connected=false withdraws it.
+void set_steam_pad(bool connected, uint32_t sdl_buttons, const int16_t axes[6]);
 
 // overlay.cpp's DXGI hooks, on the game's presenting/resizing threads.
 void dxgi_present(void* swapchain);

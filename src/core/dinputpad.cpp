@@ -395,13 +395,25 @@ HRESULT STDMETHODCALLTYPE hk_create_device(void* input, REFGUID guid, void** out
     return hr;
 }
 
+// The inline hook on dinput8.dll's export, for games that find it with GetProcAddress (Horizon Zero Dawn): no import
+// slot to patch. Its trampoline; an import hook that lands later calls the hooked export, so a nested call goes straight
+// through.
+Create_t g_create_inline = nullptr;
+thread_local bool t_in_create = false;
+
 HRESULT WINAPI hk_create(HINSTANCE instance, DWORD version, REFIID iid, LPVOID* out, LPUNKNOWN outer) {
+    if (t_in_create && g_create_inline) return g_create_inline(instance, version, iid, out, outer);
+    struct Nest {
+        Nest() { t_in_create = true; }
+        ~Nest() { t_in_create = false; }
+    } nest;
     if (CreateFn fn = g_on_create.load()) fn();
     // Import slots: the original as patched, else (a delay-load not resolved yet) from dinput8.dll itself.
     Create_t real = reinterpret_cast<Create_t>(InterlockedCompareExchangePointer(reinterpret_cast<void**>(&g_create), nullptr, nullptr));
     if (!real)
         if (HMODULE m = LoadLibraryW(L"dinput8.dll"))
             real = reinterpret_cast<Create_t>(GetProcAddress(m, "DirectInput8Create"));
+    if (!real) real = g_create_inline;
     const HRESULT hr = real ? real(instance, version, iid, out, outer) : E_FAIL;
     if (SUCCEEDED(hr) && out && *out) g_create_device.patch(*out, kCreateDevice, reinterpret_cast<void*>(&hk_create_device));
     return hr;
@@ -415,6 +427,16 @@ void install() {
     const bool ok = hooks::add(hooks::inline_mode() ? "dinput8.dll" : nullptr, "DirectInput8Create",
                                reinterpret_cast<void*>(&hk_create), reinterpret_cast<void**>(&g_create));
     log("dinputpad: DirectInput8Create hook %s", ok ? "installed" : "registered (no game module imports it yet)");
+    if (!ok && !hooks::inline_mode())
+        hooks::watch_dll(L"dinput8.dll", [](HMODULE m) {
+            static std::atomic<bool> done{false};
+            if (done.exchange(true)) return;
+            void* f = reinterpret_cast<void*>(GetProcAddress(m, "DirectInput8Create"));
+            const bool hooked = hooks::hook_function(f, reinterpret_cast<void*>(&hk_create),
+                                                     reinterpret_cast<void**>(&g_create_inline));
+            log("dinputpad: dinput8.dll's DirectInput8Create %s inline (for games that look it up themselves)",
+                hooked ? "hooked" : "could not be hooked");
+        });
 }
 
 void on_read(ReadFn fn) { g_on_read = fn; }

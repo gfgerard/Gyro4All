@@ -5,6 +5,79 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-18 **Horizon Forbidden West Complete Edition (Steam, Nixxes port, Decima) works** (**verified in game by the
+  user**: gyro 1:1 on foot, L2 aims with the gyro at once, zoom compensation with L2 and Concentration; DualSense USB, read
+  by the game itself over HID, Steam Input not in its path: the Steam Input reader saw no controller). No Denuvo, Themida
+  or anti-cheat strings; MSVC RTTI present. Mounts, gliding, menus and cutscenes not tested.
+  - **Detection**: the exe stems didn't match and HFW has no `data\`/`Packed_DX12\` archives, so Unreal's scan ran
+    ("engine's data still can't be read"). Now any exe with `LocalCacheWinGame\package\streaming_graph.core` next to it is
+    Decima (`nixxes_layout`); the Nixxes route is taken for it (HZD's stem still picks HZD's).
+  - **Dead ends**: HZD's local-player signature and DS's mode getter match 0 times. `comp+0x70` (HZD's orbit mode) is
+    null and there's no `CameraOrbitFollow` class; `ThirdPersonPlayerCameraComponent_ExportedGetCurrCameraMode`
+    (`exe+0x11A5C10`) returns `[[comp+0x248]]+0x20`, a `CameraModeResource` (data, not state). Write tests (all rewritten
+    within a frame): the component's matrix `comp+0xB0` (rows right, forward, up; follows the view), its `CameraEntity`
+    (`comp+0x48`) `+0xF0`/`+0x130`, the entity's `CameraEntityRep` `+0xB8`/`+0xF8`, `[[comp+0x3E0]+0x58]+0x38`, and 29
+    forward-vector copies that followed three turns. Heading copies `comp+0x498`/`+0x49C` (and the `+0x490` angle set)
+    are derived too. An angle search's first filter let huge constant floats through (`fmod` of them passes any wrap
+    test): bound |x| first.
+  - **Camera**: the component (one instance, found by its vtable `exe+0x1959038` from RTTI) keeps the view as float
+    radians: **pitch `comp+0x4D0` (+ up), heading `comp+0x4D8` (+ left)**, the vector (pitch, roll, heading) the camera
+    update loads at `exe+0x1188B72`. Write tests: both kept, the view followed by 20 degrees. The heading isn't the view's
+    world heading (about 79 degrees off in one run), only its changes matter. Offsets by signature (`kCompAngles`): two
+    identical blocks match (`+0x3C0 <- +0x490`, `+0x490 <- +0x4D0`); the source is the one whose angles no block stores.
+  - **Memory search fix**: the vtable search (`find_object_by_vtable`) found thread-stack copies of the vtable pointer
+    (locals, ours included: `0x6D...` addresses while loading; "several" in game). It now skips allocations holding a
+    guard page, and logs the instance count.
+  - **L2**: the camera mode (`[[comp+0x248]]`) changes and for about 2 s the view barely follows the angles (recorded:
+    the gyro moved `+0x4D8` by 7 degrees, the view by 1.7; then 1:1). A right-stick touch ends it (user test). Same fix
+    as HZD (`camera_waits_for_stick`, 3 s after a mode change), but HFW reads the pad itself: `host.cpp`'s 100 ms touch
+    now goes through the stick outputs (native HID reports, XInput, DirectInput) when the legacy Steam reader isn't used.
+  - **FOV**: `comp+0xE0` (and `+0xDC`) degrees: 70 unzoomed, 60 L2, 25 Concentration, blending; `+0xD8` keeps the one
+    before. Taken as vertical (HZD's unzoomed render was 67.7; a render-projection search was inconclusive); the
+    tangent ratio zoom compensation uses is the same either way. Offset fixed, no signature yet.
+  - **Death Stranding 2** (Nixxes, PC since 2026-03; not installed, exe name unconfirmed): detected by the same layout
+    if it ships it, and given this route. Not tested.
+
+- 2026-11-17 **Horizon Zero Dawn (Steam, 2020 PC port) works with a DualSense through Steam Input** (**verified in game by
+  the user**: camera after several save loads and fast travel, 1:1 at x1, L2 aim, zoom compensation, panel with the pad;
+  DualSense, Steam Input on, official layout). Builds on the 2026-11-16 entry (detection, legacy Steam Input reader).
+  - **Camera**: players global `exe+0x714C920`, index global `exe+0x26F0870`, player `[list+0x48+8*idx]`, soldier
+    `[player+0x68]`. The soldier's `CameraEntity` and its `ThirdPersonPlayerCameraComponent` move between runs and save
+    loads: seen as a pointer in the entity (`+0x470/0x500/0x600/0x640`), held inside it (`+0x730/0x840/0xa60/0x10d0`), and
+    only pointed to from an object of it (`entity+0x28 -> +0x230/0x238/0x2b0`, `+0x180 -> +0x220`, `+0x290 -> +0x10`); the
+    soldier has two `CameraEntity` pointers (`+0x1d0`, `+0x2d8`). `hzd_camera_mode` searches all of those by RTTI class
+    (throttled, cached while the classes match) and, failing that, a background `ReadProcessMemory` sweep for the one
+    object with the component's vtable (`find_vtable` from RTTI: `exe+0x1e3ce68` in this build; exactly one instance live).
+    Mode `[comp+0x70]` (`CameraOrbitFollow`), its matrix at `mode+0x108` (rows right, forward, up); two or more modes
+    alternate (aim, normal).
+  - **Decima's crash reporter** (`coredumps`) closes the game on any first-chance access violation, so every HZD read and
+    write goes through `ReadProcessMemory`/`WriteProcessMemory` (`quiet_read`/`quiet_write`), never SEH-guarded reads.
+  - **L2 (bow)**: the component swaps to another orbit mode and blends from the one it left; the component's own view
+    matrix (`comp+0xC0`, same layout) is held for about two seconds after the bow is drawn while the aim mode turned with
+    the gyro (recorded live: the mode's heading moved, the view's didn't), and touching the right stick released it (user
+    finding). Now, for 1.5 s after a mode change the mode left is turned too, for 3 s the component's matrix too, and the
+    first gyro turn in that window gives the game a 100 ms right-stick touch toward it through the hooked
+    `GetAnalogActionData` (`Engine::camera_waits_for_stick`). Which of those released the hold isn't isolated.
+  - **FOV**: `comp+0xE8` is the horizontal FOV in degrees (recorded live: 100 unzoomed, 85.7 with L2, down to 35.9 with
+    Concentration on R3; 67.7, 55.1 and 20.5 vertical at 16:9). Dead end first: Death Stranding's projection-pattern search
+    stopped at its 20000-object cap, and a wider one found several matches, one fixed at 60 degrees, and the old world's
+    after a save load.
+  - **Sensitivity**: Steam motion turned 1.26x too far through Gyro4All's sensor pacer (Steam motion has no sensor
+    timestamps; GyroLib reports it as source SDL, so the skip keys on the legacy reader). A duplicate-poll check
+    (`new_steam_frame`) came first. Table test: one pad turn read 349 degrees at GyroLib's scale.
+  - **Input while the panel is open**: HZD takes mouse buttons from a `SetWindowsHookExA` mouse hook (wrapped: no button
+    events while the panel has the mouse), `GetAsyncKeyState` (inline hook) and Raw Input (filtered). It doesn't open a
+    DirectInput mouse (the inline `DirectInput8Create` hook for games that look it up stays). The pad: the game reads
+    Steam Input through the C++ interface, so `GetDigitalActionData` (vtable slot 12) and `GetAnalogActionData` (15) of
+    the game's `ISteamInput` get a private vtable: held while a panel captures the controller and until every button is
+    released after it closes (the press that closes it doesn't reach the game).
+  - **Panels with the pad**: the reader's `controls` callback maps the game's 21 action handles (action set
+    `GamepadSetting`; touchpad as Back, so Options+touchpad opens the panel) to SDL ordinals. GyroLib's overlay navigates
+    only with an SDL controller, so the Steam pad's d-pad, cross and circle reach it as arrow keys, Enter and Escape. The
+    Gyro4All window took an open SDL controller with no input (Steam's virtual one): the Steam reader now comes first, and
+    L3+R3 works from it.
+  - Not done: Steam Input off (the game reads no controller then, 2026-11-16 entry), other pads.
+
 - 2026-11-14 **Unreal: `PauseConditions=` replaces the built-in MOVE_Flying pause** (builds, 1441 checks pass; not
   tested in game yet). Since 2026-10-25 `read_scene` paused the gyro whenever the pawn's
   `CharacterMovement.MovementMode` was 5 (MOVE_Flying), found for Dead Island 2's scripted scenes; that entry already
@@ -3216,3 +3289,34 @@ Afterburner running.
     t = tan(vFOV/2) < 0.95 with 1/t at -0x40 and tan(hFOV/2) at -0x28 matching the window aspect within 3%; the first
     loose pattern (no aspect check) latched onto a 90-degree square view during loading. Re-validated every frame,
     searched again (at most every 2 s) when it breaks. Reference = widest seen (or `ZoomReferenceFOV=`).
+
+## 2026-11-16 Horizon Zero Dawn (Steam, Decima, 2020 PC port): detection, controller, Steam Input reader
+
+- **Detection fixed**: HZD keeps its `.bin` archives in `Packed_DX12\`, not `data\` (Death Stranding); the Decima module
+  now accepts either (`has_hashed_data`). The game loads with `engine: Decima (detected)`.
+- **Camera not found yet**: the Death Stranding signatures match 0 times (`mode getter 0 match(es), angle reads 0`), so
+  the gyro stays off. Next: `tools/camtrace/` (guided.py).
+- **The game reads controllers only through Steam Input** (this build). Live RTTI: the pad manager it creates is
+  `SteamController` (global `exe+0x2d592a0`, getter `exe+0x2b23a0`, opened by the slot opener `exe+0x2aef30`: slots 0-7
+  Steam, slot 8 keyboard), next to `KeyBoardController` (`exe+0x2d59298`). The DS4 manager (Sony's pad library
+  statically linked: device check `exe+0x168a470`, enumeration thread `exe+0x168f130` gated by `exe+0x717B793`,
+  `scePadInit` `exe+0x1688230`; manager getter `exe+0x2b2270`, singleton `exe+0x2d59280`) and the Xbox one
+  (`exe+0x2b2490`) belong to the other slot opener `exe+0x2af0a0`, which the game never takes: the DS4 singleton stays
+  null. Neither opener has a static reference: the vtables that hold them are filled at runtime (zero in the file).
+  - With Steam Input off no controller works in the game, with or without Gyro4All (DualSense disguised as DS4,
+    `XInput=2`, another DS4 emulator): all dead ends. Hiding every non-Sony HID device from the game (temporary test)
+    changed nothing either.
+  - With Steam Input on, the game worked only after switching Steam's layout from a 2020 community one (its own gyro,
+    action set `GamepadSetting`) to the official one (user test, DualSense).
+  - The Steam overlay wraps only the game's `CloseHandle`; not the cause.
+- **GyroLib's Steam Input reader rejected HZD's `steam_api64.dll`** ("no compatible public Input exports"): an SDK
+  older than 1.48, with no `SteamAPI_SteamInput_v00N` accessor (strings: `SteamClient017/019`, `SteamInput001`). Steam
+  Input hides the physical pad from SDL, so the panel showed no controller. Gyro4All now has a fallback reader for such
+  DLLs (`host.cpp`, `legacy_steam`): `SteamInternal_FindOrCreateUserInterface(SteamAPI_GetHSteamUser(),
+  "SteamInput001")` plus the DLL's flat `SteamAPI_ISteamInput_GetConnectedControllers` / `GetMotionData`, passed to
+  GyroLib's provider adapter (`gl_steam_create`), guarded by SEH. Result (user test, DualSense, Steam Input on, official
+  layout): the panel shows a Steam Input controller, `motion source 2`, about 142 samples/s.
+  - Dead end: the legacy `SteamClient()` export plus `SteamAPI_ISteamClient_GetISteamInput` closed the game at once
+    (not an SEH-catchable fault); that export's interface version doesn't match the flat functions'.
+  - Not done: navigating the panel with the pad (the provider's optional `controls` callback would need the game's
+    actions; judged not worth it). Axis order of Steam's `rotVelX/Y/Z` (passed as pitch/roll/yaw) not verified yet.

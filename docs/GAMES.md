@@ -37,6 +37,7 @@
 | Days Gone | ✅ Works (tested on the Steam version) | Unreal Engine 4 | Install in `BendGame\Binaries\Win64`, next to `DaysGone.exe`. Aim has its own view in settings. Bike has its own `Vehicle` view in the `F10` panel: set its Activation to Off to keep the gyro off on the bike. |
 | Dead Island 2 | ✅ Works (tested on the Epic version) | Unreal Engine 4 | Install in `DeadIsland\Binaries\Win64`. Single-player only: never play online co-op with it. |
 | Dead Space (2023) | ✅ Works (tested on the Steam version) | Frostbite | Install next to `Dead Space.exe` in the game's main folder.|
+| Death Stranding Director's Cut | ✅ Works (tested on the Epic version) | Decima | Install next to `DeathStranding.exe` in the game's main folder. On foot only so far (vehicles not tested). |
 | Deus Ex: Mankind Divided | ✅ Works (tested on the GOG version, 1.19) | Dawn | Install in `retail`, next to `DXMD.exe`. |
 | Dishonored (Definitive Edition) | ✅ Works (tested on the Epic version) | Unreal Engine 3 | Install in `Binaries\Win64`, next to `Dishonored.exe`. |
 | DOOM (2016) | ✅ Works (tested on the Steam version, Vulkan and OpenGL) | id Tech 6 | Install in the game's main folder, next to `DOOMx64vk.exe` and `DOOMx64.exe`. Gyro turns off in the pause menu, the map and during glory kills. Campaign only: never play multiplayer or SnapMap online with it. |
@@ -51,6 +52,8 @@
 | Halo: The Master Chief Collection | ✅ Works (tested on the Xbox app / Game Pass version) | Blam! | Install in `Content\mcc\binaries\win64`, next to `MCCWinStore-Win64-Shipping.exe`. Start MCC without anti-cheat. Gyro tested in Halo CE, Halo 2 (campaign and multiplayer) and Halo 2: Anniversary multiplayer; Halo 3, ODST, Reach and Halo 4. Zoom compensation (*Adapt to Zoom*) in all seven games, following MCC's FOV settings |
 | Hitman 3 (World of Assassination) | ✅ Works (tested on the Epic version) | Glacier 2 | Install in `Retail`, next to `HITMAN3.exe`. Offline / single-player only: never play the online modes with it. |
 | Hogwarts Legacy | ✅ Works | Unreal Engine 4 | Needs custom profile |
+| Horizon Zero Dawn (2020 PC version) | ✅ Works (Steam version Steam Input enabled) | Decima | Install next to `HorizonZeroDawn.exe` in the game's main folder. The game reads controllers only through Steam Input: keep it on, with Steam's official layout for the game. Turn Steam's own gyro off, or set Block in the panel. |
+| Horizon Forbidden West (Complete Edition) | ✅ Works (tested on the Steam version) | Decima | Install next to `HorizonForbiddenWest.exe` in the game's main folder. |
 | Indiana Jones and the Great Circle | ✅ Works (tested on the Game Pass / Microsoft Store version) | Motor (id Tech 7 based) | Install next to `TheGreatCircle.exe` |
 | Kena: Bridge of Spirits | ✅ Works | Unreal Engine 4 | DX12 tested |
 | Kingdom Come: Deliverance | ✅ Works (tested on the Epic version, 1.9.7) | CryEngine (Warhorse's) | Install in `bin\Win64MasterMasterEpicPGO`, next to `KingdomCome.exe`, **as `version.dll`** (rename `winmm.dll`). Gyro4All shows your controller to the game as an Xbox one. `F10` panel works (DX11). |
@@ -127,8 +130,5 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 | Resident Evil 6 | MT Framework | 2012 | 32bit |
 | BioShock | Unreal Engine 2.5 (modified) | 2007 | 32bit |
 | BioShock 2 | Unreal Engine 2.5 (modified) | 2010 | 32bit |
-| BioShock Infinite | Unreal Engine 3 | 2013 | 32bit |
-| Death Stranding | Decima | 2019 | |
-| Death Stranding 2 | Decima | 2025 | |
-| Horizon Zero Dawn | Decima | 2017 | |
-| Horizon Forbidden West | Decima | 2022 | |
+| BioShock Infinite | Unreal Engine 3 | 2013 | 32bit | 
+| Death Stranding 2 | Decima | 2025 | Detected as Decima; the camera route is Horizon Forbidden West's, not tested |

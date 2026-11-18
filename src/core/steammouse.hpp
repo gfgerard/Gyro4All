@@ -22,6 +22,11 @@ struct Frame {
     bool focused = false;        // the game window is in front
     bool camera = false;         // the camera may turn (Convert's turn is dropped otherwise)
     bool gyrolib_panel = false;  // GyroLib's DX12 panel is attached: its own bridge applies the setting there
+    // A controller read through Gyro4All's reader for old Steamworks DLLs (host.cpp, legacy_steam): under Steam Input, with
+    // no SDL pad to show it. GyroLib's bridge never confirms Steam's mouse there (Horizon Zero Dawn), so this takes it over
+    // even with GyroLib's panel.
+    bool legacy_steam = false;
+    bool panel_mouse = false;    // a panel has the mouse (its Raw Input filter then hooks every caller's reads)
 };
 
 // Game thread, every frame, after gl_update. The setting is GyroLib's per-view input.steam_mouse (Pass through, Block,
