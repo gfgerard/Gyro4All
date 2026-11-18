@@ -35,6 +35,7 @@ void load_view_extras(View& v, const std::wstring& path, const wchar_t* section)
         v.offsets.push_back(int32_t(std::strtol(o.c_str(), nullptr, 0)));
     v.rotator_size = GetPrivateProfileIntW(section, L"RotatorSize", 24, path.c_str());
     v.world_rotation = GetPrivateProfileIntW(section, L"WorldRotation", 0, path.c_str()) != 0;
+    v.function = ini(path, section, L"Function");
     v.matrix = GetPrivateProfileIntW(section, L"Matrix", 0, path.c_str()) != 0;
     const std::string active = ini(path, section, L"ActiveList"), output = ini(path, section, L"OutputMatrix");
     if (!active.empty()) v.active_list = int32_t(std::strtol(active.c_str(), nullptr, 0));
@@ -131,6 +132,7 @@ std::vector<View> load_views(const std::wstring& path) {
         if (v.output_matrix >= 0) where += std::format(" (output +0x{:X})", v.output_matrix);
         if (v.active_list >= 0) where += std::format(" (active while first in the list at +0x{:X})", v.active_list);
         if (v.world_rotation) where += v.offsets.empty() ? " (WorldRotation)" : " (WorldRotation ignored: needs Property=)";
+        if (!v.function.empty()) where += " (turned through " + v.function + ")";
         if (v.has_pitch_rotation()) {
             std::string pitch = v.pitch_object.empty() ? std::string("(same object)") : join(v.pitch_object, '.');
             if (!v.pitch_property.empty()) pitch += "." + v.pitch_property;

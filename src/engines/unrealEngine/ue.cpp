@@ -1,5 +1,7 @@
 #include "ue.hpp"
 
+#include "ue_process_event_match.hpp"
+
 #include "fov.hpp"
 #include "hooks.hpp"
 #include "log.hpp"
@@ -1399,6 +1401,157 @@ bool add_world_rotation(Obj component, const Prop& relative, double pitch, doubl
     if (!ok || !write_quat(component + off, wide, q)) {
         why = "write failed";
         return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- reflected function calls (ProcessEvent)
+
+namespace {
+
+using unreal::kFuncBlueprintCallable;
+using unreal::kFuncHasOutParms;
+using unreal::kFuncNative;
+
+struct Callable {
+    Obj function = 0;
+    int32_t parms_size = 0;
+    int32_t rotator = -1, rotator_size = 0;  // the first Rotator parameter
+    int32_t teleport = -1;                   // bool bTeleport, if any
+};
+std::map<std::pair<Obj, std::string>, Callable> g_callables;  // (class, function name), function 0 = not found
+int g_func_flags = -1;          // UFunction::FunctionFlags
+uintptr_t g_process_event = 0;  // UObject::ProcessEvent
+bool g_process_event_searched = false, g_call_faulted = false;
+
+bool executable_code(uintptr_t p) {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!p || !VirtualQuery(reinterpret_cast<void*>(p), &mbi, sizeof(mbi))) return false;
+    const DWORD exec = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    return mbi.State == MEM_COMMIT && (mbi.Protect & exec);
+}
+
+// UStruct::Children (UField*: functions in UE 4.25+, before ChildProperties) and UField::Next (right after UObject).
+Obj find_function(Obj cls, const char* name) {
+    const int children = g_child_props - 8, next = g_obj_outer + 8;
+    for (int depth = 0; cls && depth < 64; ++depth, cls = rdp(cls + g_super)) {
+        Obj f = rdp(cls + children);
+        for (int i = 0; f && i < 2000; ++i, f = rdp(f + next))
+            if (fname(f + kObjName) == name && name_of(class_of(f)) == "Function") return f;
+    }
+    return 0;
+}
+
+// UFunction::FunctionFlags, the first member after UStruct: the word that reads as a native, Blueprint-callable
+// function with out parameters on a function known to be one (K2_AddLocalRotation & co: their FHitResult).
+int find_function_flags(Obj function) {
+    for (int off = 0x80; off <= 0x140; off += 4) {
+        uint32_t v = 0;
+        if (rd(function + off, v) && (v & kFuncNative) && (v & kFuncBlueprintCallable) && (v & kFuncHasOutParms) &&
+            !(v & 0x80000000u))
+            return off;
+    }
+    return -1;
+}
+
+// UObject::ProcessEvent: the vtable entry that tests both FUNC_Native and FUNC_HasOutParms of the UFunction it gets
+// (the same shape Dumper-7 looks for). Searched once, on the first object called.
+uintptr_t find_process_event(Obj o) {
+    if (g_process_event_searched) return g_process_event;
+    g_process_event_searched = true;
+    const uintptr_t vtable = rdp(o);
+    for (int i = 0; vtable && i < 0x100; ++i) {
+        // Function addresses aren't pointer-aligned: rd, not rdp (which takes them for implausible pointers).
+        uintptr_t entry = 0;
+        if (!rd(vtable + i * 8, entry) || !executable_code(entry)) continue;
+        uintptr_t fn = entry;
+        uint8_t code[0x600];
+        if (!guarded_copy(code, fn, 5)) continue;
+        if (code[0] == 0xE9) {  // a jump thunk (incremental linking, another mod's hook): follow it once
+            int32_t rel = 0;
+            std::memcpy(&rel, code + 1, 4);
+            fn = fn + 5 + rel;
+            if (!executable_code(fn)) continue;
+        }
+        if (!guarded_copy(code, fn, sizeof(code))) continue;
+        if (unreal::looks_like_process_event(code, sizeof(code), g_func_flags)) {
+            g_process_event = entry;
+            log("ue: ProcessEvent is vtable[%d] at %s (FunctionFlags +0x%X)", i, module_offset(g_process_event).c_str(),
+                g_func_flags);
+            return g_process_event;
+        }
+    }
+    log("ue: ProcessEvent not found in %s's vtable (FunctionFlags +0x%X): reflected function calls are off",
+        name_of(class_of(o)).c_str(), g_func_flags);
+    return 0;
+}
+
+Callable callable(Obj o, const char* name) {
+    const auto key = std::make_pair(class_of(o), std::string(name));
+    if (auto it = g_callables.find(key); it != g_callables.end()) return it->second;
+    Callable c;
+    if (const Obj f = find_function(class_of(o), name)) {
+        c.parms_size = properties_size(f);
+        for (uintptr_t p = rdp(f + g_child_props); p && c.parms_size > 0; p = rdp(p + g_field_next)) {
+            int32_t offset = -1, size = 0;
+            rd(p + g_prop_offset, offset);
+            rd(p + g_elem_size, size);
+            const std::string type = field_type(p);
+            if (c.rotator < 0 && type == "StructProperty" && (size == 12 || size == 24) &&
+                name_of(rdp(p + g_prop_size)) == "Rotator")
+                c.rotator = offset, c.rotator_size = size;
+            else if (type == "BoolProperty" && field_name(p) == "bTeleport")
+                c.teleport = offset;
+        }
+        if (g_func_flags < 0) g_func_flags = find_function_flags(f);
+        if (c.rotator >= 0) c.function = f;
+        log("ue: %s.%s: %s (parameters 0x%X bytes, rotator +0x%X, bTeleport %s)", name_of(class_of(o)).c_str(), name,
+            c.function ? "found" : "has no Rotator parameter", c.parms_size, c.rotator,
+            c.teleport >= 0 ? std::format("+0x{:X}", c.teleport).c_str() : "none");
+    } else {
+        log("ue: %s has no function %s", name_of(class_of(o)).c_str(), name);
+    }
+    g_callables.emplace(key, c);
+    return c;
+}
+
+using ProcessEventFn = void (*)(void* object, void* function, void* parms);
+
+// No C++ objects here: __try needs a frame without unwinding.
+bool guarded_process_event(uintptr_t process_event, Obj o, Obj function, void* parms) {
+    __try {
+        reinterpret_cast<ProcessEventFn>(process_event)(reinterpret_cast<void*>(o), reinterpret_cast<void*>(function), parms);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+}  // namespace
+
+bool call_rotation_function(Obj o, const char* function, double pitch, double yaw, const char*& why) {
+    if (!g_ready || !o) return why = "no object", false;
+    if (g_call_faulted) return why = "an earlier call faulted", false;
+    const Callable c = callable(o, function);
+    if (!c.function) return why = "function not found or without a Rotator parameter", false;
+    alignas(16) uint8_t parms[0x800] = {};
+    if (c.parms_size <= 0 || c.parms_size > int32_t(sizeof(parms))) return why = "unexpected parameter size", false;
+    if (g_func_flags < 0) return why = "UFunction::FunctionFlags not found", false;
+    const uintptr_t process_event = find_process_event(o);
+    if (!process_event) return why = "ProcessEvent not found", false;
+    if (c.rotator_size == 24) {
+        const double v[3] = {pitch, yaw, 0};
+        std::memcpy(parms + c.rotator, v, sizeof(v));
+    } else {
+        const float v[3] = {float(pitch), float(yaw), 0.f};
+        std::memcpy(parms + c.rotator, v, sizeof(v));
+    }
+    if (c.teleport >= 0) parms[c.teleport] = 1;
+    if (!guarded_process_event(process_event, o, c.function, parms)) {
+        g_call_faulted = true;
+        log("ue: ProcessEvent(%s, %s) faulted: reflected function calls are off for this session",
+            name_of(o).c_str(), function);
+        return why = "the call faulted", false;
     }
     return true;
 }

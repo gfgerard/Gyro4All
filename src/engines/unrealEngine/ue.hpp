@@ -64,6 +64,13 @@ bool add_world_rotation(Obj component, const Prop& relative, double pitch, doubl
 // The component's ComponentToWorld rotation holds its RelativeRotation (absolute rotation, layout found).
 bool has_world_rotation(Obj component, const Prop& relative);
 
+// Calls the reflected function `function` of o's class chain through UObject::ProcessEvent (game thread only): its first
+// Rotator parameter gets (pitch, yaw, 0), a bool parameter named bTeleport is true, every other parameter zero. For
+// components whose rotation a physics body holds (EVERSPACE 2's ship): SceneComponent's K2_AddLocalRotation with
+// bTeleport moves the body too, where a memory write is undone by the physics. ProcessEvent is found in o's vtable by its
+// shape. On failure `why` says why (nothing was called); a call that faults turns calls off for the session.
+bool call_rotation_function(Obj o, const char* function, double pitch, double yaw, const char*& why);
+
 // Diagnostics / profile helpers for scalar properties (Float, Double, Int, Byte, Bool).
 void dump_props(Obj o, const char* stop_at_class);  // log every property down to (not including) stop_at_class
 std::string value_string(Obj o, const char* name);  // "" if missing or unsupported type

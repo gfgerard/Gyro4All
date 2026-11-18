@@ -5,6 +5,40 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-18 **EVERSPACE 2: works, the ship turned 1:1 through `ProcessEvent` (new profile key `Function=`)** (no version
+  bump; tested with a DualSense, Steam Input off, connection not noted). The ship's root takes the turn only through
+  the engine: `Function=K2_AddLocalRotation` on `Pawn.CollisionRoot0` (`MovementRootComponent`), `bTeleport` set, so
+  the physics body moves too; the view stays the ship's (camera confirmed following, no faults over ~5 min).
+  `profiles/ES2-Win64-Shipping.ini` (`Property=RelativeRotation` only read, `Recenter=0`). Code (`ue.cpp`
+  `call_rotation_function`): the UFunction from `UStruct::Children` (ChildProperties - 8; `UField::Next` = Outer + 8),
+  its parameters from its ChildProperties (`K2_AddLocalRotation`: 0x128 bytes, rotator +0x0, `bTeleport` +0x120),
+  `UFunction::FunctionFlags` found on it (+0xB0 here: Native, BlueprintCallable, HasOutParms set), `ProcessEvent` by
+  shape: the vtable entry testing both `FUNC_Native` and `FUNC_HasOutParms` at that offset
+  (`ue_process_event_match.hpp`, unit-tested); here vtable[79], exe+0x1241F90, tests at +0x59 and +0x1DD. Called under
+  `__try` (a fault turns calls off for the session). Bug on the first try: the vtable scan read entries with `rdp`,
+  which rejects unaligned values (function addresses), and stopped at entry 2. No stick fallback for `Function=` views.
+- 2026-11-18 **EVERSPACE 2 (Steam, UE5, `ES2-Win64-Shipping.exe`, double rotators): ship flight, routes tried first.**
+  Third-person camera orbits the ship (radius ~2800); the view is the ship's orientation. Pawn `BP_Ship_Player_C`
+  (-> `BP_ShipBase_C` -> `BP_PawnBase_C` -> `ESPawn`), flown by `ESPawn.ShipMovement` (+0x378, `ShipMovementComponent`);
+  `ESPawn.PhysicsAngularDamping` (+0xEE8): the ship is a physics body. Tried (all with a DualSense, Steam Input off):
+  - generic `ControlRotation`: ignored (gyro accumulated, nothing turned).
+  - probe (Ctrl+F7, 11 captures): every candidate an output (`CameraTPRotationPivot`, `CameraLastTargetRot`,
+    `SpringArmTP*`/`SpringArmFreeLook` +0x2D8, `PC+0xAD0`, camera POVs); `CollisionRoot0.RelativeRotation`
+    (`MovementRootComponent`, the root) and `Camera.TransformComponent0.RelativeRotation` kept but the view didn't follow.
+  - `Pawn.CollisionRoot0` `RelativeRotation` + `WorldRotation=1` (ComponentToWorld at +0x1D0): written, no turn (physics).
+  - `ShipMovementComponent.ControlInputRotator` (+0x9D8; consumed into `LastControlInputRotator` +0x9F0, -1..1):
+    turns the ship, but as steering input with the ship's inertia (feels like stick fallback).
+  - `ShipMovementComponent.AngularVelocityDegLocal` (+0x188, deg/s local): recomputed every frame, no turn.
+  `CurrentShipRotation` is a string in the exe but not a reflected property (pawn or ShipMovement). External memory
+  reads (`guided.py`) failed with access denied (error 5) while the game ran elevated; fine after a normal restart.
+  `guided.py` twice: no result (1st: moves 3-6 didn't turn; 2nd: the 132-copy reference was reused during the 205 s
+  comparison and read 0/0, 90/0 after). No quaternion in `ShipMovementComponent` (first 0x1400 bytes). The root
+  (`pawn+0x1B8`) quaternion has ~3800 double copies in memory (every attached component's transform), none laid out
+  as Chaos `X` then `R` except ~6 view-like structs (camera position, ship position, the quaternion twice, then
+  direction vectors): not the physics particle. Next: a teleporting rotation through
+  the engine (`SceneComponent.K2_AddLocalRotation` with `bTeleport` via `ProcessEvent`, not implemented), or
+  `guided.py` from an elevated prompt for non-reflected state.
+
 - 2026-11-18 **Death Stranding 2 (Steam, Nixxes, Decima): the crash reporter took the log**. The first run's
   `Gyro4All.log` was `crs-video.exe`'s (Nixxes's crash reporter, next to `DS2.exe` with `crs-handler.exe`): the Nixxes
   layout check is per folder, so every exe there is detected as Decima, and the helper opened (truncated) the log and

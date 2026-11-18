@@ -308,7 +308,17 @@ bool apply(View& view, const Scene& s, double pitch, double yaw) {
         if (!apply(pitch_only, s, pitch, 0)) return false;
         pitch = 0;
     }
-    if (!view.offsets.empty()) {
+    if (!view.function.empty()) {
+        // Function=: the engine turns it (a physics body takes the turn only this way).
+        const char* why = nullptr;
+        if (!ue::call_rotation_function(target, view.function.c_str(), pitch, yaw, why)) {
+            if (why != view.function_why)
+                log("profile: view %u %s not called on %s: %s", view.id, view.function.c_str(), ue::name_of(target).c_str(), why);
+            view.function_why = why;
+            return false;
+        }
+        view.function_why = nullptr;
+    } else if (!view.offsets.empty()) {
         // OutputMatrix: the game limits the pitch in the output matrix without clamping the source one (Days Gone:
         // the follow camera holds its view near 21 degrees down while the source goes on), so past that limit the
         // gyro would wind the source up, a dead zone on the way back. The source is first brought back to the output.
@@ -791,9 +801,11 @@ public:
     }
 
     // The rotation apply adds to (ControlRotation, a profile's Property= or its first Offsets=), for the stick fallback.
-    // Not Match=Camera views (a rewritten rotation makes the camera match try the next one) nor WorldRotation ones.
+    // Not Match=Camera views (a rewritten rotation makes the camera match try the next one) nor WorldRotation or
+    // Function= ones.
     bool view_angles(double& pitch, double& yaw, uintptr_t& camera) override {
-        if (!g_view || g_view->world_rotation || g_view->match_camera || !read_view_rotation(*g_view, g_scene, pitch, yaw))
+        if (!g_view || g_view->world_rotation || !g_view->function.empty() || g_view->match_camera ||
+            !read_view_rotation(*g_view, g_scene, pitch, yaw))
             return false;
         camera = view_object(*g_view, g_scene) ^ (uintptr_t(g_view->id) << 48);
         return true;

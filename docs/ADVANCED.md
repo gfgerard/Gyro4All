@@ -173,6 +173,7 @@ All diagnostics go to `Gyro4All\Gyro4All.log` (probe results, if enabled, to `Gy
 | `applied yaw` changes but the camera doesn't move | Custom camera: see [Finding the camera](#finding-the-camera-of-a-new-game). |
 | `camera: '<view>' is rewritten by the game` (or `is ignored by the camera`), `trying '<next>' (N degrees carried over)` / `the camera follows view '<view>' now (Match=Camera)` | The game switched between rotations of the same view target and Gyro4All followed it (see [Several cameras for the same view target](#several-cameras-for-the-same-view-target-matchcamera)). |
 | `probe: started during play (...)` / `probe: camera learned: ...` / `probe: stopped (...)` | A probe started from the probe key or by AutoProbe, and what became of it (see [Learning a camera during play](#learning-a-camera-during-play-no-restart)). `probe: ... turns yaw only: live test of N rotation(s) that followed the camera's pitch alone`, then `probe: camera learned: yaw in <rotation> (view N '<label>'), pitch in <rotation>: PitchObject= written to [View.<key>]`: the camera keeps yaw and pitch in two objects (see "Yaw and pitch in two objects" there). |
+| `ue: ProcessEvent is vtable[N] at <module>+0x... (FunctionFlags +0x...)`, `ue: <Class>.<Function>: found (...)`, `profile: view N <Function> not called on <object>: <why>` | A `Function=` view: the engine function that turns it and where Gyro4All calls it (see [Turning through the engine](#turning-through-the-engine-function)). `ProcessEvent not found` or `has no function`: that view doesn't turn (report it with the log). `ProcessEvent(...) faulted`: calls are off until the game restarts. |
 | `update rotation: <class> UpdateRotation is vtable[N] at <module>+0x... (reads RotationInput +0x... first): hooked, the gyro goes into RotationInput` | A `Property=RotationInput` view: the gyro is added to the stick's look input inside the controller's `UpdateRotation` (see [The stick's look input](#the-sticks-look-input-propertyrotationinput)). `N functions of its vtable read RotationInput first ... not found` / `not unique`: the controller's `UpdateRotation` couldn't be told apart, so that view doesn't turn (report it with the log). |
 | `scene: the pawn is in a cutscene (IsInActiveCutscene): gyro paused` / `scene: pause condition '<condition>' holds: gyro paused` / `scripted scene over` | Unreal: scripted moments count as a pause, so the gyro stops as the stick does: a pawn with a reflected `IsInActiveCutscene` set, or one of the profile's `PauseConditions=` (Dead Island 2: `Pawn.CharacterMovement.MovementMode==5`, its scripted scenes fly the character). A character in flying mode doesn't pause the gyro by itself (games where the player flies). `profile: pause condition '<condition>'` at start lists each one read; `... ignored: <why>` a malformed one; `scene: pause condition '<condition>' can't be read from <class> (path not found / no such number, bool or object property)`: that pawn (or controller, camera) doesn't have it, so it doesn't pause there (logged once per class). |
 | `profile: the profile file changed, views read again` | The profile was edited, or the probe added a view: its views apply at once. |
@@ -431,6 +432,9 @@ Label=Exploration
 ;                        writes it for a yaw-only camera when it found no rotation for the pitch)
 ;   WorldRotation=1      with Property=RelativeRotation of a scene component that uses absolute rotation: also
 ;                        writes the component's world rotation (see "Components with absolute rotation")
+;   Function=Name        turn by calling this reflected function of the object (its Rotator parameter gets the turn,
+;                        bTeleport is set) instead of writing; Property= is only read. For physics bodies, e.g.
+;                        Function=K2_AddLocalRotation (see "Turning through the engine")
 ;   RecenterPitch=0      level pitch for the recenter button, in this view's rotator (degrees, default 0);
 ;                        set it when "level" isn't 0 in a custom camera
 ;   Recenter=0           hide the recenter button in this view (it doesn't level this camera properly)
@@ -649,6 +653,33 @@ follows it in `APlayerController` (`InputYawScale_DEPRECATED` in UE5). The log s
 Label=Exploration
 Property=RotationInput
 ```
+
+### Turning through the engine (`Function=`)
+
+Some views can't be turned by writing memory at all. In EVERSPACE 2 the view is the ship's orientation, and the ship is a
+physics body: the physics engine puts back its own rotation every frame, so a write to the ship's root (even with
+`WorldRotation=1`) is lost, and the ship's movement component only takes a steering input with the ship's own inertia
+(like the stick). For those, `Function=` names a reflected function of the view object that Gyro4All calls instead of
+writing: its first `Rotator` parameter gets the turn, a bool parameter named `bTeleport` is set, every other parameter
+is zero. SceneComponent's `K2_AddLocalRotation` with teleport moves the physics body too, in the object's own axes (a
+ship's yaw and pitch). `Property=` is still needed: it is only read, for the status line and the follow check.
+
+```ini
+[View.Default]
+Label=Ship
+Object=Pawn.CollisionRoot0
+Property=RelativeRotation
+Function=K2_AddLocalRotation
+Recenter=0
+```
+
+The call goes through the engine's `UObject::ProcessEvent`, found by its shape in the object's virtual functions (the one
+that tests the function's `FUNC_Native` and `FUNC_HasOutParms` flags), on the game thread. The log says which entry
+(`ue: ProcessEvent is vtable[N] at <module>+0x...`) and what the function takes (`ue: <Class>.<Function>: found
+(parameters ..., rotator +0x..., bTeleport +0x...)`). If either isn't found, the view isn't turned and the log says
+why (`profile: view N <Function> not called on <object>: ...`). A call that faults turns calls off for the session
+instead of crashing the game. Local turns don't add up like world yaw and pitch, so these views have no stick
+fallback, and a ship's roll makes the level pitch meaningless: use `Recenter=0`.
 
 ### Several cameras for the same view target (`Match=Camera`)
 

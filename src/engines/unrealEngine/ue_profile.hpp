@@ -41,6 +41,11 @@ struct View {
     // (ComponentToWorld) is written too, because the game turns the component from it (Severed Steel's camera).
     bool world_rotation = false;
     const char* world_why = nullptr;  // last reason it couldn't be applied (logged when it changes)
+    // Function=<name>: the turn is applied by calling this reflected function of the view object (its first Rotator
+    // parameter gets the turn, bTeleport is true) instead of writing memory; Property= is only read (status, follow
+    // check). For physics bodies that undo memory writes (EVERSPACE 2's ship: Function=K2_AddLocalRotation on its root).
+    std::string function;
+    const char* function_why = nullptr;  // last reason the call failed (logged when it changes)
     uint32_t parent = 0;            // settings inheritance
     // PitchView=<id>: this view turns yaw only, its pitch goes into that view's rotation. For cameras that split the
     // axes over two objects (Dead Island 2: yaw from the pawn's capsule, pitch from ControlRotation). 0 = both here.

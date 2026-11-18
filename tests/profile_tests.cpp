@@ -9,6 +9,7 @@
 #include "stick_camera.hpp"
 #include "stick_fallback.hpp"
 #include "ue_profile.hpp"
+#include "ue_process_event_match.hpp"
 #include "ue_update_rotation_match.hpp"
 #include "unity_aim.hpp"
 #include "unity_candidates.hpp"
@@ -438,6 +439,47 @@ void test_load_active_list_views() {
     CHECK(views[0].object.size() == 2 && views[0].object[1] == "@BendPlayerCamFollow_C|BendCamMelee");
     const View* vehicle = by_id(views, 2);
     CHECK(vehicle && vehicle->active_list == 0x35D0 && vehicle->output_matrix < 0 && vehicle->parent == 1);
+}
+
+void test_load_function_view() {
+    std::puts("profile: Function= turns the view through a reflected function, Property= still reads it");
+    const std::wstring path = temp_profile(L"function");
+    write_file(path,
+               "[View.Default]\r\nLabel=Ship\r\nObject=Pawn.CollisionRoot0\r\nProperty=RelativeRotation\r\n"
+               "Function=K2_AddLocalRotation\r\nRecenter=0\r\n");
+    const std::vector<View> views = load_views(path);
+    CHECK(views.size() == 1);
+    CHECK(views[0].function == "K2_AddLocalRotation" && views[0].property == "RelativeRotation" && !views[0].recenter);
+    CHECK(views[0].object.size() == 2 && views[0].object[1] == "CollisionRoot0");
+}
+
+void test_process_event_shape() {
+    std::puts("profile: ProcessEvent is told by its FUNC_Native and FUNC_HasOutParms tests of FunctionFlags");
+    using gyro4all::unreal::kFuncHasOutParms;
+    using gyro4all::unreal::kFuncNative;
+    using gyro4all::unreal::looks_like_process_event;
+    using gyro4all::unreal::tests_function_flag;
+    // test dword [rdx+0xB0], 0x400 ; test dword [rdx+0xB0], 0x400000
+    const std::vector<uint8_t> dword_form = {0x48, 0x89, 0x5C, 0x24, 0x08,               // mov [rsp+8], rbx
+                                             0xF7, 0x82, 0xB0, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00,
+                                             0x74, 0x10,                                 // je
+                                             0xF7, 0x82, 0xB0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00,
+                                             0xC3, 0xCC, 0xCC, 0xCC};
+    CHECK(looks_like_process_event(dword_form.data(), dword_form.size(), 0xB0));
+    CHECK(!looks_like_process_event(dword_form.data(), dword_form.size(), 0xB4));  // other offset
+    // test byte [r8+0xB1], 4 (FUNC_Native's byte) ; test byte [rdi+0xB2], 0x40 (FUNC_HasOutParms's)
+    const std::vector<uint8_t> byte_form = {0x41, 0xF6, 0x80, 0xB1, 0x00, 0x00, 0x00, 0x04, 0x90,
+                                            0xF6, 0x87, 0xB2, 0x00, 0x00, 0x00, 0x40, 0xC3, 0xCC, 0xCC, 0xCC};
+    CHECK(tests_function_flag(byte_form.data(), byte_form.size(), 0xB0, kFuncNative));
+    CHECK(tests_function_flag(byte_form.data(), byte_form.size(), 0xB0, kFuncHasOutParms));
+    CHECK(looks_like_process_event(byte_form.data(), byte_form.size(), 0xB0));
+    // Only one of the two flags: not ProcessEvent.
+    const std::vector<uint8_t> one_flag = {0xF7, 0x82, 0xB0, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0xC3, 0xCC, 0xCC};
+    CHECK(!looks_like_process_event(one_flag.data(), one_flag.size(), 0xB0));
+    // test eax, imm (no memory operand) and a SIB form are not matched.
+    const std::vector<uint8_t> other = {0xA9, 0x00, 0x04, 0x00, 0x00,
+                                        0xF7, 0x84, 0x24, 0xB0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0xC3, 0xCC};
+    CHECK(!looks_like_process_event(other.data(), other.size(), 0xB0));
 }
 
 LearnedView clamp_view() {
@@ -2116,7 +2158,9 @@ int main() {
     test_load_missing();
     test_load_views();
     test_load_active_list_views();
+    test_load_function_view();
     test_update_rotation_shape();
+    test_process_event_shape();
     test_add_view_new_file();
     test_add_view_yaw_only();
     test_pitch_rotation_keys();
