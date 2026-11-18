@@ -5,6 +5,36 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-18 **Death Stranding 2 (Steam, Nixxes, Decima): the crash reporter took the log**. The first run's
+  `Gyro4All.log` was `crs-video.exe`'s (Nixxes's crash reporter, next to `DS2.exe` with `crs-handler.exe`): the Nixxes
+  layout check is per folder, so every exe there is detected as Decima, and the helper opened (truncated) the log and
+  logged `PeekMessageW not imported` (it has no game loop). `DS2.exe` was no longer running, so the game may have
+  crashed; its own log was lost. Fix: `DecimaEngine::is_launcher` is true for `crs-*.exe`, which stay plain proxies.
+  Verified next run: the log is `DS2.exe`'s, `session: kept (crs-handler.exe ... is a helper)`.
+
+- 2026-11-18 **Death Stranding 2: On the Beach (Steam, Nixxes, Decima) works on foot** (**user test**: gyro turns the
+  camera; DualSense USB, read by the game itself through Sony's `libScePad.dll` over HID, Steam Input not in its path).
+  PeekMessageW frames on the game thread (`DS2.exe+0xEF058`). `.text` not packed: static reading of the exe works.
+  - **HFW's route doesn't apply**: `kCompAngles` matches twice (`DS2.exe+0x9146A9`, `+0x9149FD`, source `+0x470`/`+0x478`),
+    but DS2 subclasses the component (`DSThirdPersonPlayerCameraComponent`, one live; the base class has none, so the
+    vtable search found 0) and those angles never change while the camera turns. The component keeps a derived view
+    matrix at `+0x70` and the camera position at `+0xC0`; `+0xE0` (HFW's FOV) is 0 here.
+  - **Camera**: found by correlating every float two pointer levels from the component with the matrix heading while the
+    user turned (Python, ReadProcessMemory, no debugger; `guided.py` needed ~16 GB with the game at 7.8 GB). **Pitch and
+    heading are radians at `DSCameraMode+0xF90` / `+0xF94`** (one live instance; Death Stranding DC's camera mode has them
+    at `+0xC10/+0xC14`); `PlayerGame+0x5AC/+0x5B0` holds a copy. Write test: heading +0.35 and pitch +0.15 kept, the
+    component matrix and PlayerGame's copy followed. Signature `kDsModeAngles` (vmovss xmm0,[reg+P]; vmovss xmm15,[reg+H];
+    vsubss xmm0,xmm0,xmm8; call): 2 matches (`DS2.exe+0xE28931`, `+0xE35AEA`), both `+0xF90/+0xF94`. Module: a Nixxes exe
+    with the `DSCameraMode` class and that code takes the DS2 route (mode found by vtable on a background thread, angles
+    turned as HFW's: pitch +, heading -, pitch within ±80).
+  - **FOV**: Death Stranding DC's render projection search from the mode finds 45.7 vertical (73.7 horizontal, as DS DC
+    in third person) in several objects at depth 3. Bug found: `fov_pattern` let a NaN `1/tan` through (`fabs(NaN) >
+    1e-3` is false) and the first run took a 25.4 vertical false match; now NaN fails. **Zoom compensation works** (user
+    test, `ZoomSource=Auto`, `ZoomReferenceFOV=0`): 45.7 unzoomed found at once, the FOV follows the game's zoom
+    smoothly (about 38-39 on the quick zooms seen, down to 21.3), gyro x0.89 at 41.2; widest seen stays 45.7.
+  - Not tested: vehicles, menus/map (the mode stays live there: the gyro may turn the camera behind a menu), cutscenes,
+    aiming, first person.
+
 - 2026-11-18 **Horizon Forbidden West Complete Edition (Steam, Nixxes port, Decima) works** (**verified in game by the
   user**: gyro 1:1 on foot, L2 aims with the gyro at once, zoom compensation with L2 and Concentration; DualSense USB, read
   by the game itself over HID, Steam Input not in its path: the Steam Input reader saw no controller). No Denuvo, Themida

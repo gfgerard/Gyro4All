@@ -269,6 +269,30 @@ bool find_comp_angles(CompAngles& l) {
     return l.pitch > 0 && l.pitch < 0x4000;
 }
 
+// Death Stranding 2 (Nixxes, MODLOG 2026-11-18): the class above is subclassed (DSThirdPersonPlayerCameraComponent) and
+// its +0x470 angles stay still; the view's pitch and heading are radians in the one DSCameraMode, as in Death Stranding
+// (DC)'s camera mode (write-tested: both kept, the component's matrix and PlayerGame's copy follow). Read by
+// vmovss xmm0,[reg+pitch]; vmovss xmm15,[reg+heading]; vsubss xmm0,xmm0,xmm8; call (two copies).
+constexpr const char* kDsModeAngles = "C5 FA 10 ?? ?? ?? ?? ?? C5 7A 10 ?? ?? ?? ?? ?? C4 C1 7A 5C C0 E8";
+constexpr const char* kDsModeClass = ".?AVDSCameraMode@@";
+
+bool find_ds_mode_angles(CompAngles& l) {
+    const auto hits = find(kDsModeAngles);
+    bool agree = !hits.empty();
+    for (size_t i = 0; agree && i < hits.size(); ++i) {
+        const uint32_t p = at<uint32_t>(hits[i] + 4), h = at<uint32_t>(hits[i] + 12);
+        if (i == 0) l.pitch = p, l.heading = h;
+        agree = p == l.pitch && h == l.heading && h == p + 4 && p > 0 && p < 0x10000;
+    }
+    if (!agree) {
+        log("decima: DSCameraMode's angle code not found (%zu match(es)%s)", hits.size(), hits.empty() ? "" : " that differ");
+        return false;
+    }
+    log("decima: DSCameraMode angles +0x%x pitch, +0x%x heading (%s, %zu match(es))", l.pitch, l.heading,
+        mem::module_offset(hits[0]).c_str(), hits.size());
+    return true;
+}
+
 // The MSVC RTTI class of `obj` is `name` (".?AV...@@"), with guarded reads.
 bool is_class(uintptr_t obj, const char* name) {
     static const uintptr_t exe = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
@@ -367,6 +391,7 @@ uintptr_t find_object_by_vtable(uintptr_t vt, int* instances = nullptr) {
 struct HzdComponentSearch {
     std::atomic<bool> running{false};
     std::atomic<uintptr_t> result{0};
+    const char* cls = kCompClass;  // the class searched for (Death Stranding 2: its DSCameraMode)
     uintptr_t vtable = 0;
     bool vtable_looked = false;
     ULONGLONG next = 0;
@@ -375,8 +400,8 @@ struct HzdComponentSearch {
         next = GetTickCount64() + 5000;
         if (!vtable_looked) {
             vtable_looked = true;
-            vtable = find_vtable(".?AVThirdPersonPlayerCameraComponent@@");
-            log("decima: ThirdPersonPlayerCameraComponent's vtable %s",
+            vtable = find_vtable(cls);
+            log("decima: %s's vtable %s", cls,
                 vtable ? mem::module_offset(vtable).c_str() : "not found: no memory search for the camera");
         }
         if (!vtable) return;
@@ -386,7 +411,7 @@ struct HzdComponentSearch {
             int n = 0;
             const uintptr_t at = find_object_by_vtable(vtable, &n);
             result = at;
-            log("decima: memory search for the camera component: %s in %llu ms",
+            log("decima: memory search for the %s: %s in %llu ms", cls,
                 at ? mem::module_offset(at).c_str() : (std::to_string(n) + " instances: none taken").c_str(),
                 GetTickCount64() - t0);
             running = false;
@@ -520,7 +545,8 @@ bool hzd_matrix(uintptr_t mode, float m[9]) {
 // map projections, 90 degrees while loading) match too.
 bool fov_pattern(const float* p, double aspect) {
     const float t = p[0], inv = p[-16], h = p[-10];
-    if (!std::isfinite(t) || t < 0.05f || t > 0.95f || std::fabs(inv * t - 1.f) > 1e-3f) return false;
+    // Written so that a NaN fails (Death Stranding 2: a NaN 1/tan next to a tan and a tan*aspect gave 25.4 degrees).
+    if (!std::isfinite(t) || t < 0.05f || t > 0.95f || !(std::fabs(inv * t - 1.f) <= 1e-3f)) return false;
     return aspect > 0 && std::fabs(h / t / aspect - 1) < 0.03;
 }
 
@@ -571,6 +597,12 @@ class DecimaEngine final : public Engine {
 public:
     const char* name() const override { return "Decima"; }
     bool detect(const std::wstring& exe_path) const override { return decima_layout(exe_path); }
+    // Nixxes's crash reporter next to the exe (crs-handler.exe, crs-video.exe) isn't the game: the folder layout detects
+    // it too, and it would take the session and truncate the game's log.
+    bool is_launcher(const std::wstring& exe_path) const override {
+        const std::wstring exe = exe_path.substr(exe_path.find_last_of(L"\\/") + 1);
+        return _wcsnicmp(exe.c_str(), L"crs-", 4) == 0;
+    }
     void configure() override { load_zoom_reference(); }
     void settings_changed() override { load_zoom_reference(); }
     std::vector<ViewInfo> views() const override { return {{1, "Default", 0, true}}; }
@@ -583,9 +615,23 @@ public:
             GetModuleFileNameW(nullptr, path, MAX_PATH);
             hzd_ = lower(path).find(L"horizonzerodawn") != std::wstring::npos;
             nixxes_ = !hzd_ && nixxes_layout(exe_dir(path));
-            found_ = hzd_ ? find_hzd_layout(hzd_layout_) : nixxes_ ? find_comp_angles(comp_angles_) : find_layout(layout_);
+            // Nixxes ports: Death Stranding 2's DSCameraMode when the exe has that class and its angle code, else
+            // Horizon Forbidden West's camera component.
+            const uintptr_t ds_vtable = nixxes_ ? find_vtable(kDsModeClass) : 0;
+            ds2_ = ds_vtable && find_ds_mode_angles(comp_angles_);
+            if (ds2_) {
+                g_hzd_search.cls = kDsModeClass;
+                g_hzd_search.vtable = ds_vtable;
+                g_hzd_search.vtable_looked = true;
+                log("decima: %s's vtable %s", kDsModeClass, mem::module_offset(ds_vtable).c_str());
+            }
+            found_ = hzd_ ? find_hzd_layout(hzd_layout_)
+                     : ds2_ ? true
+                     : nixxes_ ? find_comp_angles(comp_angles_)
+                               : find_layout(layout_);
         }
         if (hzd_) return read_hzd_frame();
+        if (ds2_) return read_ds2_frame();
         if (nixxes_) return read_comp_frame();
         mode_ = found_ ? camera_mode(layout_) : 0;
         float pitch = 0, heading = 0;
@@ -637,7 +683,7 @@ public:
     // Degrees from GyroLib (pitch up, yaw right) added to the mode's radians: pitch up is +, heading right is - (tested).
     bool apply(double pitch, double yaw) override {
         if (hzd_) return apply_hzd(pitch, yaw);
-        if (nixxes_) return apply_comp(pitch, yaw);
+        if (nixxes_) return apply_comp(pitch, yaw);  // Death Stranding 2 too: the same angles, in its DSCameraMode
         if (!mode_) return false;
         float p = 0, h = 0;
         if (!mem::rd(mode_ + layout_.pitch, p) || !mem::rd(mode_ + layout_.heading, h)) return false;
@@ -700,6 +746,33 @@ private:
         // Dawn's 67.7 unzoomed render FOV; zoom compensation's tangent ratio is the same either way.
         float v = 0;
         if (qrd(mode_ + kCompFov, v) && std::isfinite(v) && fov::is_valid(v)) f.zoom_fov = zoom_fov(v);
+        return f;
+    }
+
+    // Death Stranding 2: the one DSCameraMode, found by its vtable on a background thread and kept while its class still
+    // matches; its pitch and heading radians (comp_angles_, from kDsModeAngles), turned by apply_comp. FOV as Death
+    // Stranding (DC)'s: the render projection found from the mode (recorded: 45.7 vertical, 73.7 horizontal, on foot).
+    EngineFrame read_ds2_frame() {
+        EngineFrame f;
+        if (comp_ && !is_class(comp_, kDsModeClass)) comp_ = 0;
+        if (!comp_) {
+            if (const uintptr_t r = g_hzd_search.result.exchange(0); r && is_class(r, kDsModeClass)) comp_ = r;
+            else g_hzd_search.start();
+        }
+        float pitch = 0, heading = 0;
+        mode_ = comp_ && comp_angles(comp_, pitch, heading) ? comp_ : 0;
+        if (mode_ != logged_mode_) {
+            logged_mode_ = mode_;
+            if (mode_)
+                log("decima: DSCameraMode %s (pitch %.1f, heading %.1f degrees)", mem::module_offset(mode_).c_str(),
+                    pitch / kRad, heading / kRad);
+            else log("decima: no DSCameraMode");
+        }
+        if (!mode_) return f;
+        f.in_game = true;
+        f.view_id = 1;
+        f.target = "camera mode";
+        f.zoom_fov = zoom_fov(render_fov(mode_));
         return f;
     }
 
@@ -838,7 +911,7 @@ private:
     HzdLayout hzd_layout_;
     std::string logged_why_;
     CompAngles comp_angles_;
-    bool searched_ = false, found_ = false, hzd_ = false, nixxes_ = false;
+    bool searched_ = false, found_ = false, hzd_ = false, nixxes_ = false, ds2_ = false;
     uintptr_t mode_ = 0, logged_mode_ = 0;
     // HZD: the orbit mode the camera left and until when it is still turned with the current one (see apply_hzd).
     uintptr_t left_mode_ = 0, last_mode_ = 0;

@@ -37,7 +37,8 @@
 | Days Gone | ✅ Works (tested on the Steam version) | Unreal Engine 4 | Install in `BendGame\Binaries\Win64`, next to `DaysGone.exe`. Aim has its own view in settings. Bike has its own `Vehicle` view in the `F10` panel: set its Activation to Off to keep the gyro off on the bike. |
 | Dead Island 2 | ✅ Works (tested on the Epic version) | Unreal Engine 4 | Install in `DeadIsland\Binaries\Win64`. Single-player only: never play online co-op with it. |
 | Dead Space (2023) | ✅ Works (tested on the Steam version) | Frostbite | Install next to `Dead Space.exe` in the game's main folder.|
-| Death Stranding Director's Cut | ✅ Works (tested on the Epic version) | Decima | Install next to `DeathStranding.exe` in the game's main folder. On foot only so far (vehicles not tested). |
+| Death Stranding Director's Cut | ✅ Works (tested on the Epic version) | Decima | Install next to `DeathStranding.exe` in the game's main folder.|
+| Death Stranding 2: On the Beach | ✅ Works (tested on the Steam version) | Decima | Install next to `DS2.exe` in the game's main folder. |
 | Deus Ex: Mankind Divided | ✅ Works (tested on the GOG version, 1.19) | Dawn | Install in `retail`, next to `DXMD.exe`. |
 | Dishonored (Definitive Edition) | ✅ Works (tested on the Epic version) | Unreal Engine 3 | Install in `Binaries\Win64`, next to `Dishonored.exe`. |
 | DOOM (2016) | ✅ Works (tested on the Steam version, Vulkan and OpenGL) | id Tech 6 | Install in the game's main folder, next to `DOOMx64vk.exe` and `DOOMx64.exe`. Gyro turns off in the pause menu, the map and during glory kills. Campaign only: never play multiplayer or SnapMap online with it. |
@@ -131,4 +132,3 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 | BioShock | Unreal Engine 2.5 (modified) | 2007 | 32bit |
 | BioShock 2 | Unreal Engine 2.5 (modified) | 2010 | 32bit |
 | BioShock Infinite | Unreal Engine 3 | 2013 | 32bit | 
-| Death Stranding 2 | Decima | 2025 | Detected as Decima; the camera route is Horizon Forbidden West's, not tested |
