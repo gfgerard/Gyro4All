@@ -75,6 +75,7 @@
 | Mortal Shell | ✅ Works | Unreal Engine 4.25.0 | `F10` panel works (DX11). The game's own PlayStation support only knows the DualShock 4: its profile makes Gyro4All show your DualSense (USB or Bluetooth) to it as one, with PlayStation icons, rumble and light bar. |
 | Neon White | ✅ Works | Unity (Mono) | Install next to `Neon White.exe` in the game's main folder.|
 | NieR:Automata | ✅ Works | PlatinumGames engine | Install next to `NieRAutomata.exe` in the game's main folder. Set the game's camera **Pursuit Speed** to the maximum, otherwise the camera's smoothing makes the gyro feel laggy. Gyro off in some camera modes (mostly 2D sections). |
+| NieR Replicant ver.1.22474487139 | ✅ Works (tested on the Steam version) | Toylogic | Install next to `NieR Replicant ver.1.22474487139.exe` in the game's main folder. |
 | Onimusha: Way of the Sword | ✅ Works (tested on the demo) | RE Engine | Install next to the game's exe in its main folder. The gyro turns off during lock-on. Needs REFramework installed.|
 | Out of sight | ✅ Works | Unreal Engine 5.5.4 | |
 | Firewatch | ✅ Works | Unity (Mono) | Install next to `Firewatch.exe` in the game's main folder. |

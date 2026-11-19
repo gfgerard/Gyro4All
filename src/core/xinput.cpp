@@ -139,11 +139,24 @@ void add_stick(XINPUT_GAMEPAD& g) {
 // and hide it again every other second (Mass Effect 3 LE on some systems).
 thread_local bool t_watcher = false;
 
+// A controller the game listed as XInput (its own device check), not shown yet: connected in the first free slot, where
+// it will be. Some games look for its slot right after the check, once (Battlefield 4: XInputGetCapabilities; NieR
+// Replicant: XInputGetState on slots 0-3, keeping the first connected one). Called with g_mutex held.
+bool pending_slot(DWORD user) {
+    DWORD first_free = 0;
+    while (first_free < 4 && (g_real_mask.load() & (1u << first_free))) ++first_free;
+    return !g_exposed && g_listed_pending.load() && user == first_free;
+}
+
 // Our slot's state, or false for the real XInput.
 bool our_state(DWORD user, XINPUT_STATE* state, bool guide) {
     if (t_watcher) return false;
     if (user < 4) g_polls[user].fetch_add(1, std::memory_order_relaxed);
     std::lock_guard lock(g_mutex);
+    if (state && pending_slot(user)) {
+        *state = {};  // connected, at rest
+        return true;
+    }
     if (!g_exposed || user != g_slot || !state) return false;
     *state = g_state;
     if (!guide) state->Gamepad.wButtons &= ~kGuide;
@@ -230,11 +243,7 @@ DWORD get_caps(GetCaps_t real, DWORD user, DWORD flags, XINPUT_CAPABILITIES* cap
     Inside inside;
     {
         std::lock_guard lock(g_mutex);
-        // A controller the game listed as XInput, not shown yet: connected in the first free slot, where it will be.
-        DWORD first_free = 0;
-        while (first_free < 4 && (g_real_mask.load() & (1u << first_free))) ++first_free;
-        const bool pending = !g_exposed && g_listed_pending.load() && user == first_free;
-        if ((g_exposed && user == g_slot) || pending) {
+        if ((g_exposed && user == g_slot) || pending_slot(user)) {
             if (!caps) return ERROR_BAD_ARGUMENTS;
             *caps = {};
             caps->Type = XINPUT_DEVTYPE_GAMEPAD;

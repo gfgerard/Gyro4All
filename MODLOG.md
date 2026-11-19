@@ -3436,3 +3436,63 @@ Afterburner running.
     (not an SEH-catchable fault); that export's interface version doesn't match the flat functions'.
   - Not done: navigating the panel with the pad (the provider's optional `controls` callback would need the game's
     actions; judged not worth it). Axis order of Steam's `rotVelX/Y/Z` (passed as pitch/roll/yaw) not verified yet.
+
+## 2026-11-19 NieR Replicant ver.1.22474487139 (Toylogic engine): recon and camera source found
+
+- Exe `NieR Replicant ver.1.22474487139.exe` (x64, build timestamp 2021-06-02, D3D11). No relation to NieR:Automata's
+  engine: Toylogic's own (namespaces `tp::`, `snow::`, `LOGO_TOYLOGIC`); the only "Automata" strings are the crossover's
+  loading animation (`LoadingAutomataAnim`) and BGM mode. The `platinum` module does not apply.
+- Static triage: `.text` plain (entropy 6.51), no Denuvo/Themida, no SteamStub section; imports `WINMM.dll` directly
+  (timeBeginPeriod/timeEndPeriod: the winmm proxy should load), `XINPUT9_1_0.dll`, `DINPUT8.dll`, SetupAPI. MSVC RTTI
+  (5353 classes). Camera classes and vtables: `CBehindCamera` exe+0xb7cfc8 (update in slot 7, exe+0x33b070),
+  `CCamera` exe+0xb7d7f8, `CFreeCamera` exe+0xb7daa0, `CLookAtEnemyCamera` exe+0xb7f0c8, `CPathCamera` exe+0xb7d330,
+  `CRailCamera` exe+0xb7d180, `CScriptCamera` exe+0xb7ce18, `SubCameraManger` exe+0xb7f320. The camera objects are
+  static (`CBehindCamera` at exe+0x32c5450), but none of their fields changed while turning: dead end.
+- Render camera (static, copies): view matrix exe+0x32e7c40 (copy +0x40), **axes in its columns** (row 1 has x = 0):
+  passing a row as `guided.py --ref` gave garbage. Block exe+0x17b9900: projection exe+0x17b9930 (x 1.0806, y 1.921),
+  forward with w = 0 at exe+0x17b9ae0 (good `--ref`), vertical FOV candidate exe+0x17b9a34 = 0.9599 rad (55.0 deg,
+  cot(27.5) = 1.921), aspect +0x38 (1.778), near +0x3c (0.05), far exe+0x17b9a40 (2500). FOV not checked changing.
+- `guided.py` failed three times: its own reference (heap copies, the view "drifted" between poses), a matrix row, and
+  moves with too little pitch (the user's camera pitch stays near 5 deg). What worked: a yaw-only correlation of the
+  exe's `.data` (36 samples over 15 s of stick turning) against the forward at exe+0x17b9ae0: slope 1.000 in radians.
+- Value type: `lerp_parameter_rad<float>` (vtable exe+0xc23078) holding a `tp::mot::CDampRad<float>` (exe+0xae7d48);
+  value at +0x20 of the lerp_parameter, damped goal at +0x28 (other nodes: `CDampNo` exe+0xae1bf8, `CAtanRadNoSec`
+  exe+0xb7d7e8).
+- **Source (write-tested, stick released, kept, view followed): yaw exe+0x51274d0 (float radians, view yaw =
+  atan2(fwd.x, fwd.z) of exe+0x17b9ae0, +0.3 -> view +0.3 rad), pitch exe+0x5127570 (float radians, + = down;
+  +0.2 -> forward y 0.084 -> -0.115).** Read together at exe+0x34a50b. Copies that don't stick: exe+0x511da48/50
+  (another lerp pair, follows the source). Not yet: on-screen direction of +yaw, pitch limits, lock-on / script / rail
+  cameras, and whether the writer clamps pitch.
+
+## 2026-11-19 NieR Replicant ver.1.22474487139: Toylogic engine module, XInput pending slot for XInputGetState
+
+- New engine module `src/engines/toylogic/` (`ToylogicEngine`, "Toylogic"): detected by the exe name `NieR Replicant*`
+  plus `data\info.arc`. The yaw/pitch addresses come from the copy code's signature (`F3 0F 10 05 ?? ?? ?? ?? 48 8B CB
+  F3 0F 11 83 10 04 00 00 F3 0F 10 0D ?? ?? ?? ?? F3 0F 11 8B 38 04 00 00`, disp at +4 / +23), so other builds may work;
+  the gate's render forward (exe+0x17b9ae0) only for the known build (TimeDateStamp 1622621184, SizeOfImage 0x5339000),
+  otherwise no gate.
+- **The view follows each lerp parameter's output at value+8**, not the value (+0x20): the output is the value plus the
+  game's adjustments (terrain pitch) and the game clamps pitch there. The gate compares the outputs with the forward
+  (within 4 deg, also against the previous frame's outputs). Writing the value works; a write to the output is undone.
+- Directions checked in game: kYawSense -1 (the yaw grows turning left), kPitchSense -1 (+ = down).
+- **Gyro4All's frame here runs about 2000 times/s**: the game spins `PeekMessageW` between its frames (60 fps), so
+  per-frame logic is time-based: the gate closes after 150 ms without a match (the first version flickered every frame).
+- Pitch limit: the game clamps the output, not the value, so the value ran away (0.74 rad while the view stayed near
+  -0.02). `limit_turn` checks over 50 ms windows how much of the gyro's pitch push the output followed (< 25%: blocked
+  that way) and drops pushes toward the limit until the gyro turns back. Verified in game by the user.
+- **Controller: no PlayStation support in the exe** (no DualShock/DualSense strings; RTTI `tp::hid::DeviceUnitXinput`,
+  `DeviceUnitDirectInput`, `PadRawDeviceWin32`): a DualSense reads as a generic DirectInput pad with generic prompts, so
+  `DualSenseAsDualShock4` can't help. The DirectInput enumeration callback exe+0x7c0410 calls Microsoft's WMI
+  `IsXInputDevice` sample (exe+0x7c0870, `Win32_PNPEntity` / `IG_`) on guidProduct; true -> `DeviceUnitXinput`
+  (vtable exe+0xcdfeb0, slot at +8 = -1), else a DirectInput unit. exe+0x7c0260 then gives each unit with slot -1
+  the first slot 0-3 whose `XInputGetState` succeeds and isn't taken (bitmask exe+0x5146e80); the unit polls only that
+  slot (exe+0x7c0e80), and the scan doesn't run again on our posted WM_DEVICECHANGE.
+  - XInput=2: refusing the game's HID access hides the DualSense from DirectInput: no WMI check, no XInput unit, 0 polls.
+  - XInput=1 (auto): the WMI answer lists 054C:0CE6 as XInput at 35.101, the game scans the slots right away, but the
+    controller was shown at 35.551: no slot, slot -1 polled forever (0 polls on 0-3), DirectInput side muted: dead pad.
+  - **Fix (core, `xinput.cpp`): `pending_slot`, the pending answer `XInputGetCapabilities` already gave (Battlefield 4),
+    now also answers `XInputGetState`** (connected, at rest) in the first free slot while a listed controller isn't
+    shown yet. **Verified in game** (DualSense, Steam Input off; connection not stated): slot 0 polled ~1165/10 s, all
+    answered; controller works with Xbox prompts. Profile `XInput=1` (the user's Gyro4All.ini had 0).
+- Gyro in gameplay (same run): gate held the whole stretch (one transition), 476-482 samples/s, no stalls, 60 fps,
+  host 49 us avg per frame. Not tested yet: cutscenes, lock-on and the other cameras, the FOV (exe+0x17b9a34) for zoom.
