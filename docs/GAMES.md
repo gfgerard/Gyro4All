@@ -103,6 +103,7 @@
 | Severed Steel | ✅ Works (tested on the demo) | Unreal Engine 4 | DX11: the `F10` panel isn't verified in this game yet. Rename `MSVCP140.dll` and `MSVCP140_2.dll` in its `Binaries\Win64` folder (e.g. to `.bak`): it ships an old VC++ runtime that GyroLib can't use. Until you do, Gyro4All leaves the gyro off and tells you so on screen. |
 | Silent Hill 2 (remake) | ✅ Works (tested on the Steam version) | Unreal Engine 5 | Install in `SHProto\Binaries\Win64`. Needs the custom profile in `Gyro4All\profiles` dir |
 | Star Wars Jedi: Fallen Order | ✅ Works | Unreal Engine 4 | |
+| Stellar Blade | ✅ Works | Unreal Engine 4 | Install next to the `*-shipping.exe` |
 | Subnautica | ✅ Works | Unity (Mono) | Install next to `Subnautica.exe` in the game's main folder. |
 | Terminator: resistance | ✅ Works | Unreal Engine 4 | DX11: the `F10` panel isn't verified in this game yet |
 | Titanfall 2 | ✅ Works (tested on the EA app version) | Source (Respawn) | Install in `bin\x64_retail`, **not** next to `Titanfall2.exe` (it never loads a `winmm.dll` from the main folder). Campaign only: never play multiplayer with it. |
