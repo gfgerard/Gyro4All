@@ -5,6 +5,58 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-19 **ACE COMBAT 7 (`Ace7Game.exe`, UE 4.18, 2021 build, SteamStub `.bind` section, no Denuvo sections):
+  static triage for the EVERSPACE route (gyro flies the plane).** Reflection works (pawn `AcePlayerPawn_f04e_s03_C`,
+  PC `NimbusPlayerControllerBP_C`, camera manager `NimbusPlayerCameraManagerBP_C`); the game opens the DualSense over
+  HID (nativepad). Probe (Ctrl+F7, 3 captures; the turns came from the left stick, i.e. the plane, the camera orbits it
+  at radius ~5700-8300): every candidate an output, including `Pawn.RootComponent(SceneComponent).RelativeRotation`
+  (overwritten, unlike EVERSPACE 2 where the root kept the write). The flight model is native C++, not reflected:
+  RTTI-style names `CAce7FlightEngineBase`, `CAce6FlightEnginePlayer`; tuning names `PitchEaseDurationExpert`,
+  `RollEaseDurationExpert`, `YawEaseDurationExpert`, `InputDampingFactor_Expert` (stick input eased into the
+  attitude). So `Function=K2_AddLocalRotation` on the root is expected to be overwritten by the flight engine each
+  tick. **Tested, fails** (DualSense, Steam Input state not noted): the test profile (`Object=Pawn.RootComponent`,
+  `Function=K2_AddLocalRotation`, `Recenter=0`) resolved the call (`K2_AddLocalRotation` 0xA8 bytes, `bTeleport` +0xA0;
+  `ProcessEvent` vtable[63], `FunctionFlags` +0x88: the 4.20 fix works on 4.18 too) and ran without faults, but with
+  the left stick released the plane doesn't turn. The follow check had logged `confirmed` while the player flew with
+  the left stick (it only discounts the right stick and mouse): a false positive in flight games. `guided.py --up z`
+  twice (6 then 4 poses, the plane flown with the left stick): nothing usable. A flight game breaks its assumptions:
+  the plane never rests (the view drifts between poses), pitch moves came out under 5 degrees (pitch tests dropped),
+  and passing over the vertical flips the view's yaw by ~180 (poses lost). Survivors were only "any unit" noise
+  (constant 0/1 floats, i2/i4). The game eases the camera back behind the plane after the stick is released (the
+  player's note), so `guided.py` got `--settle` (seconds before each read; default 0.7 as before). Third run
+  (`--settle 3`, 4 poses): the reference it picked (307 copies) jumped between a few fixed directions (pose 2 and 3
+  equal to pose 0 within 0.1 degrees, its negation listed as the second group): not the view. Groups that looked like
+  the camera (x180, x172, at 0x23e48233160 / 0x23e5e355160 in that session) weren't used; survivors again noise.
+  **Found with WriteWatch (new Unreal names `pawn`, `root`, `camera`; `root+16c` = RelativeRotation yaw):** one writer,
+  `exe+0x16EFC7F` (engine `SetRelativeLocationAndRotation`), called from the pawn's flight update `exe+0x816BB0`:
+  `exe+0x1CD2280(pawn+0x1408, &loc, &rot)` then `SetActorLocationAndRotation` (`exe+0x156C070`). The flight engine is
+  `fe = [pawn+0x1410]` (`pawn+0x1408` holds it at +8); the getter reads a float matrix at `fe+0x20` (rows right
+  +0x20, up +0x30, forward +0x40, position +0x50; Y up, the engine's own units) and converts it with `exe+0x1CD0870`
+  (pitch = asin(-fwd.y), yaw = atan2(fwd.x, fwd.z), roll = atan2(right.y, up.y)). `fe+0x20` is copied each tick from
+  `fe+0x70` (`exe+0x1CD40B2`, end of the flight tick `exe+0x1CD3D80`, simulation object `fe+0xB0`); `fe+0x70` is
+  written by `exe+0x1CE33F7`, `exe+0x1CE37BD` (from `fe+0xCC0`) and `exe+0x1CDB98E` (from `fe+0xF50`). Eight matrices in
+  `fe` hold the forward row (+0x40, +0x90, +0xCE0, +0xDC0, +0xE10, +0xEB0 negated, +0xF00, +0x12A0); no quaternion.
+  Write tests (yaw about world Y, 15 degrees, 3 times, game running): `fe+0x20` and `fe+0x70` alone undone within
+  0.1 s; all eight kept; **`fe+0xCC0` alone (rows +0xCC0/+0xCD0/+0xCE0) kept every write: the source.** The player saw
+  the plane point the new way. Not yet checked: whether its velocity turns with it, and roll/pitch writes. Note for
+  external tests: camtrace's `Proc` needs `write=True` or writes fail silently. Leads (before this was found): `bAlignPlayerPlaneToCamera` / `bAlignCameraToPlayerPlane` (reflected names, owner
+  unknown), the flight engine's attitude through `tools/camtrace/`.
+- **Flying with the gyro, three tries, all reverted (not implemented for now; the user found none natural).** Tested with the
+  user's pad in game; connection and Steam Input state not recorded.
+  1. Writing the orientation `fe+0xCC0` in the plane's own axes (1:1): the plane turns, but like a pointer: the flight
+     model never sees a maneuver (no bank, G, wing vapour, camera lag), the world seems to turn around the plane.
+  2. Same plus a roll from the gyro's turn rate (Bank), then with the turn smoothed so the bank leads it (TurnLag):
+     the pointer and the added bank felt like two motions fighting.
+  3. Steering through the flight engine's control inputs toward where the gyro points (a P+D controller on the
+     error): no tuning felt natural.
+  Flight engine control inputs (floats -1..1 at `fe`, write tests 0.5 held 1.5 s, stick untouched, game not rewriting
+  them while written): `+0x220` pitch (+25 deg nose up; -0.5: -20), `+0x224` rudder (+-5.2 deg yaw), `+0x228` turn with
+  bank, the stick's X (+0.5: +51 deg of the game's atan2(fwd.x, fwd.z) yaw, i.e. Unreal yaw left), `+0x1A8` also turns
+  (+23.5 deg: a processed turn command?). `+0x22C` isn't rewritten by the game (a test left it at 0.5; restored).
+  Angular velocity `+0x1F0/+0x1F4/+0x1F8` (pitch, yaw, roll, rad/s, r=0.96 with the matrix) is an output: writing it
+  does nothing. Earlier code (MatrixRows/MatrixAxes, Pointer=, LocalTurn=, Bank=, TurnLag=, Steer=, WriteWatch names
+  `pawn`/`root`/`camera`, guided.py `--settle`) was dropped with it; the profile is disabled in the test install.
+
 - 2026-11-18 **EVERSPACE 2: works, the ship turned 1:1 through `ProcessEvent` (new profile key `Function=`)** (no version
   bump; tested with a DualSense, Steam Input off, connection not noted). The ship's root takes the turn only through
   the engine: `Function=K2_AddLocalRotation` on `Pawn.CollisionRoot0` (`MovementRootComponent`), `bTeleport` set, so
