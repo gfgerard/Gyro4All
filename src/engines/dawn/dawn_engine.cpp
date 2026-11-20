@@ -345,11 +345,6 @@ public:
 
     bool detect(const std::wstring& exe_path) const override { return dawn_layout(exe_path); }
 
-    // DXMD loads xinput1_4.dll (else xinput9_1_0.dll) and takes XInputGetState/XInputSetState with GetProcAddress
-    // (no import): its polls only reach Gyro4All through inline hooks on the XInput DLLs' exports. Those also see the
-    // imported calls (GOTG imports xinput9_1_0.dll) and pass the already translated ones through.
-    bool managed_input() const override { return true; }
-
     bool frame_source(FrameFn frame) override {
         g_frame = frame;
         if (HANDLE thread = CreateThread(nullptr, 0, &frame_thread, nullptr, 0, nullptr)) {

@@ -3246,7 +3246,7 @@ Afterburner running.
   "Adapt to Zoom" on, gyro x1.000. Seen changing: 45 and 52 deg (camera zones, compensated), 12.8 and 10 deg only for a
   frame or two right before the orbit camera goes idle (cutscene or another camera: the gyro is off there). Fix: the
   reference line (`platinum: zoom reference FOV 50.0 degrees vertical`) was not logged with no setting.
-- 2026-11-15 **Deus Ex: Mankind Divided (Dawn engine, Eidos Montréal's Glacier 2 fork; GOG build via Heroic, `retail\DXMD.exe` 1.19.0.0, x64, D3D11/D3D12): recon and camera source found** (plan in `games/DeusExMankindDivided/`; no engine module yet).
+- 2026-11-15 **Deus Ex: Mankind Divided (Dawn engine, Eidos Montréal's Glacier 2 fork; GOG build , `retail\DXMD.exe` 1.19.0.0, x64, D3D11/D3D12): recon and camera source found** (plan in `games/DeusExMankindDivided/`; no engine module yet).
   - Static triage: no packer or Denuvo (GOG), MSVC RTTI present (~17k classes, `Z*` Glacier names), imports `WINMM.dll`
     directly (winmm proxy should load), 4 `XInput` strings but no XInput import (input layer `ZInputDeviceManager`,
     `ZGamepadSteam`, Tobii EyeX). World Z up. IGCS (Frans Bouma, DXMD camera for 1.19) signatures all match once.
@@ -3278,7 +3278,7 @@ Afterburner running.
   - Gyro on only while the camera's third row matches the angles (cos >= 0.99); off in cutscenes, cover, takedowns.
     Pitch sense: the game's +0xB2C grows looking **down** (the third camera row is the camera's back): `kPitchSense -1`.
     Yaw +1 right. FOV seen: 54.5 unzoomed (learnt as the widest), 44.0 aiming.
-  - **Tested (user, DualSense, Heroic/GOG, no Steam Input):** gyro yaw and pitch correct, XInput works, F10 panel opens.
+  - **Tested (user, DualSense, GOG, no Steam Input):** gyro yaw and pitch correct, XInput works, F10 panel opens.
 - 2026-11-15 **DXMD (Dawn): frame paced on the player camera's updates and a 150 ms mismatch filter** (no version bump).
   - The frame thread polls the player `ZGenericCamera`'s third row and position (+0x68..+0x80) every 1 ms and runs one
     gyro frame per change (as RAGE's, RDR2), 20 ms timer without one. RDR2's 6 ms merge window merged a third of this
@@ -3497,7 +3497,7 @@ Afterburner running.
 - Gyro in gameplay (same run): gate held the whole stretch (one transition), 476-482 samples/s, no stalls, 60 fps,
   host 49 us avg per frame. Not tested yet: cutscenes, lock-on and the other cameras, the FOV (exe+0x17b9a34) for zoom.
 
-## 2026-11-19 Shadow of the Tomb Raider (Epic via Heroic, Foundation engine): recon, crashpad session fix
+## 2026-11-19 Shadow of the Tomb Raider (Epic, Foundation engine): recon, crashpad session fix
 - Plan: `games/ShadowoftheTombRaider/MODDING_PLAN.md`. `SOTTR.exe` x64, PE timestamp 1689017788, Foundation engine
   (`cdc::` RTTI), DX11/DX12 loaded at runtime (no graphics import). No Denuvo/Themida (`.text` entropy 6.48), no
   anti-cheat; EOS SDK only for the old online modes. Input: Raw Input, `HID.DLL`, `libscepad` string, XInput by name.
@@ -3660,3 +3660,20 @@ Afterburner running.
   deployed; in-game check pending.
   - User: the swing on gun shots is gone with the unwrapped yaw (rifle and shotgun, several directions). Verified in
     game.
+
+## 2026-11-20 Rise of the Tomb Raider (Epic, Foundation engine): XInput=2 had no effect
+
+- The Foundation module detects ROTTR (`bigfile.000.tiger`). ExplorationCameraController (vtable ROTTR.exe+0xD6EB18) and
+  AimCameraController are found and slot 7 is hooked. The render-camera pattern from SOTTR has 0 matches, so there is no
+  FOV for zoom compensation yet.
+- With `XInput=2`, the HID opens of the DualSense were refused, but the game never polled the Xbox controller: "game polls
+  per slot 0/0/0/0". ROTTR.exe has no XInput import. It carries the strings `xinput1_3.dll`, `xinput9_1_0.dll`,
+  `XInputGetState`, `XInputSetState`, `XInputGetCapabilities` and "ERROR: Could not find Xinput library.", so it loads
+  XInput and takes the functions with GetProcAddress (class `nx::Input::GamepadXInput`), like Dawn's DXMD.
+- Fix, in the core instead of per engine: when no game module imports `XInputGetState` or `XInputGetStateEx`, the
+  XInput watcher puts inline hooks on the exports of each XInput DLL as it loads (`resolves_xinput_itself`,
+  `xinput.cpp`). Calls through a patched import still pass through those hooks once, because the import hook calls the
+  export from Gyro4All (`passes_through`). Dawn's `managed_input()` override is gone: DXMD has no XInput import, so the
+  rule covers it. `managed_input()` stays for Unity, whose P/Invoke calls can coexist with an XInput import. Builds and
+  unit tests pass. Verified in ROTTR with a DualSense and `XInput=2`: the log shows "xinput1_4.dll exports hooked"
+  and "xinput1_3.dll exports hooked", and the game takes the Xbox controller. Not retested in the Dawn games (DXMD, and GOTG, which imports xinput9_1_0.dll).

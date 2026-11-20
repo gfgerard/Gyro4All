@@ -71,6 +71,7 @@ public:
     // import scan doesn't recognize (e.g. Frostbite with Denuvo/EA's OOA): hook system DLL exports inline instead.
     virtual bool inline_hooks() const { return false; }
     // The engine's games call controller APIs from managed code, resolved at run time: no import table shows those calls.
+    // (Games that resolve XInput with GetProcAddress need nothing here: the core sees they have no XInput import.)
     virtual bool managed_input() const { return false; }
     // The game reads gamepads through Windows.Gaming.Input first and loads XInput only when its classes can't be
     // activated (Unity 6's player). With XInput=2 they are refused in the game modules, so the game reads the Xbox

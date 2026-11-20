@@ -577,11 +577,13 @@ void trace_pass() {
         }
 }
 
-// ------------------------------------------------------------------ calls no import table sees (Settings::export_hooks)
+// ------------------------------------------------------------------ calls no import table sees
 
-// Managed code reaches XInput through a P/Invoke stub in generated code (The Forest's Rewired), so no import slot sees
-// it: inline hooks on the exports of every XInput DLL, as they appear. GyroLib, the watcher and calls already translated
-// pass straight through (passes_through).
+// Managed code reaches XInput through a P/Invoke stub in generated code (The Forest's Rewired; Settings::export_hooks),
+// and games without an XInput import load the DLL and take its functions with GetProcAddress (Deus Ex: Mankind Divided,
+// Rise of the Tomb Raider; resolves_xinput_itself), so no import slot sees them: inline hooks on the exports of every
+// XInput DLL, as they appear. GyroLib, the watcher and calls already translated (an import hook calls the export from
+// Gyro4All) pass straight through (passes_through).
 template <int Dll>
 struct ExportHooks {
     static inline GetState_t real_get = nullptr;
@@ -627,8 +629,14 @@ void export_hooks_pass() {
         HMODULE m = done[i] ? nullptr : GetModuleHandleA(dlls[i].dll);
         if (!m) continue;
         done[i] = true;
-        log("xinput: %s exports %s (for calls from managed code)", dlls[i].dll, dlls[i].install(m) ? "hooked" : "could not be hooked");
+        log("xinput: %s exports %s (for calls no import table sees)", dlls[i].dll, dlls[i].install(m) ? "hooked" : "could not be hooked");
     }
+}
+
+// No game module imports XInputGetState (by name or ordinal) or XInputGetStateEx: a game that reads XInput then loaded it
+// and resolved the functions itself. A module that imports it later is still fine: its translated calls pass through.
+bool resolves_xinput_itself() {
+    return hooks::source_dll("XInputGetState").empty() && hooks::source_dll("XInputGetStateEx").empty();
 }
 
 void watch() {
@@ -649,7 +657,7 @@ void watch() {
         }
         if (g_real_mask.exchange(mask) != mask) log("xinput: real XInput controllers in slots 0x%X (bit per slot)", mask);
         if (g_settings.mode == Auto) scan_modules();
-        if (g_settings.export_hooks && !hooks::inline_mode()) export_hooks_pass();
+        if (!hooks::inline_mode() && (g_settings.export_hooks || resolves_xinput_itself())) export_hooks_pass();
         if (g_settings.trace) trace_pass();
         hooks::verify();  // an overlay may rewrite the game's XInput imports after Gyro4All patched them (Mortal Shell: EOS)
         g_watch_ready = true;
