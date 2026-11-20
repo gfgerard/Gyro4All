@@ -157,6 +157,13 @@ std::wstring lower(std::wstring s) {
 // Gyro frames alone don't count: engines with their own frame thread (RAGE) run them from the start, in the launcher too.
 HANDLE g_session = nullptr, g_legacy_session = nullptr;
 std::wstring g_install_dir;  // lower case
+
+// Crash reporters any engine may ship next to the game exe and start at launch (Shadow of the Tomb Raider starts
+// Google's crashpad_handler.exe): never a game, so they neither take the session nor run Gyro4All.
+bool is_crash_reporter(const std::wstring& exe_path) {
+    const std::wstring name = lower(exe_path.substr(exe_path.find_last_of(L"\\/") + 1));
+    return name == L"crashpad_handler.exe";
+}
 gyro4all::Engine* g_session_engine = nullptr;  // this process's engine, which tells its helper exes apart
 using CreateProcessA_t = BOOL(WINAPI*)(LPCSTR, LPSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD, LPVOID,
                                        LPCSTR, LPSTARTUPINFOA, LPPROCESS_INFORMATION);
@@ -282,7 +289,7 @@ void hand_session_to(std::wstring app, const std::wstring& cmd) {
         return;
     }
     // A helper the engine knows (Cyberpunk starts REDEngineErrorReporter.exe at launch): the game keeps the session.
-    if (g_session_engine && g_session_engine->is_launcher(full)) {
+    if (is_crash_reporter(exe_path) || (g_session_engine && g_session_engine->is_launcher(full))) {
         gyro4all::log("session: kept (%s, started by this process, is a helper)", gyro4all::narrow(full).c_str());
         return;
     }
@@ -366,6 +373,7 @@ void attach(HMODULE self) {
     // The Xbox app's launcher (GameLaunchHelper.exe, next to every PC Game Pass game's exe) starts the game without
     // CreateProcess, so the session can't be handed over: it never runs Gyro4All (Wolfenstein: The New Order).
     if (lower(stem) == L"gamelaunchhelper") return;
+    if (is_crash_reporter(exe)) return;
     // A launcher or helper exe of a detected engine (Cyberpunk's REDEngineErrorReporter.exe, which the game starts at
     // launch and again when it crashes) stays a plain proxy before it touches the session or Gyro4All.log: opening the
     // log truncates it, and the game's log was lost that way (MODLOG 2026-11-04). The check after select_engine below

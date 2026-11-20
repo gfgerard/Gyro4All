@@ -40,6 +40,7 @@ add_subdirectory(engines/platinum)
 add_subdirectory(engines/dawn)
 add_subdirectory(engines/decima)
 add_subdirectory(engines/toylogic)
+add_subdirectory(engines/foundation)
 add_subdirectory(engines/halo)
 add_subdirectory(engines/unity)
 # panel/: gyro4all.dll, the settings panel for non-DX12 games (dynamic CRT, loaded by winmm.dll only when needed).
@@ -49,7 +50,7 @@ add_subdirectory(panel)
 configure_file(core/version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/version.rc" @ONLY)
 add_library(Gyro4All SHARED engine_registry.cpp core/proxy.def "${CMAKE_CURRENT_BINARY_DIR}/version.rc")
 set_target_properties(Gyro4All PROPERTIES OUTPUT_NAME winmm)
-target_link_libraries(Gyro4All PRIVATE gyro_options gyro_core gyro_unreal gyro_re gyro_frostbite gyro_idtech gyro_source gyro_unreal3 gyro_foura gyro_swarm gyro_cryengine gyro_glacier gyro_northlight gyro_asura gyro_rage gyro_red gyro_platinum gyro_dawn gyro_decima gyro_toylogic gyro_halo gyro_unity delayimp dxguid)
+target_link_libraries(Gyro4All PRIVATE gyro_options gyro_core gyro_unreal gyro_re gyro_frostbite gyro_idtech gyro_source gyro_unreal3 gyro_foura gyro_swarm gyro_cryengine gyro_glacier gyro_northlight gyro_asura gyro_rage gyro_red gyro_platinum gyro_dawn gyro_decima gyro_toylogic gyro_foundation gyro_halo gyro_unity delayimp dxguid)
 # gyrolib.dll lives in the Gyro4All subfolder and is loaded by full path before first use.
 target_link_options(Gyro4All PRIVATE /DELAYLOAD:gyrolib.dll)
 # Symbols for crash dumps (build/Gyro4All/Release/winmm.pdb; never shipped). /OPT keeps the release layout.

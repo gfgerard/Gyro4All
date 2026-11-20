@@ -586,9 +586,15 @@ void finish(HANDLE h, OVERLAPPED* ol, BOOL ok, DWORD n, DWORD error) {
 
 // ------------------------------------------------------------------ hooks (any game thread)
 
-// The module is Gyro4All, GyroLib or GyroLib's SDL3.dll (or another DLL in Gyro4All's folder). Each other module that opens a controller is
-// logged once.
-bool opened_by_us(HMODULE module) {
+HMODULE module_at(const void* address) {
+    HMODULE module = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       static_cast<LPCWSTR>(address), &module);
+    return module;
+}
+
+// The module is Gyro4All, GyroLib or GyroLib's SDL3.dll (or another DLL in Gyro4All's folder).
+bool module_is_ours(HMODULE module) {
     static std::mutex mutex;
     static std::vector<std::pair<HMODULE, bool>> known;
     std::lock_guard lock(mutex);
@@ -596,7 +602,7 @@ bool opened_by_us(HMODULE module) {
         if (m == module) return ours;
     HMODULE self = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       reinterpret_cast<LPCWSTR>(&opened_by_us), &self);
+                       reinterpret_cast<LPCWSTR>(&module_is_ours), &self);
     wchar_t path[MAX_PATH] = L"";
     GetModuleFileNameW(module, path, MAX_PATH);
     std::wstring folder = settings::install_dir() + L"\\";
@@ -607,8 +613,37 @@ bool opened_by_us(HMODULE module) {
     const bool ours = module == self || module == GetModuleHandleW(L"gyrolib.dll") ||
                       module == GetModuleHandleW(L"SDL3.dll") || file.rfind(folder, 0) == 0;
     known.emplace_back(module, ours);
-    if (!ours) log("nativepad: %ls opens HID devices; its controllers are followed", path);
     return ours;
+}
+
+// The open comes from Gyro4All, GyroLib or its SDL3.dll: the direct caller, or one of the next callers up the stack when
+// the direct one is another mod's DLL that hooks CreateFileW and calls on for every module (OptiScaler's version.dll in
+// Shadow of the Tomb Raider: GyroLib's SDL opens looked like the game's, so their reports were made idle while the panel
+// was open, and the DualSense the game closed unread looked taken). Each other direct caller is logged once.
+bool opened_by_us(const void* return_address) {
+    const HMODULE caller = module_at(return_address);
+    if (!caller) return false;
+    if (module_is_ours(caller)) return true;
+    void* frames[16];
+    const USHORT n = CaptureStackBackTrace(0, USHORT(std::size(frames)), frames, nullptr);
+    bool above = false;
+    for (USHORT k = 0; k < n; ++k) {
+        if (!above) {
+            above = frames[k] == return_address;
+            continue;
+        }
+        if (const HMODULE m = module_at(frames[k]); m && module_is_ours(m)) return true;
+    }
+    static std::mutex mutex;
+    static std::vector<HMODULE> logged;
+    std::lock_guard lock(mutex);
+    if (std::find(logged.begin(), logged.end(), caller) == logged.end()) {
+        logged.push_back(caller);
+        wchar_t path[MAX_PATH] = L"";
+        GetModuleFileNameW(caller, path, MAX_PATH);
+        log("nativepad: %ls opens HID devices; its controllers are followed", path);
+    }
+    return false;
 }
 
 thread_local bool t_ansi_open = false;
@@ -619,10 +654,7 @@ HANDLE WINAPI hk_create_file(LPCWSTR path, DWORD access, DWORD share, LPSECURITY
     // Function hooks see every caller in the process. Opens by Gyro4All, gyrolib.dll and its SDL3.dll pass untouched;
     // the game's, and those of the system DLLs it reads controllers through, are followed.
     if (!t_ansi_open && is_hid_path(path)) {
-        HMODULE caller = nullptr;
-        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           static_cast<LPCWSTR>(_ReturnAddress()), &caller);
-        if (caller && opened_by_us(caller)) {
+        if (opened_by_us(_ReturnAddress())) {
             CreateFileW_t real = original(g_create_file, "CreateFileW", "kernel32.dll");
             return real ? real(path, access, share, sa, disposition, flags, templ) : INVALID_HANDLE_VALUE;
         }

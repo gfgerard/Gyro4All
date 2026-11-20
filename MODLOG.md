@@ -3496,3 +3496,167 @@ Afterburner running.
     answered; controller works with Xbox prompts. Profile `XInput=1` (the user's Gyro4All.ini had 0).
 - Gyro in gameplay (same run): gate held the whole stretch (one transition), 476-482 samples/s, no stalls, 60 fps,
   host 49 us avg per frame. Not tested yet: cutscenes, lock-on and the other cameras, the FOV (exe+0x17b9a34) for zoom.
+
+## 2026-11-19 Shadow of the Tomb Raider (Epic via Heroic, Foundation engine): recon, crashpad session fix
+- Plan: `games/ShadowoftheTombRaider/MODDING_PLAN.md`. `SOTTR.exe` x64, PE timestamp 1689017788, Foundation engine
+  (`cdc::` RTTI), DX11/DX12 loaded at runtime (no graphics import). No Denuvo/Themida (`.text` entropy 6.48), no
+  anti-cheat; EOS SDK only for the old online modes. Input: Raw Input, `HID.DLL`, `libscepad` string, XInput by name.
+- Otis_Inf's IGCS SOTTR camera (v1.0.6) AOBs still match once in this build: camera-address hook `89 59 28 45 33 C0 0F
+  28 82 80 00 00 00 4C 8B F9 41 0F B6 D1` at RVA 0x495B4F (+0x10, struct in rdx); shared camera copy `66 0F 7F 81 80
+  00 00 00 0F 28 8A A0 00 00 00 0F 29 89 A0 00 00 00 8B 82` at RVA 0x161AFD (rcx = destination). Render camera
+  struct: position +0x80, quaternion +0xA0 (x,y,z,w), FOV +0xB0 (float, likely radians). It is rewritten each frame
+  (a copy); the source should be in the camera controllers (`ExplorationCameraController`, `AimCameraController`,
+  `StealthCameraController`, ...). Aspect-ratio AOB of IGCS: no match (not needed).
+- Gyro4All 1.12.0 first start: no engine detected (Unreal fallback), and `session: handed to ...\crashpad_handler.exe
+  (started by this process)`: the game starts its crash reporter from the install folder at launch, so no gyro frames
+  ran in the game.
+- **Fix (core, `dllmain.cpp`): `is_crash_reporter` (`crashpad_handler.exe`, engine-neutral)** keeps the session in
+  the game when it starts one (`hand_session_to`) and leaves the reporter a plain proxy (`attach`). Builds, unit tests
+  pass; not yet verified in game.
+- Next: Foundation engine module (detection), confirm gyro frames run in `SOTTR.exe`, then `guided.py` for the
+  controllers' yaw/pitch.
+- Retest with the crashpad fix (same day): `session: kept (...crashpad_handler.exe, started by this process, is a
+  helper)`. Fix verified. But **no gyro frame ran**: no `hook: PeekMessageW on thread` line and no `gyro: GyroLib ABI`
+  line in about 30 s of play (D3D12 swapchain captured, colour space 12). Static reading of the exe shows why (likely,
+  not yet proven at run time): the only `PeekMessageW` call (RVA 0xfb5dd5) is a loop that pumps only while a state at
+  `[rbx+0x10]` is 1 (a startup or modal loop). The window's real pump is a thread procedure at RVA 0xfd2950, a
+  blocking `GetMessageW` / `TranslateMessage` / `DispatchMessageW` loop on a window thread of its own, so the core's
+  end-of-pump frame never fires. The Foundation module needs `Engine::frame_source` (like Dawn, Glacier's loop mode and
+  RAGE). Also in the folder: ReShade 6.8.0 as `dxgi.dll` (hooks 21 user32 exports), OptiScaler as `version.dll`
+  (subclasses the game window).
+- **New engine module `src/engines/foundation/`** (`Foundation`; detection: `bigfile.000.tiger` next to the exe). Gyro
+  frame through `frame_source`: the module's own thread, woken by each Present (`overlay::on_present`, 8 ms timer
+  without it), the same scheme as Frostbite. No camera yet: `read_frame` reports no gameplay view, `apply` writes
+  nothing, `sees_menus` false. Builds, unit tests pass; deployed, in-game check pending (expect `engine: Foundation`,
+  `foundation: gyro frame thread ...`, `gyro: GyroLib ABI ...`).
+- **Verified in game (Foundation module, DualSense over USB per its report 0x01, not under Steam Input):**
+  `engine: Foundation (detected)`, `foundation: gyro frame thread ...`, `gyro: GyroLib ABI 1 (built against SDK
+  1.3.1)`, SDL reader started, motion 483 samples/s, crashpad session kept. DX12 panel opens with F10 (3840x2160, HDR10
+  colour space 12) next to ReShade 6.8 + OptiScaler. The game's own pad reports (Sony path through HID, opened from
+  OptiScaler's `VERSION.dll` chain) match SDL's buttons, so long-press blocking works; XInput auto leaves the DualSense
+  native. Frame thread ran about 84 frames/s (idle n=2508 in about 30 s, avg 0.96 ms, max 249 ms at start).
+  `gyro off: no gameplay view (target no camera yet)` as intended. Next: the camera source (`guided.py`).
+- **Bug (user): controller dead in game; GyroLib's panel opened with Create+Options but then took no navigation and
+  didn't close with it.** Cause: OptiScaler's `version.dll` hooks `CreateFileW` and calls on for every module, so the
+  direct caller of every HID open (including GyroLib's SDL ones on the frame thread, 00:03:49.627 right after GyroLib
+  started) was `VERSION.dll`, which nativepad took for the game's. SDL's handles were followed: their reports were made
+  idle while the panel was open (panel without pad input), and the DualSense the game closed unread looked taken (SDL's
+  open handle), so `learn_dualsense` never fired and the game, which only knows the DualShock 4, had no controller
+  (a real DS4, 054C:09CC, was read by the game in the same session).
+  - **Fix (core, `nativepad.cpp`): `opened_by_us` also walks the next callers up the stack** (`CaptureStackBackTrace`,
+    from the direct caller on): any frame in Gyro4All, gyrolib.dll, SDL3.dll or Gyro4All's folder makes the open ours.
+    The "opens HID devices; its controllers are followed" line is logged only for opens that are followed.
+  - Profile `profiles/SOTTR.ini`: `DualSenseAsDualShock4=1` (user: the game supports the DS4). Builds, unit tests
+    pass, deployed; not yet verified in game.
+- Camera search, `guided.py --up z` (DualSense as DS4, in gameplay):
+  - Run 1 (6 poses): reference = 24 identical forward copies (0x20786f4f310...), views 38/4 -> -59/-9 -> 71/2; the view
+    drifted while the user held still (71.3/1.7 -> 78.6/4.6, then 29.3/8.1 -> 29.4/9.2). About 120 yaw "any unit"
+    and 20 pitch candidates were left after pose 3, none after pose 5.
+  - Run 2 (3 poses): small moves (yaw +-20, pitch +-11) and pose 2 came back to exactly pose 0's view (-46.3/0.0):
+    too weak, thousands of candidates. The view's copies are 4x4 rotation rows, Z up, row 0 forward, row 1 right
+    (e.g. 0x20790bcc200: 0.3192 -0.9473 -0.0277 / 0.9477 0.3189 0.0153), many copies in one heap area.
+    Radian yaw candidates near them: 0x20790d587c8 and 0x207574d0f14/0x207574d0fd4 (not tested).
+- Write-test `0x20790d587c8` (radian yaw candidate, -0.42027) `--add 0.3`: -0.12027 at +0.03 s, -0.39553 at +0.30 s,
+  -0.36578 at +1.00 s. Not kept: pulled back toward the old value within 0.3 s (a smoothed/eased value following a
+  target, or a copy rebuilt from it), still changing at 1 s. `0x207574d0f14` held 18157.7 by then (memory reused).
+- Write-test `0x207574d0fd4` (was -0.1551 at the search, 0.0 at the test) `--add 0.3`: 0.3 kept at +0.03 s and +0.30 s,
+  back to 0.0 at +1.00 s; the user saw no camera movement with the first test (this one not reported). Not the source.
+  Both guided candidates are out; next: follow a view copy back (static reading from the IGCS copy at RVA 0x161AFD, or
+  one-hit write breakpoints with the user's OK, after a save).
+- **Static route.** RTTI vtables (RVA): `ExplorationCameraController` 0x10f2410, `AimCameraController` 0x10f1390,
+  `StealthCameraController` 0x10f2978, `FreeCameraController` 0x106bd90, `ICameraController` 0x106b0d0 (60 slots
+  each). A read-only scan found 7 live `ExplorationCameraController` objects and no Aim/Stealth/Free ones (created on
+  demand). The objects are larger than 0x1c00 (code writes up to +0x15f0); only one changed while the camera moved.
+  In it (radians): yaw pair `+0x12d4`/`+0x12d8` (-0.5435 while turning right, 0 while looking up), pitch pair
+  `+0x12ec`/`+0x12f0` (-0.3955 looking up, 0 while turning); `+0x1628` and `+0x190c` follow the yaw too.
+  - Write-test `+0x12d4` +0.3: undone (6.26932 back within 0.3 s): a copy.
+  - Write-test `+0x12d8` +0.3: **kept**, wrapped by the game into [0, 2pi) (6.56932 -> 0.28613): the yaw source
+    candidate (screen movement to confirm).
+  - User: the view turned with the `+0x12d8` write and stayed: **yaw source confirmed** (radians, wrapped to
+    [0, 2pi), decreases turning right).
+  - Write-test `+0x12f0` +0.2: kept (0.01288 -> 0.21288 through 1 s): pitch source candidate (decreases looking up in
+    the recording); screen movement to confirm.
+  - User: the view tilted with the `+0x12f0` write and stayed: **pitch source confirmed** (radians; the recording
+    shows it decreasing while looking up, so + = down). Both sources are in the one `ExplorationCameraController`
+    that changes; `+0x12d4`/`+0x12ec` are copies the game rebuilds from them.
+  - Next: find the active controller every frame without a memory scan (a pointer path from the exe's static data, or
+    the code that calls the controller's update), learn the pitch limits, then the Aim/Stealth controllers (same class
+    family, likely the same layout) and the FOV for zoom compensation.
+- **Foundation module, first camera build.** Slot 7 of `ExplorationCameraController` (RVA 0x8d0450) is not the
+  per-frame update: it sets +0x12d8/+0x12f0 from another object's angles (`[rdx+0x2c]`, wrapped by 0x8a5970), so it runs
+  when that controller takes over. The per-frame read-modify-writes of +0x12d8 are elsewhere (0x8b324e, 0x8b3beb,
+  0x8b45da; pitch 0x8af9bc, 0x8aff3e, 0x8b08ed). The module hooks slot 7 of ten controller vtables (RTTI names) to learn
+  the active controller and turns yaw/pitch of an active Exploration one from the gyro frame thread (guarded writes;
+  pitch kept within +-1.40 rad). Status lines count slot 7 calls per class (per switch or per frame: to check). Shared
+  RTTI helpers moved to core `rtti.hpp/.cpp` (Dawn uses them now). Builds, unit tests pass, deployed; in-game check
+  pending (Dawn not retested).
+- First in-game run of the camera build (DualSense shown as DS4, USB, no Steam Input; about 30 s of play):
+  `foundation: camera controllers: ExplorationCameraController vtable SOTTR.exe+0x10F2410, slot 7 hooked`, `gyro on
+  (target exploration camera)`, status `applied yaw=-3.0 pitch=-16.5`, camera updates 37/s, 99% turned. Slot 7 calls
+  in 30 s: exploration 5, anchored 3, so slot 7 runs once per camera switch, not per frame. Not yet checked: how the
+  turn feels, aiming/stealth/pause/cutscenes, and `nativepad: 054C:0CE6: the buttons in the game's reports don't
+  match SDL (report 00000800, SDL 00000000; 30 of 51 samples off)` in DS4 mode (no long-press blocking).
+- **Bug (user): gyro didn't move the view.** Gyro4All wrote to `0x1431a2b31d0`, the last Exploration controller slot 7
+  ran on; a read-only check during stick turns showed the camera in use was another one (`0x14307a2ed00`: yaw changed
+  4.83 rad; the hooked one only by the gyro's own writes, 0.02). Slot 7 runs on several controllers per switch.
+  **Fix:** every Exploration controller slot 7 sees (as `this` or as an argument) is a candidate; each gyro frame the
+  one whose copies +0x12d4/+0x12ec changed is the camera in use (only that one is updated by the game). Logged:
+  `ExplorationCameraController ... seen` and `the camera in use is ...`. Builds, unit tests pass, deployed; in-game
+  check pending.
+- Retest: 5 Exploration controllers seen at the first switches after the load (01:00:09-13), the one in use picked
+  4 s later when its copies changed (`0x28096FE7670`, the first seen); gyro on, applied yaw 60.4 / -67.4 / -104.2 over
+  the 30 s status lines, camera updates 73-122/s, 99% turned. Slot 7 also ran for aim (2 per 30 s).
+- **Aim (bow) camera:** `AimCameraController` (vtable RVA 0x10f1390) exists as a heap object only while aiming (a new
+  one each time: 0x2809af39920, then 0x2809b3edf10). Recording while aiming: yaw pair `+0x904`/`+0x908` (radians,
+  same change as the view's yaw), pitch pair `+0x91c`/`+0x920` (changed only while looking up); `+0x274` builds up
+  the yaw change. Write-test `+0x908` +0.3 while aiming (written 4 s after a beep): kept through 1 s (0.31008 ->
+  0.61008); screen movement to confirm. The test script also matched the vtable pointer inside a loaded DLL's data
+  (0x7ffe046bced0) and wrote +0.3 at its +0x908 (was 0.0); restored to 0.0 right away. The script now skips image
+  memory.
+  - User: the view turned with the `+0x908` write while aiming (**aim yaw confirmed**). Write-test `+0x920` +0.2
+    while aiming (object 0x2809af39920 again, so not always a new one): kept through 1 s (-0.25044 -> -0.05044);
+    user: the view tilted and stayed (**aim pitch confirmed**). Pitch sense to check (exploration: + = down).
+- **FOV (zoom compensation):** the Exploration controller holds a render camera block at +0x1850 in IGCS's layout
+  (position +0x80 = +0x18d0, quaternion +0xA0 = +0x18f0, vertical FOV +0xB0 = **+0x1900**, radians). A three-phase
+  read: 0.95993 (55.0 deg) on foot, 0.61087 (35.0) with the bow drawn, 0.26180 (15.0) with the bow's extra zoom: it is
+  the view's FOV in every case (it also widens a few degrees looking up). A heap search for float32(radians(55)) finds
+  many render camera copies at stride 0x1a0 with a unit quaternion 0x10 before. The AimCameraController keeps 35 deg in
+  several fields (+0x624/+0x628, +0x714/+0x718, ...) but none of its first 0x2000 bytes follows the extra zoom.
+  Frustum copies elsewhere hold tan(vfov/2) (0.5206 / 0.3153 / 0.1317) and its 16:9 width.
+- **Module, aim + FOV build:** views 1 Exploration and 2 Aim (parent 1), both with zoom. Candidates per kind (ring of
+  16, Aim objects are made per aim); the Aim controller is the camera while its copies changed in the last 250 ms, else
+  the Exploration one whose copies changed last. Aim pitch sense assumed as Exploration's (+ = down; to check). FOV
+  reported from Exploration +0x1900; the unzoomed reference is the FOV last seen in the Exploration view
+  (ZoomReferenceFOV= overrides). Builds, unit tests pass, deployed; in-game check pending.
+- In-game run of the aim + FOV build: the bow was drawn at 01:21:11 (Aim slot 7 ran, FOV 55 -> 35 in about 0.13 s), but
+  the Aim camera was picked only at 01:21:22 when its copies first changed (a held bow changes none): until then the
+  gyro turned the hidden Exploration camera. The unzoomed reference was learnt while the view still counted as
+  Exploration, so it became 35 (status `field of view 35.0, unzoomed 35.0 ... x1.000`). The Exploration FOV also moves
+  by itself (55 -> 60.7 looking up). **Fixes:** the kind is the one slot 7 ran for last (Aim when drawn, Exploration
+  when lowered), the object the one whose copies changed since then, else the one slot 7 ran on; the reference is the
+  Exploration controller's configured FOV +0x324 (radians, 55; unchanged in every recording), and the FOV reported is
+  capped at it. Builds, unit tests pass, deployed with the next fix.
+- **Bug (user): after a load the gyro doesn't turn until the camera moves once** (same cause as the late aim pick: no
+  Exploration copy changes while the camera is still). **Fix:** until one is picked, the gyro's turn goes to every
+  Exploration controller seen; only the one in use rebuilds its copies from the written angles, so it is picked on the
+  next frame (the game resets the others' angles at their slot 7). Builds, unit tests pass, deployed (with the aim pick and FOV reference fixes); in-game check pending.
+- **Bug (user): zoom compensation didn't follow the FOV.** No `foundation: FOV` line: the Exploration controller's
+  +0x1900 read 0.0 in all five controllers that session (it held the FOV in the earlier one), and a three-phase read of
+  all five (no aim / bow / zoom) found no field following the FOV. +0x324 = 55 in the one in use (45 in the other four).
+  **Fix:** the FOV now comes from the render camera struct: IGCS's camera-address pattern is 0x1f bytes into
+  SOTTR.exe+0x495b30 (start `48 89 4C 24 08 55 53`), whose rdx is the struct (FOV +0xB0, radians); hooked inline
+  (`hooks::hook_function`), it records the struct. Builds, unit tests pass, deployed; in-game check pending.
+- **Verified in game (DualSense as DS4, USB, no Steam Input):** `render camera function SOTTR.exe+0x495B30 hooked`;
+  FOV 55.0 on foot, 55 -> 35.3 drawing the bow (Aim camera picked at once: `turning the aim camera` at 01:33:39.998, the
+  FOV starting to narrow 9 ms later), 35 -> 16.0 with the bow's extra zoom and back. Status: `field of view 35.0,
+  unzoomed 55.0 ... gyro x0.606 ... in view 2`; also 40.0 in view 1 (x0.699) at times, a narrower FOV the Exploration
+  camera uses. The user reported the gyro turning at once after a load and in aim ("fixed"). Not checked: aim pitch
+  sense, pause menu, cutscenes, stealth/climbing cameras.
+- **Bug (user): with guns (rifle, shotgun) some shots swing the view quickly to the left and back.** The log shows no
+  camera switch at those moments. Likely cause (not proven): `turn` wrapped the yaw it wrote into [0, 2pi); the
+  Exploration controller wraps its own, but the Aim controller's yaw may run continuous, and a 2pi jump makes the game's
+  easing toward a target on a shot (recoil recovery / aim help) go the long way round. **Fix:** no wrap; the turn is
+  added and the game normalises (as the Exploration write test showed: 6.569 -> 0.2861). Builds, unit tests pass,
+  deployed; in-game check pending.
+  - User: the swing on gun shots is gone with the unwrapped yaw (rifle and shotgun, several directions). Verified in
+    game.
