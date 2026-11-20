@@ -25,6 +25,7 @@
 | 007 First Light | ✅ Works (tested on the Steam version) | Glacier 2 | Install in `Retail`, next to `007FirstLight.exe`. |
 | Alan Wake 2 | ✅ Works | Northlight | Install next to `AlanWake2.exe` in the game's main folder. Rename `msvcp140.dll` and `msvcp140_2.dll` in that folder (e.g. to `.bak`: incompatible old VC++ runtime shipped). |
 | Alan Wake Remastered | ✅ Works (tested on the Epic version) | Northlight | Install next to `Game_f_x64_EOS.exe` in the game's main folder. |
+| AMID EVIL | ✅ Works | Unreal Engine 4 | Install next to `AmidEvil-Win64-Shipping.exe`, in the game's `Binaries\Win64` folder. |
 | Battlefield 4 | ✅ Works (tested on the EA app version, Game Pass) | Frostbite 3 | Install next to `bf4.exe` in the game's main folder. Turn off the EA app's in-game overlay for the game (it freezes on start otherwise). Move the right stick once in game to start the gyro. On foot only so far (vehicles not tested). Campaign only: never play multiplayer with it (PunkBuster). |
 | Battlefield Hardline | ✅ Works (tested on the EA app version, Game Pass) | Frostbite 3 | Install next to `bfh.exe` in the game's main folder. Move the right stick once in game to start the gyro (again after cutscenes). Off in vehicles. Campaign only: never play multiplayer with it (PunkBuster). |
 | Borderlands 4 | ✅ Works | Unreal Engine 5 | Install in `OakGame\Binaries\Win64`, next to `Borderlands4.exe`. Single-player only: never play online co-op with it. |
@@ -87,6 +88,7 @@
 | PowerWash Simulator | ✅ Works | Unity (IL2CPP) | Install next to `PowerWashSimulator.exe` in the game's main folder. |
 | PowerWash Simulator 2 | ✅ Works | Unity (IL2CPP) | Install next to `PowerWashSimulator 2.exe` in the game's main folder. |
 | Pragmata | ✅ Works, **with [REFramework](https://github.com/praydog/REFramework)** | RE Engine | Install next to `PRAGMATA.exe` in the game's main folder, **together with a recent REFramework**: the game has Capcom's anti-tamper, which crashes the game about 30 s after start without it (an older REFramework build crashed it too). **Turn off the game's own gyro option** (it works while aiming with L2): Gyro4All's gyro also works while aiming, and the two would add up. |
+| Queen's Domain | ✅ Works | Unreal Engine | Install next to the game's `*-Win64-Shipping.exe`, in its `Binaries\Win64` folder. |
 | RAGE (2011) | ✅ Works (tested on the Steam version) | id Tech 5 | Install next to `Rage64.exe` in the game's main folder. 64-bit only (`Rage.exe` not supported). Gyro off in vehicles. |
 | Red Dead Redemption 2 | ✅ Works (tested on the Rockstar launcher version) | RAGE | Install next to `RDR2.exe` in the game's main folder. Story mode only: never play Red Dead Online with it. Binoculars turn through the right stick (less precise). |
 | Remnant 2 | ✅ Works | Unreal Engine 5 | Needs the profile provided |
@@ -125,8 +127,6 @@ Engine versions from [PCGamingWiki](https://www.pcgamingwiki.com/). Not supporte
 |---|---|---|---|
 | Halo: Campaign Evolved | Unreal Engine 5 | 2026 |
 | Borderlands 3 | Unreal Engine 4 | 2019 |
-| Crysis 2| CryEngine 3 | 2011 |
-| Crysis 3 | CryEngine 3 | 2013 |
 | Kingdom come deliverance II | CryEngine V | 2025 |
 | Far Cry 4 | Dunia 2 | 2014 | |
 | Far Cry 5 | Dunia 2 | 2018 | |
