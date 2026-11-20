@@ -3677,3 +3677,71 @@ Afterburner running.
   rule covers it. `managed_input()` stays for Unity, whose P/Invoke calls can coexist with an XInput import. Builds and
   unit tests pass. Verified in ROTTR with a DualSense and `XInput=2`: the log shows "xinput1_4.dll exports hooked"
   and "xinput1_3.dll exports hooked", and the game takes the Xbox controller. Not retested in the Dawn games (DXMD, and GOTG, which imports xinput9_1_0.dll).
+
+## 2026-11-20 Rise of the Tomb Raider: camera offsets from the exe, write tests, per-game layout
+
+- SOTTR's offsets don't work in ROTTR: writes to ExplorationCameraController +0x12D8 were kept but the view didn't
+  move, and one object rewrote it (a copy). The game frees and makes camera controllers every few seconds, so addresses
+  from `guided.py` were gone before a second test (three runs: small moves, a freed reference, then freed candidates).
+- Static comparison of the two exes, per vtable slot, by the field displacements each function uses (game closed):
+  - SOTTR Exploration slot 4 (yaw/pitch update: 0x12D8, 0x12DC, 0x12E0 comiss/subss, 0x12F0, 0x12F8 subss/ucomiss,
+    0x12FC mulss) matches ROTTR slot 3 instruction for instruction at 0x1020, 0x1024, 0x1028, 0x1038, 0x1040, 0x1044.
+    The offsets are 0x2B8 lower.
+  - SOTTR slot 7, the start function (copies 0x12D4/0x12EC), matches ROTTR slot 6 (0x101C/0x1034). SOTTR slot 38
+    matches ROTTR slot 36.
+  - AimCameraController: SOTTR slot 7 (0x904, 0x908, 0x91C, 0x920) matches ROTTR slot 6 (0x8E4, 0x8E8, 0x8FC, 0x900).
+    The offsets are 0x20 lower.
+- ROTTR (Epic build), ExplorationCameraController vtable ROTTR.exe+0xD6EB18: yaw +0x1020 and pitch +0x1038 (radians),
+  copies +0x101C / +0x1034. AimCameraController vtable ROTTR.exe+0xD6DA98: yaw +0x8E8, pitch +0x900, copies +0x8E4 /
+  +0x8FC. The start function is vtable slot 6.
+- Write tests on every live Exploration controller, found again by vtable right before each write: yaw +0.5 rad twice,
+  pitch +0.3 then -0.4 rad. All writes were kept, and the user saw the view turn and tilt. Aim offsets: not write-tested.
+- Earlier, one write landed in memory the game had already reused (value 12858.8). It was undone with -0.5 at once.
+- `foundation_engine.cpp`: a layout per game, picked by the exe name (`kLayouts`: the kinds' offsets, the start slot,
+  the base FOV offset). ROTTR's base FOV offset isn't known (0). Its render-camera pattern isn't found either, so ROTTR
+  has no zoom compensation. Builds and unit tests pass. Not yet tested with the gyro in game.
+
+## 2026-11-20 Rise of the Tomb Raider: "shown as XInput" notice repeated during play (XInput=1)
+
+- The log showed "not shown: it imports the HID library" then "shown as XInput controller 0" 6 ms later, twice, each with
+  a WM_DEVICECHANGE and the notice. ROTTR opens and closes the DualSense HID device every half second. In auto mode the
+  controller is shown once the game closed the DualSense unread (`nativepad::dualsense_closed_unread`). That check
+  answered "the game took it" whenever a frame fell while one of those handles was open.
+- Fix: the verdict stays once reached. Only a read of a DualSense by the game (`g_dualsense_read`) takes it back.
+  Builds and unit tests pass. Not yet verified in game.
+- Also seen: `XInput=2` set from the panel is only written to `Gyro4All.ini`. `xinput::install` reads the mode once at
+  start, so it applies from the next start. The controller was shown at 20:28:46 by the auto-mode verdict, not by that
+  change.
+
+## 2026-11-20 Rise of the Tomb Raider: gyro jitter, two Exploration controllers in use
+
+- The user reported jitter, not smooth like the stick. The log had 21506 "the exploration camera in use is" lines,
+  switching between two controllers about every frame. In ROTTR both rebuild their angle copies each frame, unlike SOTTR
+  where only the one in use does. The gyro turned only the one that changed last, so the turn alternated between them.
+- Fix: in the Exploration camera, the turn goes to every Exploration controller whose copies changed in the last 200 ms
+  (`turn_live_explorations`). The "in use" line is logged 40 times at most. A controller the game no longer uses doesn't
+  rebuild its copies from the written angles, so it drops out. Builds and unit tests pass. Not yet verified in game.
+- Gyro dead at start with Always On until the stick moved (SOTTR had it too). At 20:29:03 the game changed the copies
+  of one controller (…AF0) once while loading. Probing ended, and the gyro turned that one, while the one in use
+  (…BC0, still camera, copies unchanged) was picked only at 20:29:10, when the stick moved it. Fix in
+  `turn_live_explorations`: when no Exploration controller changed in the last 200 ms, the turn goes to every known one,
+  like the probing before the first pick. Builds and unit tests pass. Not yet verified in game.
+
+### 2026-11-20 ROTTR: render camera FOV found (zoom compensation)
+
+- The camera struct copy function (ROTTR.exe+0x13AF70) was hooked as a diagnostic, logging each heap destination's FOV
+  (+0xB0, radians). Stack temporaries and non-camera data were filtered out (FOV outside 1-130 degrees).
+- The render camera is the exe global ROTTR.exe+0x145CAB0, written from ROTTR.exe+0x43BC87 (a heap copy from
+  ROTTR.exe+0x87CDC1 runs one frame ahead). Its FOV: 55 degrees exploring, about 35 aiming the pistol, down to about 22
+  with extra zoom, back to 55 on release; 30 during an early scene.
+- Exploration controller +0x330 holds the unzoomed FOV (55 degrees).
+- Layout now has render_camera (ROTTR 0x145CAB0, base_fov 0x330); the diagnostic was removed. Zoom compensation not yet
+  verified in game.
+- First in-game test: zoom compensation works (pistol extra zoom: FOV 15 of 50 vertical, gyro x0.28). The user still saw
+  more jitter while aiming and zoomed. Two Aim controllers were picked within 0.7 s while aiming, as with Exploration:
+  the live-controller turn (all controllers of the kind whose copies changed in the last 200 ms) now also covers Aim.
+  Not yet verified in game.
+- After the Aim fix the user still finds the gyro a little less smooth than the stick at 165 FPS, more horizontally than
+  vertically. Not float precision: the live Exploration yaw stays wrapped (about 2.1 rad). Likely cause, not verified:
+  the gyro writes from the Present thread, out of step with the game's camera update. Possible fix (left for later):
+  write from the controllers' per-frame update function.

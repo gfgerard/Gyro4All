@@ -1,4 +1,5 @@
-// Foundation (Crystal Dynamics / Eidos Montreal, `cdc::` classes): Shadow of the Tomb Raider (MODLOG 2026-11-19/20). Native
+// Foundation (Crystal Dynamics / Eidos Montreal, `cdc::` classes): Shadow of the Tomb Raider and Rise of the Tomb Raider
+// (MODLOG 2026-11-19/20). Native
 // x64, MSVC RTTI kept, Z up, DX11/DX12 loaded at run time, data in bigfile.*.tiger next to the exe.
 //
 // The gyro frame: the game's window is pumped by a thread of its own with a blocking GetMessageW loop (SOTTR.exe RVA
@@ -14,6 +15,10 @@
 //   ExplorationCameraController (third person): yaw +0x12D8, pitch +0x12F0, copies +0x12D4 / +0x12EC. Several exist.
 //   AimCameraController (bow and weapons): yaw +0x908, pitch +0x920, copies +0x904 / +0x91C. Made while aiming (often
 //   a new object each time).
+// ROTTR has the same controller classes and code with other offsets (its functions match SOTTR's instruction for
+// instruction, MODLOG 2026-11-20): Exploration yaw +0x1020, pitch +0x1038, copies +0x101C / +0x1034; Aim yaw +0x8E8,
+// pitch +0x900, copies +0x8E4 / +0x8FC; the start function is slot 6 (its vtables have one slot fewer before it). The
+// offsets below are SOTTR's; kLayouts has both games'.
 // Slot 7 of each controller vtable (0x8d0450 for ExplorationCameraController in the 2023 Epic build) sets a controller's
 // angles from the previous camera's ([rdx+0x2c]) when the game (re)starts it: hooked, it lists the controllers. It runs
 // on more than one per switch, and the last one isn't always the one in use. So the kind of camera is the kind slot 7
@@ -48,6 +53,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <cwctype>
 #include <format>
 #include <optional>
 #include <string>
@@ -62,12 +68,10 @@ bool exists(const std::wstring& path) { return GetFileAttributesW(path.c_str()) 
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr uintptr_t kRenderFov = 0xB0;    // render camera struct: the view's vertical FOV, float radians
-constexpr uintptr_t kBaseFov = 0x324;     // Exploration controller: its configured (unzoomed) vertical FOV, radians
 // IGCS's camera-address pattern, kCameraFnOffset bytes into the function whose rdx is the render camera struct.
 constexpr const char* kCameraPattern = "89 59 28 45 33 C0 0F 28 82 80 00 00 00 4C 8B F9 41 0F B6 D1";
 constexpr uintptr_t kCameraFnOffset = 0x1F;
 constexpr double kMaxPitch = 1.40;     // the gyro keeps the pitch within this (80 degrees)
-constexpr int kActivateSlot = 7;
 
 // --- the gyro frame ----------------------------------------------------------------------------------------------
 
@@ -118,12 +122,26 @@ struct Kind {
     uint32_t view;
     uintptr_t yaw, pitch, yaw_copy, pitch_copy;
 };
-constexpr Kind kKinds[] = {
-    {"exploration", 0, 1, 0x12D8, 0x12F0, 0x12D4, 0x12EC},
-    {"aim", 1, 2, 0x908, 0x920, 0x904, 0x91C},
-};
-constexpr int kKindCount = int(std::size(kKinds));
+constexpr int kKindCount = 2;
 constexpr int kExplorationKind = 0, kAimKind = 1;
+
+// Per game, picked by the exe's name.
+struct Layout {
+    const wchar_t* exe;
+    Kind kinds[kKindCount];
+    int activate_slot;   // the controllers' start function in their vtables
+    uintptr_t base_fov;  // Exploration controller: its configured (unzoomed) vertical FOV, radians; 0: not known
+    // The render camera struct, a global in the exe (0: found through the render camera function instead).
+    uintptr_t render_camera;
+};
+constexpr Layout kLayouts[] = {
+    {L"sottr.exe", {{"exploration", 0, 1, 0x12D8, 0x12F0, 0x12D4, 0x12EC}, {"aim", 1, 2, 0x908, 0x920, 0x904, 0x91C}}, 7,
+     0x324, 0},
+    {L"rottr.exe", {{"exploration", 0, 1, 0x1020, 0x1038, 0x101C, 0x1034}, {"aim", 1, 2, 0x8E8, 0x900, 0x8E4, 0x8FC}}, 6,
+     0x330, 0x145CAB0},
+};
+const Layout* g_layout = nullptr;  // set in configure(), before any hook
+const Kind* kKinds = nullptr;      // g_layout->kinds
 
 // Controllers seen by slot 7 (as this or an argument), per kind: a ring, so the Aim objects made at each aim replace
 // the oldest ones.
@@ -180,12 +198,13 @@ constexpr void* hook_of(int k, std::integer_sequence<int, K...>) {
 }
 
 void hook_controllers() {
+    const int slot = g_layout->activate_slot;
     const rtti::Image im = rtti::exe_image();
     std::string missing;
     for (int k = 0; k < kControllers; ++k) {
         Controller& c = g_controllers[k];
         c.vtable = rtti::primary_vtable(im, c.rtti);
-        void* original = c.vtable ? rtti::patch_slot(c.vtable, kActivateSlot,
+        void* original = c.vtable ? rtti::patch_slot(c.vtable, slot,
                                                      hook_of(k, std::make_integer_sequence<int, kControllers>{}))
                                   : nullptr;
         if (!original) {
@@ -195,7 +214,7 @@ void hook_controllers() {
         g_activate_orig[k] = reinterpret_cast<ActivateFn>(original);
     }
     log("foundation: camera controllers: ExplorationCameraController vtable %s, slot %d %s; AimCameraController %s%s%s",
-        g_controllers[0].vtable ? mem::module_offset(g_controllers[0].vtable).c_str() : "not found", kActivateSlot,
+        g_controllers[0].vtable ? mem::module_offset(g_controllers[0].vtable).c_str() : "not found", slot,
         g_activate_orig[0] ? "hooked" : "NOT hooked", g_activate_orig[1] ? "hooked" : "NOT hooked",
         missing.empty() ? "" : "; not hooked: ", missing.c_str());
 }
@@ -212,6 +231,12 @@ void* hooked_camera_fn(void* self, void* camera, void* a, void* b, void* c, void
 }
 
 void hook_render_camera() {
+    if (g_layout->render_camera) {
+        const uintptr_t camera = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) + g_layout->render_camera;
+        g_render_camera.store(camera, std::memory_order_release);
+        log("foundation: render camera %s (the FOV for zoom compensation)", mem::module_offset(camera).c_str());
+        return;
+    }
     std::vector<uint8_t> bytes, mask;
     mem::parse_pattern(kCameraPattern, bytes, mask);
     const auto hits = mem::find_pattern(mem::code_sections(reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr))),
@@ -260,9 +285,10 @@ void follow_cameras() {
             if (s.obj != obj) s = {obj, y, p, 0};
             else if (y != s.yaw || p != s.pitch) s = {obj, y, p, now};
             if (s.changed && s.changed >= g_in_use_changed[k]) {
-                if (g_in_use[k] != obj)
-                    log("foundation: the %s camera in use is %s (its angles changed)", kind.label,
-                        mem::module_offset(obj).c_str());
+                static int logs = 0;
+                if (g_in_use[k] != obj && logs < 40 && ++logs)
+                    log("foundation: the %s camera in use is %s (its angles changed)%s", kind.label,
+                        mem::module_offset(obj).c_str(), logs == 40 ? "; further changes not logged" : "");
                 g_in_use[k] = obj;
                 g_in_use_changed[k] = s.changed;
             }
@@ -301,6 +327,24 @@ bool turn(uintptr_t c, int kind, double yaw_rad, double pitch_rad) {
            mem::guarded_store(c + k.pitch, &out_pitch, sizeof out_pitch);
 }
 
+// The controllers of one kind whose copies changed in the last kLiveMs: in ROTTR two rebuild them every frame (two
+// Exploration ones, and two Aim ones while aiming), and turning only the one that changed last took turns between them
+// (jitter: half the gyro's turn on each). All of them are turned. With none changed lately (a still camera: after a load
+// the game may also have changed another one once, ROTTR), an Exploration turn goes to every known one, as before the
+// first pick: the one in use rebuilds its copies from it and is the only one turned from the next frame. An Aim turn
+// then goes to the one in use only.
+constexpr ULONGLONG kLiveMs = 200;
+bool turn_live(int kind, double yaw_rad, double pitch_rad) {
+    const ULONGLONG now = GetTickCount64();
+    bool any = false;
+    for (const Seen& s : g_seen[kind])
+        if (s.obj && s.changed && now - s.changed <= kLiveMs) any = turn(s.obj, kind, yaw_rad, pitch_rad) || any;
+    if (any || kind != kExplorationKind) return any;
+    for (auto& o : g_candidates[kExplorationKind].obj)
+        any = turn(o.load(std::memory_order_acquire), kExplorationKind, yaw_rad, pitch_rad) || any;
+    return any;
+}
+
 // No Exploration controller picked yet, but some are known: the turn goes to all of them (see the top of the file).
 bool probing() { return g_kind < 0 && g_candidates[kExplorationKind].added.load(std::memory_order_acquire) > 0; }
 
@@ -326,6 +370,16 @@ public:
     }
 
     void configure() override {
+        wchar_t path[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, path, MAX_PATH);
+        std::wstring exe = path;
+        exe = exe.substr(exe.find_last_of(L"\\/") + 1);
+        for (wchar_t& ch : exe) ch = wchar_t(towlower(ch));
+        g_layout = &kLayouts[0];
+        for (const Layout& l : kLayouts)
+            if (exe == l.exe) g_layout = &l;
+        kKinds = g_layout->kinds;
+        if (exe != g_layout->exe) log("foundation: unknown game exe: Shadow of the Tomb Raider's camera offsets used");
         hook_controllers();
         hook_render_camera();
         load_zoom_reference();
@@ -382,6 +436,7 @@ public:
         }
         float y = 0, p = 0;
         const uintptr_t c = camera(y, p);
+        if (c && turn_live(g_kind, yaw_rad, pitch_rad)) return true;
         return c && turn(c, g_kind, yaw_rad, pitch_rad);
     }
 
@@ -401,11 +456,12 @@ public:
         for (Controller& c : g_controllers)
             if (const uint32_t n = c.calls.exchange(0, std::memory_order_relaxed))
                 line += std::format(" {} {}", c.label, n);
-        if (!line.empty()) log("foundation: camera controller slot %d calls since the last status:%s", kActivateSlot, line.c_str());
+        if (!line.empty())
+            log("foundation: camera controller slot %d calls since the last status:%s", g_layout->activate_slot, line.c_str());
     }
 
 private:
-    double zoom_reference_ = 0;     // ZoomReferenceFOV= (horizontal degrees), 0: the Exploration controller's +0x324
+    double zoom_reference_ = 0;     // ZoomReferenceFOV= (horizontal degrees), 0: the Exploration controller's base_fov
     double logged_fov_ = 0;
     int fov_logs_ = 0;
 
@@ -423,7 +479,7 @@ private:
         const uintptr_t e = g_in_use[kExplorationKind];
         const uintptr_t camera = g_render_camera.load(std::memory_order_acquire);
         if (!mem::plausible(camera, 16) || !mem::rd(camera + kRenderFov, rad) || !is_kind(e, kExplorationKind) ||
-            !mem::rd(e + kBaseFov, base))
+            (zoom_reference_ <= 0 && (!g_layout->base_fov || !mem::rd(e + g_layout->base_fov, base))))
             return std::nullopt;
         ZoomFov z;
         z.reference_vertical = zoom_reference_ > 0

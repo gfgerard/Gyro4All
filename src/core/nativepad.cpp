@@ -1366,13 +1366,19 @@ namespace {
 // The game opened a DualSense (as itself or as a DualShock 4), closed it again unread and has none open some time later:
 // 5 s with Sony's library seen, 30 s when the only sign is hid.dll among the imports (S.T.A.L.K.E.R. 2 enumerates at
 // start and reads the DualSense natively 7 to 11 s after its first open).
+// Once true it stays true until the game reads a DualSense: games that enumerate HID devices over and over (Rise of the
+// Tomb Raider opens and closes the DualSense every half second) hold a handle for a moment each time, and a frame that
+// fell in one hid the translated controller for a frame (a WM_DEVICECHANGE and a notice each time).
 bool dualsense_closed_unread() {
+    static std::atomic<bool> verdict{false};
     if (g_dualsense_read) return false;
+    if (verdict.load(std::memory_order_acquire)) return true;
     const ULONGLONG opened = g_dualsense_opened;
     const ULONGLONG wait = xinput::sony_hid_import_only() ? 30000 : 5000;
     if (!opened || GetTickCount64() - opened < wait) return false;
     for (Device& d : g_devices)  // a DualSense handle still open: the game took it (it may read it later)
         if (d.handle.load(std::memory_order_acquire) && is_dualsense(d.vendor, d.product)) return false;
+    verdict.store(true, std::memory_order_release);
     return true;
 }
 
