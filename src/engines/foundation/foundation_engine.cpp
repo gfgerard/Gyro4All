@@ -99,7 +99,6 @@ struct Controller {
     const char* rtti;
     const char* label;
     uintptr_t vtable = 0;
-    std::atomic<uint32_t> calls{0};  // slot 7 calls since the last status line
 };
 Controller g_controllers[] = {
     {".?AVExplorationCameraController@@", "exploration"}, {".?AVAimCameraController@@", "aim"},
@@ -171,16 +170,12 @@ void note_candidate(uintptr_t obj) {
             if (o.load(std::memory_order_relaxed) == obj) return;
         const uint32_t at = c.added.fetch_add(1, std::memory_order_acq_rel);
         c.obj[at % kMaxCandidates].store(obj, std::memory_order_release);
-        if (at < 20)
-            log("foundation: %s camera controller %s seen (%u so far)", kKinds[k].label, mem::module_offset(obj).c_str(),
-                at + 1);
         return;
     }
 }
 
 template <int K>
 void* hooked_activate(void* self, void* a, void* b, void* c, void* d, void* e, void* f, void* g) {
-    g_controllers[K].calls.fetch_add(1, std::memory_order_relaxed);
     for (void* obj : {self, a, b, c}) note_candidate(reinterpret_cast<uintptr_t>(obj));
     for (int k = 0; k < kKindCount; ++k)
         if (kKinds[k].controller == K) {
@@ -308,8 +303,10 @@ void follow_cameras() {
         g_in_use[kAimKind] = aim;
         g_in_use_changed[kAimKind] = aimed;
     }
-    if (kind != g_kind && kind >= 0)
-        log("foundation: turning the %s camera %s", kKinds[kind].label, mem::module_offset(g_in_use[kind]).c_str());
+    static int switches = 0;
+    if (kind != g_kind && kind >= 0 && switches < 40 && ++switches)
+        log("foundation: turning the %s camera %s%s", kKinds[kind].label, mem::module_offset(g_in_use[kind]).c_str(),
+            switches == 40 ? "; further switches not logged" : "");
     g_kind = kind;
 }
 
@@ -448,16 +445,6 @@ public:
         return std::format("foundation: {} camera {} (exploration {} seen, aim {} seen)", kKinds[g_kind].label,
                            mem::module_offset(g_in_use[g_kind]), g_candidates[kExplorationKind].added.load(),
                            g_candidates[kAimKind].added.load());
-    }
-
-    // How often each controller's slot 7 ran: once per switch, or every frame.
-    void status_details() override {
-        std::string line;
-        for (Controller& c : g_controllers)
-            if (const uint32_t n = c.calls.exchange(0, std::memory_order_relaxed))
-                line += std::format(" {} {}", c.label, n);
-        if (!line.empty())
-            log("foundation: camera controller slot %d calls since the last status:%s", g_layout->activate_slot, line.c_str());
     }
 
 private:
