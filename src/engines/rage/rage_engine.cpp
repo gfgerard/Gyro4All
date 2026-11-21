@@ -376,7 +376,8 @@ public:
     // against ZoomReferenceFOV= (converted with the window's aspect) or else the FOV of the last camera that isn't a zoom
     // camera (aim, binoculars), so the on-foot, horse and first-person cameras each count as unzoomed at their own FOV.
     // The widest FOV seen was wrong as a reference: a 90-degree frame when the camera appears after a load halved the
-    // gyro everywhere (MODLOG 2026-11-03).
+    // gyro everywhere (MODLOG 2026-11-03). The first-person camera's iron sight narrows the FOV without a camera change
+    // (52 to 25 degrees): that camera's own unzoomed FOV, kept at cam+0xddc while it aims (MODLOG 2026-11-21), is used.
     std::optional<ZoomFov> zoom_fov(uintptr_t cam) {
         const double current = vertical_fov();
         if (current <= 0) return std::nullopt;
@@ -388,7 +389,16 @@ public:
             if (zoom && !zoom_camera_)
                 log("rage: zoom camera (aim or binoculars): unzoomed FOV %.1f degrees vertical", unzoomed_fov_);
             zoom_camera_ = zoom;
-            if (!zoom) unzoomed_fov_ = current;
+            float base_fov = 0;
+            if (first_person_camera(cam) && mem::rd(cam + 0xddc, base_fov) && fov::is_valid(base_fov)) {
+                if (!first_person_base_)
+                    log("rage: first-person camera: unzoomed FOV %.1f degrees vertical (its own)", base_fov);
+                unzoomed_fov_ = base_fov;
+                first_person_base_ = true;
+            } else {
+                first_person_base_ = false;
+                if (!zoom) unzoomed_fov_ = current;
+            }
             reference = unzoomed_fov_;
         }
         if (!fov::is_valid(reference)) return std::nullopt;
@@ -433,6 +443,7 @@ private:
     double zoom_reference_fov_ = 0;  // [Gyro4All] ZoomReferenceFOV=, horizontal degrees; 0 = the unzoomed camera's
     double unzoomed_fov_ = 0;        // vertical degrees, of the last camera that isn't a zoom camera
     bool zoom_camera_ = false;
+    bool first_person_base_ = false;  // unzoomed_fov_ is the first-person camera's own (cam+0xddc)
 };
 
 }  // namespace

@@ -3745,3 +3745,11 @@ Afterburner running.
   vertically. Not float precision: the live Exploration yaw stays wrapped (about 2.1 rad). Likely cause, not verified:
   the gyro writes from the Present thread, out of step with the game's camera update. Possible fix (left for later):
   write from the controllers' per-frame update function.
+
+2026-11-21 **RDR2: Adapt to Zoom did nothing in the first-person iron sight (user), measured.** Read-only sampler, first
+person with an unscoped weapon: the active camera stays the first-person one (vtable exe+0x3396310) while aiming down the
+iron sight; the rendered FOV eases 52.0 to 25.0 degrees vertical in about 0.4 s. Since only the aim and binocular vtables
+counted as zoom cameras, the reference followed the rendered FOV down and the gyro stayed x1.0. In that camera object:
+cam+0x80 and cam+0x150 = the current FOV, cam+0xddc = 51.988 constant hip and aiming (the camera's unzoomed FOV),
+cam+0xde8 = 25.0 (the iron-sight target). Change: for the first-person camera the reference is cam+0xddc. Builds, 1469
+checks pass. User: iron sight now slows the gyro (DualSense as XInput, no Steam Input).
