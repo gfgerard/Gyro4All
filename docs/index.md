@@ -1,4 +1,4 @@
-# <img src="../logo.png" alt="Gyro4All logo" width="64px" />Gyro4All
+# <img src="https://github.com/gfgerard/Gyro4All/raw/main/logo.png" alt="Gyro4All logo" width="64px" />Gyro4All
 
 **Gyro4All** brings native gyroscope aiming to PC games across multiple engines and renders—translating controller motion directly to the camera without relying on right-stick emulation or remappers that break native controller features.
 
