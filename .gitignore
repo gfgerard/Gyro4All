@@ -20,3 +20,4 @@ GyroCamProbe/
 tools/frostbite/*.pkl
 tools/frostbite/*.npz
 __pycache__/
+plans/
