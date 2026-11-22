@@ -866,14 +866,36 @@ void status() {
 // GyroLib's panel (or the Gyro4All window open alone) is driven with the controller while it is open, so the game reads
 // an idle controller then (XInput and its own PlayStation support), and after the panel closes until every button is
 // released and the triggers are up: the press that closed it doesn't reach the game either.
+// Only buttons a person presses count: SDL also reports sensors as buttons (the Steam Controller's grip sensors are
+// MISC5/MISC6, "pressed" for as long as the controller is held: mark_grip_sensors), which kept the game's controller
+// idle until an Alt+Tab made SDL release them. The vendor MISC2..MISC6 slots are left out, and the wait ends after
+// kPanelReleaseMs whatever is still reported held, so nothing can keep the controller from the game.
+constexpr uint64_t kPanelReleaseMs = 1500;
+bool pressable(SDL_GamepadButton b) { return b < SDL_GAMEPAD_BUTTON_MISC2; }  // MISC1 (Share) and the paddles count
 bool panel_has_pad(gl_context* ctx, SDL_Gamepad* pad) {
     static bool held = false;
-    if (gl_panel_open(ctx) || overlay::settings_open()) return held = true;
+    static ULONGLONG closed_at = 0;
+    if (gl_panel_open(ctx) || overlay::settings_open()) {
+        closed_at = 0;
+        return held = true;
+    }
     if (!held || !pad) return held = false;
-    bool busy = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000 ||
-                SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000;
-    for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT && !busy; ++b) busy = SDL_GetGamepadButton(pad, SDL_GamepadButton(b));
-    return held = busy;
+    const ULONGLONG now = GetTickCount64();
+    if (!closed_at) closed_at = now;
+    int busy = -1;  // the button still held (SDL_GAMEPAD_BUTTON_COUNT = a trigger), -1 = none
+    if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000 ||
+        SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000)
+        busy = SDL_GAMEPAD_BUTTON_COUNT;
+    for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT && busy < 0; ++b)
+        if (pressable(SDL_GamepadButton(b)) && SDL_GetGamepadButton(pad, SDL_GamepadButton(b))) busy = b;
+    if (busy >= 0 && now - closed_at >= kPanelReleaseMs) {
+        const char* name = busy == SDL_GAMEPAD_BUTTON_COUNT ? "a trigger"
+                                                             : SDL_GetGamepadStringForButton(SDL_GamepadButton(busy));
+        log("panel: closed, %s still held after %llu ms: the controller goes back to the game anyway",
+            name ? name : "a button", (unsigned long long)kPanelReleaseMs);
+        busy = -1;
+    }
+    return held = busy >= 0;
 }
 
 // Offers (or withdraws) the recenter button for the active view: decided when the view changes, and retried while the
