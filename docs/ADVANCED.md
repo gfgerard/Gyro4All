@@ -656,14 +656,16 @@ and whatever follows from it then apply to the gyro as they do to the stick.
 `UpdateRotation` is found by its shape, not by address. Gyro4All goes through the controller class's virtual functions
 and picks the one that reads `RotationInput` before any call, jump or return, which is the engine's first statement
 there. `RotationInput` isn't reflected in UE4: its offset is the one just before the reflected `InputYawScale`, which
-follows it in `APlayerController` (`InputYawScale_DEPRECATED` in UE5). The log says which one (`update rotation: ... UpdateRotation is vtable[N] at
-<module>+0x...: hooked`). If none matches, or more than one does, the view isn't turned and the log says so.
+follows it in `APlayerController` (`InputYawScale_DEPRECATED` in UE5). 
+The log says which one (`update rotation: ... UpdateRotation is vtable[N] at <module>+0x...: hooked`). 
+If none matches, or more than one does, the view isn't turned and the log says so.
 
 ```ini
 [View.Default]
 Label=Exploration
 Property=RotationInput
 ```
+
 
 ### Turning through the engine (`Function=`)
 
@@ -1075,6 +1077,7 @@ uninstalls; an existing `gyrolib.ini` is never overwritten):
 ```bash
 bash tools/deploy-gyro4all.sh "D:/Games/MyGame/MyGame/Binaries/Win64"
 ```
+
 
 ## Performance
 
