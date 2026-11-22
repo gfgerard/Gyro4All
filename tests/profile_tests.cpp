@@ -441,6 +441,45 @@ void test_load_active_list_views() {
     CHECK(vehicle && vehicle->active_list == 0x35D0 && vehicle->output_matrix < 0 && vehicle->parent == 1);
 }
 
+void test_load_direction_view() {
+    std::puts("profile: Direction=1 views turn raw float forward vectors, ActiveWhen= selects a view on its own");
+    const std::wstring path = temp_profile(L"direction");
+    write_file(path,
+               "[Gyro4All]\r\nViews=Aim, Bad\r\n\r\n"
+               "[View.Default]\r\nMatch=Camera\r\nObject=Pawn.CameraBoom\r\nProperty=RelativeRotation\r\nControlYaw=1\r\n\r\n"
+               "[View.Aim]\r\nId=2\r\nActiveWhen=Pawn.@SBCameraComponent.bCurrentCameraTPSMode\r\nObject=Pawn\r\n"
+               "Offsets=0x1534,0x154C\r\nDirection=1\r\n\r\n"
+               "[View.Bad]\r\nId=3\r\nActiveWhen=Nowhere.bFlag\r\nObject=Pawn\r\nOffsets=0x10\r\n");
+    const std::vector<View> views = load_views(path);
+    CHECK(views.size() == 2);
+    CHECK(!views[0].direction && !views[0].has_active_when && views[0].control_yaw);
+    const View* aim = by_id(views, 2);
+    CHECK(aim && aim->direction && !aim->matrix && !aim->match_camera && aim->has_active_when);
+    CHECK(aim && aim->active_when.object.size() == 2 && aim->active_when.object[1] == "@SBCameraComponent" &&
+          aim->active_when.property == "bCurrentCameraTPSMode" && aim->active_when.op == Condition::Op::NonZero);
+    CHECK(!by_id(views, 3));  // a malformed ActiveWhen and no other selector: skipped
+    CHECK(aim && aim->offsets.size() == 2 && aim->offsets[0] == 0x1534 && aim->offsets[1] == 0x154C);
+}
+
+void test_load_screen_point_view() {
+    std::puts("profile: ScreenPoint= views move a raw float screen point, one value sets both spans");
+    const std::wstring path = temp_profile(L"screen");
+    write_file(path,
+               "[Gyro4All]\r\nViews=Range, Square, Bad\r\n\r\n"
+               "[View.Range]\r\nId=2\r\nActiveWhen=Pawn.TPSModeType==2\r\nObject=Pawn\r\nOffsets=0x159C\r\nScreenPoint=60, 34\r\n\r\n"
+               "[View.Square]\r\nId=3\r\nActiveWhen=Pawn.bFlag\r\nObject=Pawn\r\nOffsets=0x10\r\nScreenPoint=40\r\n\r\n"
+               "[View.Bad]\r\nId=4\r\nActiveWhen=Pawn.bFlag\r\nObject=Pawn\r\nOffsets=0x10\r\nScreenPoint=-5,10\r\n");
+    const std::vector<View> views = load_views(path);
+    const View* range = by_id(views, 2);
+    CHECK(range && range->screen_width == 60 && range->screen_height == 34 && !range->direction);
+    CHECK(range && range->active_when.op == Condition::Op::Eq && range->active_when.value == 2);
+    const View* square = by_id(views, 3);
+    CHECK(square && square->screen_width == 40 && square->screen_height == 40);
+    const View* bad = by_id(views, 4);
+    CHECK(bad && bad->screen_width == 0 && bad->screen_height == 0);  // not a screen point: a raw rotator view
+    CHECK(views[0].screen_width == 0);
+}
+
 void test_load_function_view() {
     std::puts("profile: Function= turns the view through a reflected function, Property= still reads it");
     const std::wstring path = temp_profile(L"function");
@@ -755,25 +794,25 @@ void test_add_view_rejects_empty() {
 
 void test_pause_conditions() {
     std::puts("profile: PauseConditions= parses each form and rejects bad ones");
-    PauseCondition c;
+    Condition c;
     std::string error;
-    CHECK(parse_pause_condition(" Pawn.CharacterMovement.MovementMode == 5 ", c, error));
+    CHECK(parse_condition(" Pawn.CharacterMovement.MovementMode == 5 ", c, error));
     CHECK(c.text == "Pawn.CharacterMovement.MovementMode == 5" && c.property == "MovementMode");
     CHECK(c.object.size() == 2 && c.object[0] == "Pawn" && c.object[1] == "CharacterMovement");
-    CHECK(c.op == PauseCondition::Op::Eq && c.value == 5 && c.holds(5) && !c.holds(1));
-    CHECK(parse_pause_condition("PC.bCinematicMode", c, error));
-    CHECK(c.op == PauseCondition::Op::NonZero && c.object.size() == 1 && c.holds(1) && !c.holds(0));
-    CHECK(parse_pause_condition("Camera.@BlendCam_C.Weight>=0.5", c, error));
-    CHECK(c.op == PauseCondition::Op::Ge && c.object.size() == 2 && c.object[1] == "@BlendCam_C" && c.holds(0.5) && !c.holds(0.4));
-    CHECK(parse_pause_condition("ViewTarget.bHidden != TRUE", c, error) && c.op == PauseCondition::Op::Ne && c.value == 1);
-    CHECK(parse_pause_condition("Pawn.Mode<2", c, error) && c.op == PauseCondition::Op::Lt && c.holds(1) && !c.holds(2));
-    CHECK(parse_pause_condition("Pawn.Mode<=2", c, error) && c.op == PauseCondition::Op::Le && c.holds(2));
-    CHECK(parse_pause_condition("Pawn.Mode > -1", c, error) && c.op == PauseCondition::Op::Gt && c.holds(0));
-    CHECK(parse_pause_condition("Pawn.bFlag==false", c, error) && c.value == 0 && c.holds(0));
+    CHECK(c.op == Condition::Op::Eq && c.value == 5 && c.holds(5) && !c.holds(1));
+    CHECK(parse_condition("PC.bCinematicMode", c, error));
+    CHECK(c.op == Condition::Op::NonZero && c.object.size() == 1 && c.holds(1) && !c.holds(0));
+    CHECK(parse_condition("Camera.@BlendCam_C.Weight>=0.5", c, error));
+    CHECK(c.op == Condition::Op::Ge && c.object.size() == 2 && c.object[1] == "@BlendCam_C" && c.holds(0.5) && !c.holds(0.4));
+    CHECK(parse_condition("ViewTarget.bHidden != TRUE", c, error) && c.op == Condition::Op::Ne && c.value == 1);
+    CHECK(parse_condition("Pawn.Mode<2", c, error) && c.op == Condition::Op::Lt && c.holds(1) && !c.holds(2));
+    CHECK(parse_condition("Pawn.Mode<=2", c, error) && c.op == Condition::Op::Le && c.holds(2));
+    CHECK(parse_condition("Pawn.Mode > -1", c, error) && c.op == Condition::Op::Gt && c.holds(0));
+    CHECK(parse_condition("Pawn.bFlag==false", c, error) && c.value == 0 && c.holds(0));
     for (const char* bad : {"", "   ", "Pawn", "Pawn.", ".Pawn.X", "Pawn..X", "Actor.X", "Pawn.X = 5", "Pawn.X ==",
                             "Pawn.X == five", "Pawn.X == 5abc", "Pawn.X Y", "Pawn.@Class", "Pawn.X =< 5", "Pawn.X !5"}) {
         error.clear();
-        const bool ok = parse_pause_condition(bad, c, error);
+        const bool ok = parse_condition(bad, c, error);
         CHECK(!ok && !error.empty());
         if (ok) std::printf("  accepted '%s'\n", bad);
     }
@@ -781,7 +820,7 @@ void test_pause_conditions() {
     std::puts("profile: PauseConditions= list from [Gyro4All], else [GyroUE]; bad items skipped");
     const std::wstring path = temp_profile(L"pause_conditions");
     write_file(path, "[Gyro4All]\r\nPauseConditions=Pawn.CharacterMovement.MovementMode==5, Actor.X, Pawn.IsInScene\r\n");
-    std::vector<PauseCondition> list = load_pause_conditions(path);
+    std::vector<Condition> list = load_pause_conditions(path);
     CHECK(list.size() == 2 && list[0].value == 5 && list[1].property == "IsInScene");
     write_file(path, "[GyroUE]\r\nPauseConditions=PC.bCinematicMode\r\n");
     list = load_pause_conditions(path);
@@ -2158,6 +2197,8 @@ int main() {
     test_load_missing();
     test_load_views();
     test_load_active_list_views();
+    test_load_direction_view();
+    test_load_screen_point_view();
     test_load_function_view();
     test_update_rotation_shape();
     test_process_event_shape();

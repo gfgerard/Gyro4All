@@ -37,6 +37,13 @@ void load_view_extras(View& v, const std::wstring& path, const wchar_t* section)
     v.world_rotation = GetPrivateProfileIntW(section, L"WorldRotation", 0, path.c_str()) != 0;
     v.function = ini(path, section, L"Function");
     v.matrix = GetPrivateProfileIntW(section, L"Matrix", 0, path.c_str()) != 0;
+    v.direction = GetPrivateProfileIntW(section, L"Direction", 0, path.c_str()) != 0;
+    const std::vector<std::string> screen = split(ini(path, section, L"ScreenPoint"), ',');
+    if (!screen.empty()) {
+        v.screen_width = std::strtod(screen[0].c_str(), nullptr);
+        v.screen_height = screen.size() > 1 ? std::strtod(screen[1].c_str(), nullptr) : v.screen_width;
+        if (!(v.screen_width > 0 && v.screen_height > 0)) v.screen_width = v.screen_height = 0;
+    }
     const std::string active = ini(path, section, L"ActiveList"), output = ini(path, section, L"OutputMatrix");
     if (!active.empty()) v.active_list = int32_t(std::strtol(active.c_str(), nullptr, 0));
     v.active_skip = split(ini(path, section, L"ActiveListSkip"), '|');
@@ -52,6 +59,7 @@ void load_view_extras(View& v, const std::wstring& path, const wchar_t* section)
     v.watch = split(ini(path, section, L"Watch"), ',');
     v.watched_values.assign(v.watch.size(), std::string{});
     v.dump = GetPrivateProfileIntW(section, L"Dump", 0, path.c_str()) != 0;
+    v.control_yaw = GetPrivateProfileIntW(section, L"ControlYaw", 0, path.c_str()) != 0;
     v.recenter = GetPrivateProfileIntW(section, L"Recenter", 1, path.c_str()) != 0;
     v.recenter_pitch = std::atof(ini(path, section, L"RecenterPitch", L"0").c_str());
     // The unzoomed FOV for zoom compensation: the view's own ZoomReferenceFOV= wins; else the generic [Gyro4All]
@@ -114,11 +122,15 @@ std::vector<View> load_views(const std::wstring& path) {
         v.property = ini(path, section.c_str(), L"Property");
         v.parent = GetPrivateProfileIntW(section.c_str(), L"Parent", 1, path.c_str());
         load_view_extras(v, path, section.c_str());
+        const std::string when = ini(path, section.c_str(), L"ActiveWhen");
+        std::string error;
+        if (!when.empty() && !(v.has_active_when = parse_condition(when, v.active_when, error)))
+            log("profile: view %s ActiveWhen '%s' ignored: %s", v.key.c_str(), when.c_str(), error.c_str());
         const bool duplicate_id = std::any_of(views.begin(), views.end(), [&](const View& o) { return o.id == v.id; });
-        if (v.id <= 1 || duplicate_id || (v.view_target_class.empty() && !v.match_camera && v.active_list < 0) ||
-            (v.property.empty() && v.offsets.empty())) {
-            log("profile: view %s ignored (needs a unique Id > 1, ViewTargetClass, Match=Camera or ActiveList, and "
-                "Property or Offsets)", v.key.c_str());
+        const bool selector = !v.view_target_class.empty() || v.match_camera || v.active_list >= 0 || v.has_active_when;
+        if (v.id <= 1 || duplicate_id || !selector || (v.property.empty() && v.offsets.empty())) {
+            log("profile: view %s ignored (needs a unique Id > 1, ViewTargetClass, Match=Camera, ActiveList or "
+                "ActiveWhen, and Property or Offsets)", v.key.c_str());
             continue;
         }
         views.push_back(std::move(v));
@@ -129,8 +141,12 @@ std::vector<View> load_views(const std::wstring& path) {
         for (int32_t off : v.offsets) where += (where.empty() ? "raw +0x" : ",0x") + std::format("{:X}", off);
         if (where.empty()) where = v.property.empty() ? "ControlRotation" : v.property;
         else if (v.matrix) where += " (rotation matrices)";
+        else if (v.direction) where += " (direction vectors)";
+        else if (v.screen_width > 0) where += std::format(" (screen points, {:g}x{:g} degrees)", v.screen_width, v.screen_height);
         if (v.output_matrix >= 0) where += std::format(" (output +0x{:X})", v.output_matrix);
         if (v.active_list >= 0) where += std::format(" (active while first in the list at +0x{:X})", v.active_list);
+        if (v.has_active_when) where += " (active while " + v.active_when.text + ")";
+        if (v.control_yaw) where += " (ControlRotation yaw follows)";
         if (v.world_rotation) where += v.offsets.empty() ? " (WorldRotation)" : " (WorldRotation ignored: needs Property=)";
         if (!v.function.empty()) where += " (turned through " + v.function + ")";
         if (v.has_pitch_rotation()) {
@@ -244,7 +260,7 @@ bool set_pitch_rotation(const std::wstring& path, const std::string& key, const 
            WritePrivateProfileStringW(s, L"PitchView", nullptr, p);
 }
 
-bool PauseCondition::holds(double v) const {
+bool Condition::holds(double v) const {
     switch (op) {
         case Op::NonZero: return v != 0;
         case Op::Eq: return v == value;
@@ -257,14 +273,14 @@ bool PauseCondition::holds(double v) const {
     return false;
 }
 
-bool parse_pause_condition(const std::string& text, PauseCondition& out, std::string& error) {
+bool parse_condition(const std::string& text, Condition& out, std::string& error) {
     const auto trim = [](std::string s) {
         const auto blank = [](char c) { return c == ' ' || c == '\t'; };
         while (!s.empty() && blank(s.front())) s.erase(s.begin());
         while (!s.empty() && blank(s.back())) s.pop_back();
         return s;
     };
-    out = PauseCondition{};
+    out = Condition{};
     out.text = trim(text);
     if (out.text.empty()) return error = "empty", false;
     // The operator: the first of < > = ! in the text; two characters when followed by '='.
@@ -273,12 +289,12 @@ bool parse_pause_condition(const std::string& text, PauseCondition& out, std::st
     if (at != std::string::npos) {
         const bool two = at + 1 < out.text.size() && out.text[at + 1] == '=';
         const std::string op = out.text.substr(at, two ? 2 : 1);
-        if (op == "==") out.op = PauseCondition::Op::Eq;
-        else if (op == "!=") out.op = PauseCondition::Op::Ne;
-        else if (op == "<") out.op = PauseCondition::Op::Lt;
-        else if (op == "<=") out.op = PauseCondition::Op::Le;
-        else if (op == ">") out.op = PauseCondition::Op::Gt;
-        else if (op == ">=") out.op = PauseCondition::Op::Ge;
+        if (op == "==") out.op = Condition::Op::Eq;
+        else if (op == "!=") out.op = Condition::Op::Ne;
+        else if (op == "<") out.op = Condition::Op::Lt;
+        else if (op == "<=") out.op = Condition::Op::Le;
+        else if (op == ">") out.op = Condition::Op::Gt;
+        else if (op == ">=") out.op = Condition::Op::Ge;
         else return error = "unknown operator '" + op + "' (== != < <= > >=)", false;
         const std::string value = trim(out.text.substr(at + op.size()));
         std::string lower = value;
@@ -310,14 +326,14 @@ bool parse_pause_condition(const std::string& text, PauseCondition& out, std::st
     return true;
 }
 
-std::vector<PauseCondition> load_pause_conditions(const std::wstring& path) {
-    std::vector<PauseCondition> out;
+std::vector<Condition> load_pause_conditions(const std::wstring& path) {
+    std::vector<Condition> out;
     std::wstring list;
     if (!settings::read(path, L"PauseConditions", list)) return out;
     for (const std::string& item : split(narrow(list), ',')) {
-        PauseCondition c;
+        Condition c;
         std::string error;
-        if (parse_pause_condition(item, c, error)) {
+        if (parse_condition(item, c, error)) {
             log("profile: pause condition '%s'", c.text.c_str());
             out.push_back(std::move(c));
         } else {

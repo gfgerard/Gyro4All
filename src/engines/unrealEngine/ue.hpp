@@ -55,6 +55,15 @@ bool read_rotator(uintptr_t address, int32_t element_size, double& pitch, double
 // roll kept; pitch stays within +-89 degrees.
 bool read_matrix_rotation(uintptr_t address, double& pitch, double& yaw, double& roll);
 bool add_matrix_rotation(uintptr_t address, double pitch, double yaw);
+// A float forward vector (x, y, z), for cameras that aim along a stored direction (Stellar Blade's aim). Turning
+// rotates it, length kept; pitch stays within +-89 degrees. Roll reads as 0.
+bool read_direction_rotation(uintptr_t address, double& pitch, double& yaw, double& roll);
+bool add_direction_rotation(uintptr_t address, double pitch, double yaw);
+// A float screen point (x, y), each 0..1 of the screen from the top left, turned as if the screen spanned `width` by
+// `height` degrees (Stellar Blade's cover minigame crosshair). Yaw moves x, pitch moves y (up = smaller); both stay in
+// 0..1. Reads as degrees from the centre, roll 0.
+bool read_screen_point(uintptr_t address, double width, double height, double& pitch, double& yaw, double& roll);
+bool add_screen_point(uintptr_t address, double width, double height, double pitch, double yaw);
 
 // Scene components with absolute rotation (their RelativeRotation is the world rotation) keep that rotation twice:
 // in RelativeRotation and in the non-reflected ComponentToWorld transform, which is what game code reads back

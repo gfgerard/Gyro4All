@@ -8,6 +8,31 @@
 
 namespace gyro4all::unreal {
 
+// A state of the game read from a reflected property: PauseConditions= ([Gyro4All] of the profile, states that count as
+// a pause, for scripted scenes the engine can't tell from play; the gyro pauses while any holds) and a view's
+// ActiveWhen=. For example:
+//   PauseConditions=Pawn.CharacterMovement.MovementMode==5, PC.bCinematicMode
+// Each is Root.Sub...Property (Root = PC, Pawn, Camera or ViewTarget, steps as in Object=), alone (the value is true or
+// non-zero) or followed by == != < <= > >= and a number, true or false. The property is a bool, a number, a byte or
+// enum (its value as a number) or an object (1 when set).
+struct Condition {
+    enum class Op { NonZero, Eq, Ne, Lt, Le, Gt, Ge };
+    std::string text;                 // as written (trimmed), for the log
+    std::vector<std::string> object;  // Root.Sub... (the object holding the property)
+    std::string property;
+    Op op = Op::NonZero;
+    double value = 0;
+    // runtime (ue_engine.cpp)
+    uintptr_t missing_class = 0;  // root class whose path couldn't be read, logged once per class
+    bool held = false;
+
+    bool holds(double v) const;
+};
+
+// Parses one condition. False with `error` set for an empty text, a path without a root and a property, an unknown
+// root, a character a path can't have, a missing value or one that isn't a number, true or false.
+bool parse_condition(const std::string& text, Condition& out, std::string& error);
+
 // A gameplay view from the game profile. The default view (id 1) turns the PlayerController's
 // ControlRotation; other views add the deltas to a rotator property of the camera view target.
 // Any view can name another object (Object=Root.Sub..., Root = PC, Pawn, Camera or ViewTarget; each Sub is an
@@ -27,6 +52,15 @@ struct View {
     // Matrix=1: each offset is a float rotation matrix (FMatrix rows forward, right, up) instead of a rotator, for C++
     // cameras that keep the view that way (Days Gone: Camera.@BendPlayerCamFollow_C +0x120). RotatorSize is ignored.
     bool matrix = false;
+    // Direction=1: each offset is a float forward vector (x, y, z) instead of a rotator: pitch and yaw are its angles, no
+    // roll. For cameras that aim along a stored direction (Stellar Blade's aim: the character's +0x1534). RotatorSize is
+    // ignored.
+    bool direction = false;
+    // ScreenPoint=<degrees across>,<degrees down>: each offset is a float screen point (x, y, 0..1 from the top left)
+    // instead of a rotator, moved as if the screen spanned that many degrees; for crosshairs that move on a fixed
+    // camera (Stellar Blade's cover minigame: the character's +0x159C). 0 = not a screen point. The camera isn't
+    // expected to follow it.
+    double screen_width = 0, screen_height = 0;
     // ActiveList=<offset> (with an Object= ending in @Class, where Class may list several: @A|B|C): the object before
     // that step keeps a TArray<UObject*> at that offset, newest first, whose first entry (past ActiveListSkip= classes)
     // is the active one. The view is active while that entry is of one of its classes, and turns it. For games with one
@@ -76,6 +110,15 @@ struct View {
     double recenter_pitch = 0;
     // Unzoomed horizontal FOV used by zoom compensation; 0 reads PlayerCameraManager.DefaultFOV.
     double zoom_reference_fov = 0;
+    // ActiveWhen=<condition> (Condition syntax): the view is used while it holds, ahead of ViewTargetClass and
+    // Match=Camera views, from the frame it starts holding. For a mode the game flags (Stellar Blade's aim:
+    // ActiveWhen=Pawn.@SBCameraComponent.bCurrentCameraTPSMode).
+    bool has_active_when = false;
+    Condition active_when;
+    // ControlYaw=1: after each gyro turn, PC.ControlRotation's yaw is set to this view's yaw, for cameras turned through
+    // another rotation while the character moves along ControlRotation, which the game syncs from the camera only on
+    // stick input (Stellar Blade's boom).
+    bool control_yaw = false;
     // Diagnostics: log these properties whenever they change; Dump=1 logs all properties once.
     std::vector<std::string> watch;
     bool dump = false, dumped = false;
@@ -89,32 +132,8 @@ bool has_views(const std::wstring& path);
 // the default view alone.
 std::vector<View> load_views(const std::wstring& path);
 
-// PauseConditions= ([Gyro4All] of the profile): states of the game that count as a pause (the gyro stops, as the stick
-// does), for scripted scenes the engine can't tell from play. A comma-separated list; the gyro pauses while any holds:
-//   PauseConditions=Pawn.CharacterMovement.MovementMode==5, PC.bCinematicMode
-// Each is Root.Sub...Property (Root = PC, Pawn, Camera or ViewTarget, steps as in Object=), alone (the value is true or
-// non-zero) or followed by == != < <= > >= and a number, true or false. The property is a bool, a number, a byte or
-// enum (its value as a number) or an object (1 when set).
-struct PauseCondition {
-    enum class Op { NonZero, Eq, Ne, Lt, Le, Gt, Ge };
-    std::string text;                 // as written (trimmed), for the log
-    std::vector<std::string> object;  // Root.Sub... (the object holding the property)
-    std::string property;
-    Op op = Op::NonZero;
-    double value = 0;
-    // runtime (ue_engine.cpp)
-    uintptr_t missing_class = 0;  // root class whose path couldn't be read, logged once per class
-    bool held = false;
-
-    bool holds(double v) const;
-};
-
-// Parses one condition. False with `error` set for an empty text, a path without a root and a property, an unknown
-// root, a character a path can't have, a missing value or one that isn't a number, true or false.
-bool parse_pause_condition(const std::string& text, PauseCondition& out, std::string& error);
-
 // The profile's PauseConditions= (invalid ones are logged and skipped). None when the profile has none.
-std::vector<PauseCondition> load_pause_conditions(const std::wstring& path);
+std::vector<Condition> load_pause_conditions(const std::wstring& path);
 
 // A rotation the camera probe verified, to add to the profile as a Match=Camera view.
 struct LearnedView {

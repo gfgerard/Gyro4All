@@ -3753,3 +3753,99 @@ counted as zoom cameras, the reference followed the rendered FOV down and the gy
 cam+0x80 and cam+0x150 = the current FOV, cam+0xddc = 51.988 constant hip and aiming (the camera's unzoomed FOV),
 cam+0xde8 = 25.0 (the iron-sight target). Change: for the first-person camera the reference is cam+0xddc. Builds, 1469
 checks pass. User: iron sight now slows the gyro (DualSense as XInput, no Steam Input).
+
+## 2026-11-22 Stellar Blade (UE 4.26, Denuvo): aim (L2) camera not found yet; findings and dead ends
+
+- Exploration works (profile `profiles/SB-Win64-Shipping.ini`: `Pawn.CameraBoom.RelativeRotation`, `WorldRotation=1`, `Match=Camera`). In aim (`SBCameraComponent.bCurrentCameraTPSMode` = true at +0xAF0, FOV ~45, `CurrentArmLength` falls 395 -> 140) the camera ignores the boom.
+- Probe in aim (8 captures): every reflected rotation that follows the camera is an output the game rewrites (`PC.ControlRotation`, `FollowCamera.CurrentCameraRotation` +0xA0C, `CurrentDesiredViewRotation` +0xAE4, POV); no input candidate.
+- Exe is Denuvo-style (sections `.xcode .xtext .xtls .arch .v38`): no debugger; `guided.py --exe-only` finds no view vector in static data; the heap run needs ~2x the game's working set (22 GB) and froze the game on a 31 GB machine (stopped).
+- **Dead ends:** `Match=Camera` view `PC.RotationInput` (UpdateRotation hook): "ignored by the camera" within 0.2 s in aim. Raw rotators `FollowCamera+0x9FC` and `+0xAD4` from one probe capture are NOT rotators: +0xAD4 overlaps the pointer `PlayerSlopeControlAlphaBlendCurve` (+0xAD0); writing floats there corrupted it and crashed the game (access violation on a worker thread). Check raw candidates against the reflected layout (`Dump=1`) before writing them. `WriteWatch=r:ri+24`: the Raw Input buffer is reused heap memory; every hit was unrelated code.
+- Read from the live game (read-only): `SBNetworkPlayerController::UpdateRotation` (vtable[366]) is stock UE: RotationInput -> `PlayerCameraManager::ProcessViewRotation` (vtable[249]: modifier list at camera+0x2970/+0x2978, then ViewRotation += DeltaRot) -> `SetControlRotation`. The modifier list holds only `CameraModifier_CameraShake` (not changed by aiming; tested once while aiming).
+- `SBCameraComponent` writes `CurrentDesiredViewLocation/Rotation` (+0xAD8/+0xAE4) from a big function at exe+0x23A5760 (called from exe+0x23A56F0, guarded by `bSBPlayerCamera` +0xB5C). The rotation is built with look-at / vector-to-rotator math (exe+0x1428B2300 area) from positions, so no stored yaw/pitch exists there; it does not read `bCurrentCameraTPSMode`. The TPS aim branch (users of +0xAF0) is the next thing to read.
+- Next: find the code that reads `bCurrentCameraTPSMode` (+0xAF0) and what direction/target it uses in aim; or follow the pad (libScePad reads) forward.
+
+## 2026-11-22 Stellar Blade: aim (L2) camera found: the character's aim direction vector (`Direction=1` views)
+
+- `SBCameraComponent+0xAF0` (`bCurrentCameraTPSMode`) is a cached copy of the character's byte `pawn+0x1528` (1 while
+  aiming), compared at exe+0x23ACC53 to detect the camera-mode change (exe+0x23ACB20).
+- WriteWatch (no debugger, no reaction from the protection) on `PC.ControlRotation.Yaw` (pc+0x334): one writer, the
+  stock `SetControlRotation` (exe+0x4151D0E, writes only on change). Execute watch on its call at exe+0x206458B (the
+  character's Tick, fn exe+0x205ED33): 0 calls in exploration, ~60/s in aim only. There the character sets
+  ControlRotation (pitch 0) from the yaw of `pawn+0x5B8` (the `SBCameraComponent`) `+0xA0C` `CurrentCameraRotation`
+  (getter exe+0x202C9D0), every frame: that is why ControlRotation is an output in aim.
+- Read watch on pc+0x334 in aim: only `SetControlRotation` reads it; the camera never reads ControlRotation in aim.
+- `CurrentCameraRotation` has one writer, exe+0x23A8395 (end of the camera function exe+0x23A5760): a copy of the
+  final POV rotation it builds.
+- Read-only sampling in aim (comp, pawn, PC, PCM and one level of their pointers) against the camera angles, with
+  direction-vector and quaternion references too: `pawn+0x1534` (float x, y, z, unit) is the aim direction, equal to
+  the camera's in aim; an identical copy at `pawn+0x154C`. Not reflected. (`pawn+0x1590/0x1594` correlated with yaw
+  but are a world position.)
+- **Write test (proof):** rotating `pawn+0x1534` and `+0x154C` by +-15 degrees of yaw while aiming moved the camera by
+  exactly +-15 and it stayed, 6 of 6 (pad still).
+- Gyro4All: new raw-offset format `Direction=1` (each offset a float forward vector; pitch/yaw from it, length kept,
+  pitch clamped to +-89; `ue::read_direction_rotation`/`add_direction_rotation`), and the three matrix/rotator
+  ternaries in `ue_engine.cpp` folded into `read_offset_rotation`/`add_offset_rotation`. Profile: `[View.Aim]`
+  `Match=Camera`, `Object=Pawn`, `Offsets=0x1534,0x154C`, `Direction=1` (replaced by `ActiveWhen=` below).
+- Follow-up: `Match=Camera` only switched to the aim view after ~2 degrees of ignored gyro, a delay at every L2. New
+  view key `ActiveWhen=<condition>` (the `PauseConditions=` syntax; `PauseCondition` renamed `Condition`, its
+  evaluation shared as `read_condition`): the view is used from the frame the condition holds, ahead of
+  ViewTargetClass and Match=Camera views. Profile: `ActiveWhen=Pawn.@SBCameraComponent.bCurrentCameraTPSMode`
+  (`Match=Camera` dropped from the aim view). **Works in game** (user-confirmed): the log switches `view: Aim` /
+  `view: Exploration` on every L2 press and release with no delay, and gyro aim turns the camera. DualSense
+  (054C:0CE6, 64-byte reports: USB); Steam Input state not recorded.
+- Report from a user (gyro always on, exploration): "depending where you look around the character with gyro, the
+  character's movement can get erratic". Not reproduced here (DualSense USB). Read-only sampling in exploration:
+  `PC.ControlRotation` has pitch 0 and its yaw is set from the camera's in steps, so while the gyro turns the boom the
+  two drift apart by up to ~28 degrees until the game catches up (movement likely follows ControlRotation). Tried
+  live, both don't turn the exploration camera: `Property=RotationInput` and the aim vector `pawn+0x1534`
+  (`Direction=1`). A test script copying the camera yaw into ControlRotation (gap > 0.5 degrees, 477 corrections, max
+  gap 7) changed nothing the user could see either way. Open: needs the reporter's details (what "erratic" looks like,
+  which version/profile, gyro settings) before a fix.
+- Exploration candidates checked again (read-only sampling while turning with the stick, gyro off): every rotation
+  that follows the camera moves in the same 50 ms sample (no leader): `SBCameraComponent` +0x1C0/+0xA0C/+0xAE4, the
+  boom's +0x14C/+0x1C4/+0x2C4, PCM +0x1000/+0x1CF0/+0x2340 and `PC.ControlRotation`. With the stick, ControlRotation
+  stays within 2.4 degrees of the camera; with the gyro on the boom it falls up to ~28 behind until it catches up.
+  Live tests of the exploration view, none turns the camera: `PC.ControlRotation`, `PC.RotationInput`,
+  `pawn+0x1534` (`Direction=1`). The boom (probe's choice) stays the only working input; the likely fix for the
+  report is to bring ControlRotation's yaw to the camera's after gyro turns (not built yet).
+- Built: view key `ControlYaw=1` (after each gyro turn, `PC.ControlRotation`'s yaw is set to the view's yaw).
+  Profile: exploration view `ControlYaw=1`. Builds, unit tests pass; in game it needs the reporter's check, since
+  the erratic movement was never reproduced here.
+
+## 2026-11-22 Stellar Blade: the crash reporter `crs-handler.exe` took the session (no gyro, no F10 panel)
+
+- Symptom: some launches ran no mod in the game (no gyro, F10 panel never opens). `Gyro4All.log` started with
+  `Gyro4All 1.12.0 in ...\crs-handler.exe` (profile `crs-handler.ini` not found). The game starts its crash reporter
+  `crs-handler.exe` (and `crs-uploader.exe`, same folder) in the same second as itself; whichever loads the proxy first
+  wins the session mutex. The launcher takeover window couldn't save it: the game's `take_session_over` ran before
+  the reporter had created the shared session, so it stayed a plain proxy. A race: other launches worked.
+- Change: `is_crash_reporter` (`src/core/dllmain.cpp`) also matches `crs-handler.exe` and `crs-uploader.exe`, so they
+  never take the session (as `crashpad_handler.exe`). Built and deployed; not yet verified in game.
+
+## 2026-11-22 Stellar Blade: cover shooting minigame (2D crosshair) source found; no gyro there yet
+
+- Minigame: under cover the camera stays fixed (view target an `SBCameraActor` instance, e.g.
+  `NKGame_City_SBCameraActor_Center`) and the right stick moves a screen crosshair; L2 aims at it. No gyro today:
+  `bCurrentCameraTPSMode` stays off (the Aim view never activates) and the exploration view's CameraBoom writes are
+  ignored ("camera moved only 7 of 230 degrees").
+- Probe F7/F8 diff (crosshair moved, no camera turn): `Pawn.NikkeTPSPinScreenPoint` X/Y (0..1 fraction of the screen),
+  `Pawn.CameraVolumeBasedLastScreenPos` X/Y (pixels), AnimBP `AimXY` / ControlRig `TPSAimXY` (-1..1 aim pose).
+- Source, write-tested in game (DualSense, L2 held): float pair at `pawn+0x159C` (X, 0 = left) and `pawn+0x15A0`
+  (Y, 0 = top); writes are kept and the crosshair jumps (X 0.06 -> 0.75 moved right, Y 0.53 -> 0.25 moved up). Likely
+  the reflected `NikkeTPSPinScreenPoint` (same values in the diff); offset not yet confirmed by reflection.
+- Dead ends: `pawn+0xE78` (first guess from a value scan) is a list of timed entries at `pawn+0xE70` (48-byte
+  records, count at `pawn+0xE98`; writers exe+0x2027692, exe+0x2084432 seen with WriteWatch), not the crosshair.
+  The pixel copy (`pawn+0xE48` X) is rewritten every frame: a copy.
+- Next: a view kind that adds the gyro to a 2D screen point (yaw to X, pitch to Y, scaled, clamped 0..1), active in
+  this minigame (condition still to find).
+- Reflection (pawn dump): the pair is `SBCharacter.NikkeTPSPinScreenPoint` @0x159C (Vector2D). In the minigame
+  `TPSModeType` (@0x1531, byte) = 2 and `bTPSMode` (@0x1528) = 1 throughout; normal L2 aim's `TPSModeType` not yet
+  read (must not be 2). The minigame camera's vertical FOV is 46.7 (about 77 horizontal at 16:9).
+- Built: view key `ScreenPoint=<degrees across>,<degrees down>` (offsets are float screen points; yaw moves x, pitch
+  moves y, kept in 0..1; no camera follow check for such views, so no AutoProbe there). Profile: `[View.Range]`
+  `ActiveWhen=Pawn.TPSModeType==2`, `Offsets=0x159C`, `ScreenPoint=80,46`, listed before Aim. Unit tests pass.
+- First in-game run: the view never turned on ("view condition 'Pawn.TPSModeType==2' can't be read"). Cause:
+  `find_field` stopped after 400 properties per class and SBCharacter has more (`TPSModeType` was past them; the
+  earlier `Watch=` of those names logged nothing for the same reason). Fix: limit 8000 for property lookups (400 kept
+  for the layout guess). Works in game: L2 in the cover minigame moves the crosshair with the gyro (user report,
+  DualSense). Spans `ScreenPoint=80,46` untuned; normal L2 aim's `TPSModeType` still not read.

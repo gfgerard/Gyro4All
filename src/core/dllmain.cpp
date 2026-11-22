@@ -162,7 +162,9 @@ std::wstring g_install_dir;  // lower case
 // Google's crashpad_handler.exe): never a game, so they neither take the session nor run Gyro4All.
 bool is_crash_reporter(const std::wstring& exe_path) {
     const std::wstring name = lower(exe_path.substr(exe_path.find_last_of(L"\\/") + 1));
-    return name == L"crashpad_handler.exe";
+    // crs-handler.exe / crs-uploader.exe: Stellar Blade's crash reporter, which the game starts at launch; it can win
+    // the session mutex race against the game, which then stays a plain proxy.
+    return name == L"crashpad_handler.exe" || name == L"crs-handler.exe" || name == L"crs-uploader.exe";
 }
 gyro4all::Engine* g_session_engine = nullptr;  // this process's engine, which tells its helper exes apart
 using CreateProcessA_t = BOOL(WINAPI*)(LPCSTR, LPSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD, LPVOID,

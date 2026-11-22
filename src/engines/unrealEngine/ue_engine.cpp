@@ -38,7 +38,7 @@ Scene g_scene;
 View* g_view = nullptr;
 View* g_base = nullptr;              // the view for the view target (g_view may be one of its Match=Camera views)
 CameraMatch g_match;
-std::vector<PauseCondition> g_pause_conditions;  // the profile's PauseConditions= (read_scene)
+std::vector<Condition> g_pause_conditions;  // the profile's PauseConditions= (read_scene)
 
 FILETIME profile_stamp() {
     WIN32_FILE_ATTRIBUTE_DATA data{};
@@ -51,6 +51,27 @@ void load_profile() {
     g_views = load_views(settings::profile_path());
     g_pause_conditions = load_pause_conditions(settings::profile_path());
     g_profile_time = profile_stamp();
+}
+
+// Reads a condition (PauseConditions=, a view's ActiveWhen=) into c.held. A path or property that can't be read leaves it
+// off, logged once per class of its root (a pawn without the path, on foot or in a vehicle): `off` says what that means.
+void read_condition(Condition& c, const Scene& s, const char* kind, const char* off) {
+    const std::string& r = c.object.front();
+    const ue::Obj root = r == "PC" ? s.pc : r == "Pawn" ? s.pawn : r == "Camera" ? s.camera : s.view_target;
+    const ue::Obj o = root ? resolve_path(c.object, s) : 0;
+    double value = 0;
+    if (o && ue::read_number(o, c.property.c_str(), value)) {
+        c.missing_class = 0;
+        c.held = c.holds(value);
+        return;
+    }
+    c.held = false;
+    const ue::Obj root_class = root ? ue::class_of(root) : 0;
+    if (root && root_class != c.missing_class) {
+        c.missing_class = root_class;
+        log("scene: %s '%s' can't be read from %s (%s): %s", kind, c.text.c_str(), ue::name_of(root_class).c_str(),
+            o ? "no such number, bool or object property" : "path not found", off);
+    }
 }
 
 // The profile file changed (edited by hand, or a view added by the probe): read its views again and use them at once.
@@ -125,25 +146,9 @@ Scene read_scene() {
     // - the profile's PauseConditions= (Dead Island 2: its in-engine scenes fly the character, MOVE_Flying; a generic
     //   MOVE_Flying rule would stop the gyro in games whose player really flies).
     const bool cutscene = ue::read_bool(s.pawn, "IsInActiveCutscene", false);
-    const PauseCondition* holding = nullptr;
-    for (PauseCondition& c : g_pause_conditions) {
-        const std::string& r = c.object.front();
-        const ue::Obj root = r == "PC" ? s.pc : r == "Pawn" ? s.pawn : r == "Camera" ? s.camera : s.view_target;
-        const ue::Obj o = root ? resolve_path(c.object, s) : 0;
-        double value = 0;
-        if (o && ue::read_number(o, c.property.c_str(), value)) {
-            c.missing_class = 0;
-            c.held = c.holds(value);
-        } else {
-            c.held = false;
-            // Logged once per class of the root: a pawn without the path (on foot / in a vehicle) leaves it off.
-            const ue::Obj root_class = root ? ue::class_of(root) : 0;
-            if (root && root_class != c.missing_class) {
-                c.missing_class = root_class;
-                log("scene: pause condition '%s' can't be read from %s (%s): it doesn't pause there", c.text.c_str(),
-                    ue::name_of(root_class).c_str(), o ? "no such number, bool or object property" : "path not found");
-            }
-        }
+    const Condition* holding = nullptr;
+    for (Condition& c : g_pause_conditions) {
+        read_condition(c, s, "pause condition", "it doesn't pause there");
         if (c.held && !holding) holding = &c;
     }
     static int last_scripted = 0;  // 0 none, 1 cutscene, 2 pause condition
@@ -199,13 +204,22 @@ View* listed_view(const Scene& s) {
     return nullptr;
 }
 
-// The view for the camera's view target: the ActiveList view of the active camera, a ViewTargetClass view (not
-// Match=Camera), else the default one (none when the default is an ActiveList view and the active camera isn't its).
+// The view for the camera's view target: the ActiveList view of the active camera, an ActiveWhen view whose condition
+// holds (and whose ViewTargetClass, if any, matches), a ViewTargetClass view (not Match=Camera), else the default one
+// (none when the default is an ActiveList view and the active camera isn't its).
 View* base_view(const Scene& s) {
     if (View* v = listed_view(s)) return v;
+    for (View& v : g_views) {
+        if (!v.has_active_when) continue;
+        read_condition(v.active_when, s, "view condition", "that view stays off");
+        if (v.active_when.held &&
+            (v.view_target_class.empty() || (s.view_target && ue::is_a(s.view_target, v.view_target_class.c_str()))))
+            return &v;
+    }
     if (s.view_target) {
         for (View& v : g_views)
-            if (!v.match_camera && !v.view_target_class.empty() && ue::is_a(s.view_target, v.view_target_class.c_str()))
+            if (!v.match_camera && !v.has_active_when && !v.view_target_class.empty() &&
+                ue::is_a(s.view_target, v.view_target_class.c_str()))
                 return &v;
     }
     // Main menus usually possess a placeholder DefaultPawn (SpectatorPawn derives from it), or a game's own menu pawn
@@ -217,7 +231,7 @@ View* base_view(const Scene& s) {
 // The view the gyro turns: the base view, or the Match=Camera view for the same view target that the camera follows
 // now (core/camera_match.hpp).
 View* active_view(const Scene& s, View* base) {
-    if (!base) return nullptr;
+    if (!base || base->has_active_when) return base;  // the game's own flag says which camera it is
     std::vector<uint32_t> members = {base->id};
     for (const View& v : g_views)
         if (v.match_camera && (v.view_target_class.empty() || ue::is_a(s.view_target, v.view_target_class.c_str())))
@@ -258,9 +272,24 @@ ue::Obj resolve_part(ue::Obj outer, const std::string& name) {
     return g_sub_cache.back().found;
 }
 
-// A profile object path: Root (PC, Pawn, Camera, ViewTarget) then steps (see resolve_part).
+// A raw offset's rotation in the view's format (Matrix=1, Direction=1, ScreenPoint=, else a rotator of RotatorSize).
+bool read_offset_rotation(const View& v, uintptr_t address, double& pitch, double& yaw, double& roll) {
+    if (v.matrix) return ue::read_matrix_rotation(address, pitch, yaw, roll);
+    if (v.direction) return ue::read_direction_rotation(address, pitch, yaw, roll);
+    if (v.screen_width > 0) return ue::read_screen_point(address, v.screen_width, v.screen_height, pitch, yaw, roll);
+    return ue::read_rotator(address, v.rotator_size, pitch, yaw, roll);
+}
+
+bool add_offset_rotation(const View& v, uintptr_t address, double pitch, double yaw) {
+    if (v.matrix) return ue::add_matrix_rotation(address, pitch, yaw);
+    if (v.direction) return ue::add_direction_rotation(address, pitch, yaw);
+    if (v.screen_width > 0) return ue::add_screen_point(address, v.screen_width, v.screen_height, pitch, yaw);
+    return ue::add_rotator(address, v.rotator_size, pitch, yaw);
+}
+
 }  // namespace
 
+// A profile object path: Root (PC, Pawn, Camera, ViewTarget) then steps (see resolve_part).
 ue::Obj resolve_path(const std::vector<std::string>& path, const Scene& s) {
     if (path.empty()) return 0;
     const std::string& root = path.front();
@@ -329,8 +358,7 @@ bool apply(View& view, const Scene& s, double pitch, double yaw) {
             pitch += op - sp;
         bool ok = true;
         for (int32_t off : view.offsets)
-            ok &= view.matrix ? ue::add_matrix_rotation(target + off, pitch, yaw)
-                              : ue::add_rotator(target + off, view.rotator_size, pitch, yaw);
+            ok &= add_offset_rotation(view, target + off, pitch, yaw);
         if (!ok) return false;
     } else if (update_rotation::is_input_property(view.property)) {
         // The stick's look input: queued for the controller's UpdateRotation (ue_update_rotation.hpp).
@@ -363,6 +391,14 @@ bool apply(View& view, const Scene& s, double pitch, double yaw) {
                 o ? "property missing or not a number" : "object not found");
         }
     }
+    if (view.control_yaw && yaw != 0) {
+        // ControlYaw=1: ControlRotation's yaw is brought to the view's, so the character moves along the camera the gyro
+        // turned (Stellar Blade copies it from the camera only on stick input; it fell up to ~28 degrees behind).
+        const ue::Prop c = ue::prop_of(s.pc, "ControlRotation");
+        double vp = 0, vy = 0, cp = 0, cy = 0, cr = 0;
+        if (c && read_view_rotation(view, s, vp, vy) && ue::read_rotator(s.pc + c.offset, c.element_size, cp, cy, cr))
+            ue::add_rotator(s.pc + c.offset, c.element_size, 0, wrap180(vy - cy));
+    }
     return true;
 }
 
@@ -379,8 +415,7 @@ bool read_view_rotation(const View& v, const Scene& s, double& pitch, double& ya
     if (!target) return false;
     double roll = 0;
     if (!v.offsets.empty())
-        return v.matrix ? ue::read_matrix_rotation(target + v.offsets.front(), pitch, yaw, roll)
-                        : ue::read_rotator(target + v.offsets.front(), v.rotator_size, pitch, yaw, roll);
+        return read_offset_rotation(v, target + v.offsets.front(), pitch, yaw, roll);
     if (update_rotation::is_input_property(v.property)) {
         // RotationInput only holds this frame's input: the view is ControlRotation, plus the turn not taken yet.
         const ue::Prop c = ue::prop_of(target, "ControlRotation");
@@ -476,6 +511,7 @@ void follow_check(const Scene& s, const View* view, double gyro_yaw) {
     const double moved = g_follow.have_last ? moved_yaw + std::abs(wrap180(s.pov_pitch - g_follow.last_pitch)) : 0;
     g_follow.last_pitch = s.pov_pitch, g_follow.last_yaw = s.pov_yaw, g_follow.have_last = true;
     if (!view || s.paused || s.cursor || !s.pawn) return;
+    if (view->screen_width > 0) return;  // a crosshair on a fixed camera: the camera isn't meant to follow
     if (view->view_target_class.empty() && !player_camera(s, moved)) return;
     if (gyro_yaw <= 0) return;
     g_follow.applied += gyro_yaw;
@@ -634,8 +670,7 @@ void status_details(const Scene& s, const View* view) {
         std::string text;
         for (int32_t off : view->offsets) {
             double p = 0, y = 0, r = 0;
-            if (o && (view->matrix ? ue::read_matrix_rotation(o + off, p, y, r)
-                                   : ue::read_rotator(o + off, view->rotator_size, p, y, r)))
+            if (o && read_offset_rotation(*view, o + off, p, y, r))
                 text += std::format(" +0x{:X}=(P {:.2f} Y {:.2f})", off, p, y);
         }
         log("status: view object %s%s", o ? ue::name_of(o).c_str() : "(not found)", text.c_str());

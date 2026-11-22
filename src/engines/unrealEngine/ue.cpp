@@ -618,7 +618,9 @@ Obj find_class(const char* name) {
     return 0;
 }
 
-uintptr_t find_field(uintptr_t first, int next_off, int name_off, const char* name, int limit = 400) {
+// The limit stops on a bad list while the layout is still being guessed; a real class can have well over 400
+// properties (Stellar Blade's SBCharacter: TPSModeType was past them).
+uintptr_t find_field(uintptr_t first, int next_off, int name_off, const char* name, int limit = 8000) {
     uintptr_t f = first;
     for (int i = 0; f && i < limit; ++i) {
         if (fname(f + name_off) == name) return f;
@@ -682,7 +684,7 @@ bool detect_layout() {
         for (int name_off : {0x28, 0x20, 0x18, 0x30}) {
             for (int next_off : {0x20, 0x18, 0x10, 0x28}) {
                 if (next_off == name_off) continue;
-                if (uintptr_t f = find_field(first, next_off, name_off, "ControlRotation")) {
+                if (uintptr_t f = find_field(first, next_off, name_off, "ControlRotation", 400)) {
                     control_rotation = f;
                     g_child_props = child;
                     g_field_next = next_off;
@@ -699,7 +701,7 @@ bool detect_layout() {
         logged = true;
         return false;
     }
-    const uintptr_t pawn = find_field(rdp(controller_cls + g_child_props), g_field_next, g_field_name, "Pawn");
+    const uintptr_t pawn = find_field(rdp(controller_cls + g_child_props), g_field_next, g_field_name, "Pawn", 400);
 
     // FField::ClassPrivate, the FFieldClass* whose first member is its FName ("StructProperty"...). +0x08 in
     // stock UE 4.25-5.x, elsewhere in some builds (Life is Strange Remastered: Next 0x28, Name 0x18). Without it
@@ -1010,6 +1012,42 @@ bool add_matrix_rotation(uintptr_t address, double pitch, double yaw) {
     for (int i = 0; i < 3; ++i)
         if (!guarded_store(address + i * 16, rows[i], sizeof(rows[i]))) return false;
     return true;
+}
+
+bool read_direction_rotation(uintptr_t address, double& pitch, double& yaw, double& roll) {
+    float v[3];
+    if (!guarded_copy(v, address, sizeof(v))) return false;
+    const double x = v[0], y = v[1], z = v[2], length = std::sqrt(x * x + y * y + z * z);
+    if (!std::isfinite(length) || length < 0.5 || length > 2) return false;  // not a unit vector
+    pitch = std::asin(std::clamp(z / length, -1.0, 1.0)) * kRadToDeg;
+    yaw = std::atan2(y, x) * kRadToDeg;
+    roll = 0;
+    return true;
+}
+
+bool add_direction_rotation(uintptr_t address, double pitch, double yaw) {
+    float v[3];
+    double p = 0, y = 0, r = 0;
+    if (!read_direction_rotation(address, p, y, r) || !guarded_copy(v, address, sizeof(v))) return false;
+    const double length = std::sqrt(double(v[0]) * v[0] + double(v[1]) * v[1] + double(v[2]) * v[2]);
+    p = std::clamp(p + pitch, -89.0, 89.0) / kRadToDeg, y = (y + yaw) / kRadToDeg;
+    const float out[3] = {float(length * std::cos(p) * std::cos(y)), float(length * std::cos(p) * std::sin(y)),
+                          float(length * std::sin(p))};
+    return guarded_store(address, out, sizeof(out));
+}
+
+bool read_screen_point(uintptr_t address, double width, double height, double& pitch, double& yaw, double& roll) {
+    float v[2];
+    if (!guarded_copy(v, address, sizeof(v)) || !std::isfinite(v[0]) || !std::isfinite(v[1])) return false;
+    yaw = (v[0] - 0.5) * width, pitch = (0.5 - v[1]) * height, roll = 0;
+    return true;
+}
+
+bool add_screen_point(uintptr_t address, double width, double height, double pitch, double yaw) {
+    float v[2];
+    if (!guarded_copy(v, address, sizeof(v)) || !std::isfinite(v[0]) || !std::isfinite(v[1])) return false;
+    const float out[2] = {float(std::clamp(v[0] + yaw / width, 0.0, 1.0)), float(std::clamp(v[1] - pitch / height, 0.0, 1.0))};
+    return guarded_store(address, out, sizeof(out));
 }
 
 void dump_props(Obj o, const char* stop_at_class) {
