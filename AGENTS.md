@@ -9,7 +9,7 @@ DualSense (and other SDL-supported pads) motion sensors turn the in-game camera,
 case. Older MODLOG entries and files from users still say GyroUE: Gyro4All migrates an old `GyroUE\` folder on its
 first start and still reads `[GyroUE]` INI sections (`src/core/settings.cpp`). How it works today:
 - gyro math and controller input come from **GyroLib** (https://github.com/lud-berthe/GyroLib, MIT;
-  reviewed at v1.2.2, now pinned to **1.3.1** in `tools/gyrolib-sdk.sh`); we write the engine side;
+  reviewed at v1.2.2, now pinned to **1.4.0** in `tools/gyrolib-sdk.sh`); we write the engine side;
 - Gyro4All is a **standalone system-DLL proxy** (`winmm.dll`, which also exports all of `version.dll` and can
   be renamed to it) with its own Unreal reflection reader. It needs no UE4SS: UE4SS was only the loader of
   the first prototype (MODLOG 2026-10-08) and is not used or shipped;

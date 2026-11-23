@@ -5,6 +5,20 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-23 **GyroLib 1.4.0 (answer to GyroLib issue #3, drift of a worn DualSense whose bias wanders).** SDK
+  downloaded from the v1.4.0 release, all three files OK against its `SHA256SUMS.txt`; pinned in
+  `tools/gyrolib-sdk.sh`. ABI 1 and INI schema 0.2.0 unchanged, no Gyro4All code change needed to build; 1480 unit
+  checks pass. New shared settings (`gyrolib.ini`): `calibration.active_residual_limit_dps` (0.15, 0-2, the residual
+  automatic calibration accepts during active gyro use), `calibration.active_time_constant_s` (8, 1-30),
+  `calibration.manual_reference_limit_dps` (0.5, 0-2, window around a manual calibration); per view
+  `gyro.speed_deadzone_dps` (0 = off, 0-10). Small movement stabilization (`gyro.tightening_dps`) now works with
+  smoothing off; the Smoothing expander is always shown. GyroLib's panel draws the three calibration limits in a "..."
+  popup beside Automatic calibration (advanced group `GL_ADVANCED_CALIBRATION`, only while it is "Any time"), so
+  Gyro4All adds no panel code; the footer's reset row (where Gyro4All's cog button sits) is unchanged. `host.cpp`
+  logs the mode and the three limits at start (`gyro: automatic calibration N, during play residual limit ...`).
+  TROUBLESHOOTING's drift row now points at Active drift limit (the residual limit's panel name), then stabilization or the speed deadzone. **Not yet
+  tested in game**, nor with the affected DualSense (GyroLib reproduced the 0.18 deg/s residual only in simulation).
+
 - 2026-11-19 **ACE COMBAT 7 (`Ace7Game.exe`, UE 4.18, 2021 build, SteamStub `.bind` section, no Denuvo sections):
   static triage for the EVERSPACE route (gyro flies the plane).** Reflection works (pawn `AcePlayerPawn_f04e_s03_C`,
   PC `NimbusPlayerControllerBP_C`, camera manager `NimbusPlayerCameraManagerBP_C`); the game opens the DualSense over
