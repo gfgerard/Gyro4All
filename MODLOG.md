@@ -5,6 +5,11 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-23 **1.13.0**: GyroLib 1.4.0 (calibration limits, speed deadzone; entry below), the GitHub Actions release and
+  nightly pipelines and `SHA256SUMS.txt` with every release (entry below). GyroLib 1.4.0's new settings tested by the
+  user with a DualSense in Red Dead Redemption 2 and Shadow of the Tomb Raider (connection and Steam Input state not
+  noted); the CI pipelines not yet run on GitHub.
+
 - 2026-11-23 **GyroLib 1.4.0 (answer to GyroLib issue #3, drift of a worn DualSense whose bias wanders).** SDK
   downloaded from the v1.4.0 release, all three files OK against its `SHA256SUMS.txt`; pinned in
   `tools/gyrolib-sdk.sh`. ABI 1 and INI schema 0.2.0 unchanged, no Gyro4All code change needed to build; 1480 unit
@@ -16,8 +21,20 @@ or gyro to stick.
   popup beside Automatic calibration (advanced group `GL_ADVANCED_CALIBRATION`, only while it is "Any time"), so
   Gyro4All adds no panel code; the footer's reset row (where Gyro4All's cog button sits) is unchanged. `host.cpp`
   logs the mode and the three limits at start (`gyro: automatic calibration N, during play residual limit ...`).
-  TROUBLESHOOTING's drift row now points at Active drift limit (the residual limit's panel name), then stabilization or the speed deadzone. **Not yet
-  tested in game**, nor with the affected DualSense (GyroLib reproduced the 0.18 deg/s residual only in simulation).
+  TROUBLESHOOTING's drift row now points at Active drift limit (the residual limit's panel name), then stabilization or the speed deadzone.
+  **Tested by the user with a DualSense** (2026-11-23, in Red Dead Redemption 2 and Shadow of the Tomb Raider; connection and Steam Input state not noted; whether it was
+  the worn DualSense of issue #3 not noted: GyroLib reproduced its 0.18 deg/s residual only in simulation).
+
+- 2026-11-23 **CI/CD on GitHub Actions.** `tools/fetch-deps.sh` fills `third_party/` (GyroLib SDK zip
+  from the GyroLib release, checked against `GYROLIB_SDK_SHA256` in `tools/gyrolib-sdk.sh`; shallow clones of MinHook
+  v1.3.4, ImGui v1.92.9b, Vulkan-Headers v1.4.309). Packing lives only in `tools/package-only-gyro4all.sh`
+  (`package-gyro4all.sh` = build + pack); it now writes `build/release/SHA256SUMS.txt` beside the zip and takes
+  `RELEASE_NAME` for the zip name. Workflows: `build.yml` (reusable, `windows-2025`: fetch, build, unit tests, pack,
+  artifact `gyro4all-release`), `release.yml` (manual; version from `src/CMakeLists.txt`, fails if tag `v<version>`
+  exists, creates a draft release with generated notes, zip and SHA256SUMS.txt), `nightly.yml` (03:00 UTC + manual;
+  rolling prerelease `nightly`, zip `Gyro4All-nightly-<yyyymmdd>-<sha7>`; scheduled runs skip when the `nightly` tag
+  already points at the head). Not yet run on GitHub: the runner's MSVC (VS 2022 on `windows-2025`) differs from the
+  dev PC's VS 2026, so the first CI build is the first test of that compiler. A nightly DLL logs the CMake version.
 
 - 2026-11-19 **ACE COMBAT 7 (`Ace7Game.exe`, UE 4.18, 2021 build, SteamStub `.bind` section, no Denuvo sections):
   static triage for the EVERSPACE route (gyro flies the plane).** Reflection works (pawn `AcePlayerPawn_f04e_s03_C`,
@@ -3863,3 +3880,8 @@ checks pass. User: iron sight now slows the gyro (DualSense as XInput, no Steam 
   earlier `Watch=` of those names logged nothing for the same reason). Fix: limit 8000 for property lookups (400 kept
   for the layout guess). Works in game: L2 in the cover minigame moves the crosshair with the gyro (user report,
   DualSense). Spans `ScreenPoint=80,46` untuned; normal L2 aim's `TPSModeType` still not read.
+- VirusTotal history of the 1.11.0 zip: first submission 2026-11-14 (two days after the release), last 2026-11-21; its
+  second name is a GUID (`908fc099-...`), as is 1.10.1's (`20b8f529-...`): uploaded automatically by some security
+  product on a user's PC, not by hand. Likely sequence: samples reach VT and vendors, Bitdefender's automatic
+  clustering makes the generic `Gen:Variant.Yogi.129138`, its OEMs inherit it, Google Safe Browsing follows the
+  consensus. (The order after the upload is inferred, not proven.)

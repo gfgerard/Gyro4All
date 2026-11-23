@@ -1,0 +1,54 @@
+# Builds Gyro4All on a Windows runner, runs the unit tests and packs the release zip plus SHA256SUMS.txt
+# (tools/package-only-gyro4all.sh). Called by release.yml and nightly.yml; the result is the artifact "gyro4all-release".
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      release_name:
+        description: Zip name without .zip (empty = Gyro4All-v<version>)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # third_party/ is git-ignored: GyroLib SDK, MinHook, ImGui and Vulkan-Headers come from tools/fetch-deps.sh.
+      - uses: actions/cache@v4
+        with:
+          path: third_party
+          key: third-party-${{ hashFiles('tools/gyrolib-sdk.sh', 'tools/fetch-deps.sh') }}
+
+      - name: Fetch dependencies
+        run: bash tools/fetch-deps.sh
+
+      - name: Build and run unit tests
+        run: bash tools/test-gyro4all.sh
+
+      - name: Package
+        env:
+          RELEASE_NAME: ${{ inputs.release_name }}
+        run: |
+          [ -n "$RELEASE_NAME" ] || unset RELEASE_NAME
+          bash tools/package-only-gyro4all.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gyro4all-release
+          path: |
+            build/release/*.zip
+            build/release/SHA256SUMS.txt
+          if-no-files-found: error

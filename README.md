@@ -59,6 +59,10 @@ More:
 #### Install
 
 1. **Download** `Gyro4All-vX.Y.Z.zip` from the [Releases](https://github.com/gfgerard/Gyro4All/releases) page.
+   Optional: check the download against the release's `SHA256SUMS.txt`. In PowerShell,
+   `Get-FileHash .\Gyro4All-vX.Y.Z.zip -Algorithm SHA256` must print the same hash.
+   The `nightly` prerelease is an automatic, untested build of the latest code; use a regular release unless you
+   want to try a fix early.
 2. **Find the game's real exe folder.**  In Unreal Engine games usually it's the one with a file ending in **`-Win64-Shipping.exe`**, at 
    `<Game>\<Something>\Binaries\Win64`.
    Tip: It's where other mods like Optiscaler or Reshade go. 

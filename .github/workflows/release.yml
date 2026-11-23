@@ -1,0 +1,54 @@
+# Manual release: Actions > Release > Run workflow. Builds the version in project() of src/CMakeLists.txt (bump it and
+# push first: this workflow never changes the version) and creates a DRAFT release v<version> with the zip and
+# SHA256SUMS.txt. Review the generated notes on GitHub and press Publish; the tag is created then.
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: v
+        run: |
+          version="$(sed -nE 's/^project\(Gyro4All VERSION ([0-9.]+).*/\1/p' src/CMakeLists.txt)"
+          [ -n "$version" ] || { echo "::error::no version in project() of src/CMakeLists.txt"; exit 1; }
+          if [ -n "$(git ls-remote --tags origin "refs/tags/v$version")" ]; then
+            echo "::error::tag v$version already exists: bump the version in src/CMakeLists.txt"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    with:
+      release_name: Gyro4All-v${{ needs.version.outputs.version }}
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gyro4all-release
+          path: dist
+      - name: Create draft release
+        run: |
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::a release v$VERSION (maybe a draft) already exists"; exit 1
+          fi
+          gh release create "v$VERSION" --draft --generate-notes --target "$GITHUB_SHA" \
+            --title "Gyro4All v$VERSION" "dist/Gyro4All-v$VERSION.zip" dist/SHA256SUMS.txt

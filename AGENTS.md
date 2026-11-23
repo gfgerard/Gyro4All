@@ -179,10 +179,14 @@ Key rules:
   tools/reEngine/methoddump.py "<game>\<exe>" --type <class> [--method <name>]`.
 - Performance: `bench/BENCHMARKS.md` (method, results, optimisation analysis); tools `tools/bench.sh`
   (modes vanilla / mod / mod-nopanel, PresentMon capture with Ctrl+Shift+F9 marks, report).
-- MinHook 1.3.4 must be in `third_party/minhook-1.3.4` to build (see MODLOG 2026-10-09 for the clone command); it
-  is only used for protected exes (inline hooks).
-- To update GyroLib: download the release SDK into `third_party/GyroLib-<ver>/sdk`, verify
-  SHA256SUMS, bump `tools/gyrolib-sdk.sh`, rebuild, and redeploy (users keep their `gyrolib.ini`).
+- `bash tools/fetch-deps.sh` fills the git-ignored `third_party/` (GyroLib SDK checked against its pinned SHA256,
+  MinHook 1.3.4, ImGui 1.92.9b, Vulkan-Headers 1.4.309) and keeps what is already there. MinHook is only used for
+  protected exes (inline hooks).
+- To update GyroLib: bump `GYROLIB_VERSION` and `GYROLIB_SDK_SHA256` (from the release's SHA256SUMS) in
+  `tools/gyrolib-sdk.sh`, run `tools/fetch-deps.sh`, rebuild, and redeploy (users keep their `gyrolib.ini`).
+- CI (`.github/workflows/`): `build.yml` (reusable: fetch-deps, build, unit tests, package on `windows-2025`),
+  `release.yml` (manual) and `nightly.yml` (03:00 UTC, rolling `nightly` prerelease, skipped when the default branch
+  hasn't changed). The runners build with their own Visual Studio, not the one on the dev PC.
 
 ## Releases
 
@@ -192,11 +196,13 @@ Every time you build a new version of Gyro4All, also produce its release zip:
    only place it lives: the DLL's log line (`Gyro4All x.y.z in ...`) and the zip name both come from it.
    Never hard-code the version anywhere else.
 2. Run `bash tools/package-gyro4all.sh`. It builds, checks that `winmm.dll` carries that exact version,
-   and writes `build/release/Gyro4All-v<version>.zip`. Extract the zip into a game's
+   and writes `build/release/Gyro4All-v<version>.zip` and `build/release/SHA256SUMS.txt` (its SHA256). Extract the zip into a game's
    `<Project>\Binaries\Win64` folder: `winmm.dll` plus `Gyro4All\` (`gyrolib.dll`, all `profiles/`,
    `licenses/`, and `readme/` with `README.md` and `docs/` (`TROUBLESHOOTING.md`, `ADVANCED.md`, `CREDITS.md`, `GAMES.md`), as in the repository). It ships no `gyrolib.ini` or `Gyro4All.ini` (both created on first run), so users keep
    their settings when they update.
 3. Record the new version and what changed in `MODLOG.md`.
 
-The zip is the asset to attach to a GitHub release tagged `v<version>`. Never put game files, extracted
+The zip and `SHA256SUMS.txt` are the assets of the GitHub release tagged `v<version>`. Published releases come from
+GitHub Actions: push the bumped version, run Actions > Release (it refuses a version whose tag exists), then review the
+draft's notes and publish it on GitHub (that creates the tag). Commit, push and publish only when the user asks. Never put game files, extracted
 assets or `gyrolib.ini`/`Gyro4All.ini`/logs into it; if the script's file list shows anything else, fix the script.

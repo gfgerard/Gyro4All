@@ -2,6 +2,8 @@
 # Set default behavior to automatically normalize line endings.
 ###############################################################################
 * text=auto
+# Shell scripts keep LF everywhere: a CRLF checkout (Windows runners, core.autocrlf=true) breaks bash.
+*.sh text eol=lf
 
 ###############################################################################
 # Set default behavior for command prompt diff.

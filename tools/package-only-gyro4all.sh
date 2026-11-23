@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Packs the installable release zip: build/release/Gyro4All-v<version>.zip
+# Packs the installable release zip from the current build (tools/package-gyro4all.sh builds first):
+# build/release/Gyro4All-v<version>.zip (version from project() in src/CMakeLists.txt), and build/release/SHA256SUMS.txt
+# with its SHA256 (sha256sum format), published beside it. Extract the zip into the game's <Project>/Binaries/Win64 folder:
+# it holds winmm.dll and the Gyro4All folder, the same files tools/deploy-gyro4all.sh installs, plus every profile and the
+# user docs (README, TROUBLESHOOTING, ADVANCED, CREDITS, GAMES, in Gyro4All/readme). No gyrolib.ini: users keep theirs.
+# RELEASE_NAME=<name> overrides the zip name (nightly builds: Gyro4All-nightly-<date>-<commit>).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT/tools/gyrolib-sdk.sh"; SDK="$GYROLIB_SDK"
@@ -10,16 +15,19 @@ DLL="$ROOT/build/Gyro4All/Release/winmm.dll"
 # The DLL must carry this exact version (its log line), so a stale build can't be shipped under a new name.
 grep -aq "Gyro4All $VERSION in " "$DLL" || { echo "$DLL is not version $VERSION (build failed?)"; exit 1; }
 
-NAME="Gyro4All-v$VERSION"
+NAME="${RELEASE_NAME:-Gyro4All-v$VERSION}"
 OUT="$ROOT/build/release"
 STAGE="$OUT/$NAME"
-rm -rf "$STAGE" "$OUT/$NAME.zip"
+rm -rf "$STAGE" "$OUT/$NAME.zip" "$OUT/SHA256SUMS.txt"
 mkdir -p "$STAGE/Gyro4All/profiles" "$STAGE/Gyro4All/licenses" "$STAGE/Gyro4All/readme"
 cp "$DLL" "$STAGE/winmm.dll"
 cp "$SDK/bin/gyrolib.dll" "$STAGE/Gyro4All/gyrolib.dll"
 # The settings panel of D3D11/D3D10/D3D9 games (loaded by winmm.dll only there). Its ImGui is under GyroLib's ImGui.txt.
 cp "$ROOT/build/Gyro4All/panel/Release/gyro4all.dll" "$STAGE/Gyro4All/gyro4all.dll"
-cp "$ROOT/profiles/"*.ini "$STAGE/Gyro4All/profiles/"
+# Empty profiles are left out: they set nothing.
+for f in "$ROOT/profiles/"*.ini; do
+    if [ -s "$f" ]; then cp "$f" "$STAGE/Gyro4All/profiles/"; else echo "skipped empty profile: $(basename "$f")"; fi
+done
 # License notices that must ship with gyrolib.dll (GyroLib THIRD_PARTY.md), plus Gyro4All's own license.
 cp "$SDK/share/doc/GyroLib/licenses/"* "$STAGE/Gyro4All/licenses/"
 cp "$SDK/share/doc/GyroLib/sdl-changes/README-GyroLib.md" "$STAGE/Gyro4All/licenses/SDL-CHANGES.md"
@@ -41,5 +49,14 @@ with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             z.write(p, os.path.relpath(p, src).replace(os.sep, "/"))
 EOF
 rm -rf "$STAGE"
+# The checksum users compare with Get-FileHash or sha256sum -c (sha256sum's format: hash, two spaces, file name).
+python -I - "$(cygpath -w "$OUT/$NAME.zip")" "$(cygpath -w "$OUT/SHA256SUMS.txt")" <<'EOF'
+import hashlib, os, sys
+zip_path, sums = sys.argv[1], sys.argv[2]
+digest = hashlib.sha256(open(zip_path, "rb").read()).hexdigest()
+open(sums, "w", newline="\n").write(f"{digest}  {os.path.basename(zip_path)}\n")
+EOF
 echo "release: build/release/$NAME.zip"
+echo "checksum: build/release/SHA256SUMS.txt"
 python -I -c "import sys, zipfile; [print(f'  {i.file_size:>9}  {i.filename}') for i in zipfile.ZipFile(sys.argv[1]).infolist()]" "$(cygpath -w "$OUT/$NAME.zip")"
+cat "$OUT/SHA256SUMS.txt"

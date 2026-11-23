@@ -1,0 +1,69 @@
+# Nightly build: every night at 03:00 UTC, the head of the default branch is built and published as the rolling
+# prerelease "nightly" (replaced each time), with the zip and SHA256SUMS.txt. Scheduled runs skip when nothing changed
+# since the last nightly; Actions > Nightly > Run workflow always builds.
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+      name: ${{ steps.check.outputs.name }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - id: check
+        run: |
+          last="$(gh api "repos/$GITHUB_REPOSITORY/commits/nightly" --jq .sha 2>/dev/null || true)"
+          if [ "$GITHUB_EVENT_NAME" = schedule ] && [ "$last" = "$GITHUB_SHA" ]; then
+            echo "nightly is already at $GITHUB_SHA: nothing to build"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "name=Gyro4All-nightly-$(date -u +%Y%m%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      release_name: ${{ needs.gate.outputs.name }}
+
+  publish:
+    needs: [gate, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      NAME: ${{ needs.gate.outputs.name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: gyro4all-release
+          path: dist
+      - name: Replace the nightly prerelease
+        run: |
+          gh release delete nightly --cleanup-tag --yes 2>/dev/null || true
+          cat > notes.md <<NOTES
+          Automatic development build of \`$GITHUB_REF_NAME\` at $GITHUB_SHA ($(date -u '+%Y-%m-%d %H:%M UTC')).
+
+          **Untested:** it was built and passed the unit tests, but nobody has checked it in a game. For a tested version, use
+          the latest regular release. Check the download against \`SHA256SUMS.txt\` (see the README, "Install").
+          NOTES
+          gh release create nightly --prerelease --target "$GITHUB_SHA" --title "Nightly ${NAME#Gyro4All-nightly-}" \
+            --notes-file notes.md "dist/$NAME.zip" dist/SHA256SUMS.txt
