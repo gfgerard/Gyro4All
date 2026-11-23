@@ -5,6 +5,18 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-24 **Halo 3 / ODST: stray weapon pickups with the gyro on; turn now written on the game's thread (Halo 3
+  confirmed by the user).** Report (1.12.0, DualSense Edge, activation Toggle on a back paddle): over a weapon, pressing
+  another button (melee, crouch) picked the weapon up; not in Halo 2. Same with Gyro4All's XInput translation (Steam
+  Input off) and with `XInput=0` plus Steam Input's XInput, as soon as the gyro was on, so not the translation. A log
+  showed `stick fallback: the game undid the gyro's camera writes 8 frames in a row`: the main-thread writes to the
+  player control (`+0xd4`/`+0xd8`) raced `halo3.dll`'s update on its own thread. How that became a pickup is not known.
+  Change: `write_in_update` on for Halo 3 and ODST (Halo 4's hook at the update's start, found through its unwind entry,
+  so no new signature). User test (1.13.0 test build, Edge shown as XInput, Steam Input off; their ini also had
+  `StickCamera=1`, `NativeFlickStick=1`, `XInputTouchpadBack=1`): no stray pickups in about 4 min of Halo 3. Log:
+  `Halo 3's player-control update starts at halo3.dll+0xF7DF0 (48 8b c4 48 89 58 08 48): hooked`, `runs on thread 11760`
+  (not the main thread), no `the game undid` line, hook removed `MH_OK` on unload. ODST not tested yet.
+
 - 2026-11-23 **1.13.0**: GyroLib 1.4.0 (calibration limits, speed deadzone; entry below), the GitHub Actions release and
   nightly pipelines and `SHA256SUMS.txt` with every release (entry below). GyroLib 1.4.0's new settings tested by the
   user with a DualSense in Red Dead Redemption 2 and Shadow of the Tomb Raider (connection and Steam Input state not

@@ -84,7 +84,8 @@ struct Game {
     // The game hashes its game state when it saves a checkpoint and checks the hash when it loads one, on its own thread
     // (Halo 4's engine: "game_state: failed to verify hash for in-place gamestate", a fatal error). A camera write from
     // the main thread that lands in between breaks it, so the turn is written from a hook at the start of the
-    // player-control update instead, on the game's thread.
+    // player-control update instead, on the game's thread. Halo 3 and ODST: main-thread writes raced their update (it
+    // undid them; suspected cause of stray weapon pickups, MODLOG 2026-11-23).
     bool write_in_update = false;
 };
 
@@ -143,7 +144,7 @@ constexpr Game kGames[] = {
      0, 0x2C, 0,
      "48 83 EC 38 48 C7 44 24 20 FE FF FF FF 4C 8D 0D ?? ?? ?? ?? BA 78 0D 00 00 41 B8 04 00 00 00 48 8D 0D ?? ?? ?? ?? E8 "
      "?? ?? ?? ?? 90 48 83 C4 38 C3",
-     31, 0, 0x74, 3.14f / 280, true},
+     31, 0, 0x74, 3.14f / 280, true, 0, 0, true},
     {L"halo3odst.dll", "Halo 3: ODST",
      "65 48 8B 04 25 58 00 00 00 4C 63 E1 BF D8 00 00 00 49 69 DC C0 02 00 00 4C 8B 2C D0 48 8B 05 ?? ?? ?? ?? 4A 8B 3C "
      "2F 8B 88 18 04 00 00 85 C9 75 ?? 48 83 64 24 30 00 EB ?? 48 8B 05 ?? ?? ?? ?? 48 8D 04 88 48 89 44 24 30 F3 44 0F "
@@ -158,7 +159,7 @@ constexpr Game kGames[] = {
      10, 0x34, 0,
      "48 83 EC 38 48 C7 44 24 20 FE FF FF FF 4C 8D 0D ?? ?? ?? ?? BA B0 0E 00 00 41 B8 04 00 00 00 48 8D 0D ?? ?? ?? ?? E8 "
      "?? ?? ?? ?? 90 48 83 C4 38 C3",
-     31, 0, 0x78, 3.14f / 280, true},
+     31, 0, 0x78, 3.14f / 280, true, 0, 0, true},
     {L"haloreach.dll", "Halo: Reach",
      "65 48 8B 04 25 58 00 00 00 48 8D 55 A0 F3 44 0F 10 3D ?? ?? ?? ?? 44 0F 28 E2 F3 44 0F 10 2D ?? ?? ?? ?? 0F 28 F1 "
      "48 63 F1 45 0F 28 D7 8B 0D ?? ?? ?? ?? BF D8 00 00 00 F3 0F 11 5C 24 50 48 8D 1C 76 4C 8B 34 C8 48 8D 0D ?? ?? ?? "
