@@ -61,7 +61,18 @@ play.
 - **Gameplay gating:** the gyro stops in menus, pause, main menu, while the mouse cursor is shown, and when
   the game window loses focus.
 - **Automatic calibration** in menus (GyroLib's "menus only" mode), including games whose gamepad menus
-  show no cursor.
+  show no cursor. Engines that can't see the game's menus switch it to "any time". With "any time", the panel's "..."
+  button beside it (GyroLib 1.4.0) sets how far it may follow a bias that wanders during play, saved in `gyrolib.ini`:
+  **Active drift limit** (`calibration.active_residual_limit_dps`, 0.15 deg/s by default, 0-2): the largest residual
+  drift it learns while the gyro is in use; higher values follow a worn controller's wandering bias but can absorb
+  very slow turns. **Active calibration time** (`calibration.active_time_constant_s`, 8 s, 1-30): how fast that
+  correction is applied; lower adapts faster. **Manual reference range** (`calibration.manual_reference_limit_dps`,
+  0.5 deg/s, 0-2): how far it may move from a completed manual calibration ("Recalibrate gyro").
+- **Slow-motion filters** (per view, under the panel's **Smoothing** expander, shown with Smoothing Off too):
+  **Small movement stabilization** (`context.<id>.gyro.tightening_dps`, 0-10 deg/s, 0 = off) scales motion below
+  that speed down, and since GyroLib 1.4.0 works with Smoothing Off. **Gyro speed deadzone**
+  (`context.<id>.gyro.speed_deadzone_dps`, 0-10 deg/s, 0 = off, GyroLib 1.4.0) stops the camera at or below that
+  speed, like Steam Input's Gyro Speed Deadzone.
 - **In-game settings panel** (GyroLib's DX12 overlay, `F10` by default): sensitivity, activation button or
   trigger, invert axes, smoothing and more, saved to `gyrolib.ini`. Edits to `gyrolib.ini` are also reloaded
   live while the game runs. Next to it, **Gyro4All's own settings window** opens (a small "Gyro4All settings"
@@ -193,7 +204,7 @@ All diagnostics go to `Gyro4All\Gyro4All.log` (probe results, if enabled, to `Gy
 | `unity: profile path: field <name> not found on <class>` / `unity: profile: ...` | A `[Unity]` path doesn't fit the game: wrong name, a static field, or a value of the wrong type. Logged once each. |
 | `probe: the camera that turns with the stick or mouse: <hierarchy>` / `probe: camera VERIFIED: pitch <class>.<path>, yaw <class>.<path> -> <file>` / `probe: no camera: ...` | The Unity probe's steps. Details in `Gyro4All-probe.log`. |
 | Camera drifts slowly | Rest the pad in a menu for a few seconds (`bias=` in the status line should become non-zero) or use "Recalibrate gyro". |
-| `gyro: automatic calibration N, during play residual limit R deg/s, time constant T s, manual reference limit M deg/s` | At start: GyroLib's automatic calibration mode (0 off, 1 menus only, 2 any time) and its limits in `gyrolib.ini` (`calibration.active_residual_limit_dps`, `calibration.active_time_constant_s`, `calibration.manual_reference_limit_dps`; panel: Any time, then "..."). A drift that comes back while playing with a worn controller: raise the residual limit (TROUBLESHOOTING). |
+| `gyro: automatic calibration N, during play residual limit R deg/s, time constant T s, manual reference limit M deg/s` | At start: GyroLib's automatic calibration mode (0 off, 1 menus only, 2 any time) and its limits in `gyrolib.ini` (`calibration.active_residual_limit_dps`, `calibration.active_time_constant_s`, `calibration.manual_reference_limit_dps`; panel: Any time, then "...": Active drift limit, Active calibration time, Manual reference range). A drift that comes back while playing with a worn controller: raise Active drift limit (TROUBLESHOOTING). |
 | `gyro: the reopened controller has no calibration (bias 0 0 0): gyrolib.ini loaded again for its saved one (result N)`, then `gyro: calibration restored after the reopen: bias=(...)` or `calibration still missing after the reopen` (with a notice) | The controller was reopened (another USB port, a Bluetooth drop) and GyroLib gave it no bias, so the camera would drift at the sensor's own offset. Gyro4All loads `gyrolib.ini` again for the saved manual calibration; if that doesn't bring it back, recalibrate with the controller lying still. `kept its calibration`: nothing to do. |
 | Panel doesn't open | Look for `overlay:` lines (DX11/DX10/DX9 games: also `panel:` lines, e.g. `panel: captured D3D11 swapchain ...`, `panel: D3D11 renderer ready ...`, `panel: no frame presented for N ms: panel closed`). Try from the game's pause menu. As a fallback, edit `gyrolib.ini` directly. |
 | Double motion | Steam Input or another tool is also converting the gyro to mouse. In the F10 panel, set "Steam Input mouse" to Block (or Convert movement). |

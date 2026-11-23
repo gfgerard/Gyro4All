@@ -16,7 +16,7 @@ or gyro to stick.
   popup beside Automatic calibration (advanced group `GL_ADVANCED_CALIBRATION`, only while it is "Any time"), so
   Gyro4All adds no panel code; the footer's reset row (where Gyro4All's cog button sits) is unchanged. `host.cpp`
   logs the mode and the three limits at start (`gyro: automatic calibration N, during play residual limit ...`).
-  TROUBLESHOOTING's drift row now points at the residual limit, then stabilization or the speed deadzone. **Not yet
+  TROUBLESHOOTING's drift row now points at Active drift limit (the residual limit's panel name), then stabilization or the speed deadzone. **Not yet
   tested in game**, nor with the affected DualSense (GyroLib reproduced the 0.18 deg/s residual only in simulation).
 
 - 2026-11-19 **ACE COMBAT 7 (`Ace7Game.exe`, UE 4.18, 2021 build, SteamStub `.bind` section, no Denuvo sections):
