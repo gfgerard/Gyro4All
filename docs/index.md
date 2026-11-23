@@ -18,8 +18,10 @@
 ## Getting Started
 
 1. Download the latest release from the [Gyro4All Releases](https://github.com/gfgerard/Gyro4All/releases) page.
-2. Place the mod files in the target game's binary/executable folder as indicated in [Supported Games & Profiles](GAMES.md) (or rename/load as an `.asi` plugin if using an ASI loader).
-3. Launch the game, open the in-game settings panel (e.g., `F10`), and tune sensitivity, activation mode, and calibration.
+2. Optional: check the download against the release's SHA256SUMS.txt. In PowerShell: `Get-FileHash .\Gyro4All-vX.Y.Z.zip -Algorithm SHA256` must print the same hash. 
+   The nightly prerelease is an automatic, untested build of the latest code; use a regular release unless you want to try a fix early.
+3. Place the mod files in the target game's binary/executable folder as indicated in [Supported Games & Profiles](GAMES.md) (or rename/load as an `.asi` plugin if using an ASI loader).
+4. Launch the game, open the in-game settings panel (e.g., `F10`), and tune sensitivity, activation mode, and calibration.
 
 ## Contributing & Feedback
 
