@@ -229,12 +229,15 @@ View* base_view(const Scene& s) {
 }
 
 // The view the gyro turns: the base view, or the Match=Camera view for the same view target that the camera follows
-// now (core/camera_match.hpp).
+// now (core/camera_match.hpp). A Match=Camera view with ActiveWhen= is left out of that choice: its condition alone
+// says when it is the camera (base_view), so the camera-follow check can't switch to it while the condition is false
+// (PAYDAY 3: the clamp modifier exists, unused, outside its actions).
 View* active_view(const Scene& s, View* base) {
     if (!base || base->has_active_when) return base;  // the game's own flag says which camera it is
     std::vector<uint32_t> members = {base->id};
     for (const View& v : g_views)
-        if (v.match_camera && (v.view_target_class.empty() || ue::is_a(s.view_target, v.view_target_class.c_str())))
+        if (v.match_camera && !v.has_active_when &&
+            (v.view_target_class.empty() || ue::is_a(s.view_target, v.view_target_class.c_str())))
             members.push_back(v.id);
     View* view = find_view(g_match.select(members));
     return view ? view : base;
@@ -785,6 +788,10 @@ public:
         g_base = base_view(s);
         g_view = active_view(s, g_base);
         if (g_view) diagnostics(*g_view, s);
+        // Match=Camera views' Watch=/Dump= run while they aren't the active view too, so a flag that tells when their
+        // camera takes over (for ActiveWhen=) can be seen changing on both sides of the switch.
+        for (View& v : g_views)
+            if (&v != g_view && v.match_camera && (v.dump || !v.watch.empty())) diagnostics(v, s);
         const uint32_t view_id = g_view ? g_view->id : 0;
         const std::string target = ue::name_of(ue::class_of(s.view_target));
         // Logged for the base view; switches between Match=Camera views are logged by camera_match_frame.

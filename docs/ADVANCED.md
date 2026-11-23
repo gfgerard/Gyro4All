@@ -730,6 +730,13 @@ uses `Match=Camera` instead:
 - A view whose object doesn't exist right now (the modifier only exists during the action) is skipped at once.
 - Each `Match=Camera` view has its own tab in the settings panel, starting with the settings of view 1. ADS, ALT_ADS
   and OTHER also apply to the `Match=Camera` views of the default view.
+- **Instant switching:** when the game has a readable flag for the camera change, give the `Match=Camera` view the
+  usual `ActiveWhen=` instead of relying on the checks above. The view is then used exactly while its condition holds,
+  from that frame on, gyro or not, so no turn is lost on either side of the switch; while the condition is false the
+  view is left out of the group (the checks above never pick it). PAYDAY 3:
+  `ActiveWhen=Camera.@SBZClampCameraRotationModifier.CurrentIndex>=0` (-1 outside an action).
+- To find such a flag, `Watch=` and `Dump=1` on a `Match=Camera` view also run while it isn't the active view, so a
+  property can be seen changing as the camera changes (`watch: <view>.<property> = <value>`).
 
 ### Unreal Engine 3 games (`[Unreal3]`)
 
