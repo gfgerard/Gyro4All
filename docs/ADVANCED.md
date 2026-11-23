@@ -193,6 +193,7 @@ All diagnostics go to `Gyro4All\Gyro4All.log` (probe results, if enabled, to `Gy
 | `unity: profile path: field <name> not found on <class>` / `unity: profile: ...` | A `[Unity]` path doesn't fit the game: wrong name, a static field, or a value of the wrong type. Logged once each. |
 | `probe: the camera that turns with the stick or mouse: <hierarchy>` / `probe: camera VERIFIED: pitch <class>.<path>, yaw <class>.<path> -> <file>` / `probe: no camera: ...` | The Unity probe's steps. Details in `Gyro4All-probe.log`. |
 | Camera drifts slowly | Rest the pad in a menu for a few seconds (`bias=` in the status line should become non-zero) or use "Recalibrate gyro". |
+| `gyro: automatic calibration N, during play residual limit R deg/s, time constant T s, manual reference limit M deg/s` | At start: GyroLib's automatic calibration mode (0 off, 1 menus only, 2 any time) and its limits in `gyrolib.ini` (`calibration.active_residual_limit_dps`, `calibration.active_time_constant_s`, `calibration.manual_reference_limit_dps`; panel: Any time, then "..."). A drift that comes back while playing with a worn controller: raise the residual limit (TROUBLESHOOTING). |
 | `gyro: the reopened controller has no calibration (bias 0 0 0): gyrolib.ini loaded again for its saved one (result N)`, then `gyro: calibration restored after the reopen: bias=(...)` or `calibration still missing after the reopen` (with a notice) | The controller was reopened (another USB port, a Bluetooth drop) and GyroLib gave it no bias, so the camera would drift at the sensor's own offset. Gyro4All loads `gyrolib.ini` again for the saved manual calibration; if that doesn't bring it back, recalibrate with the controller lying still. `kept its calibration`: nothing to do. |
 | Panel doesn't open | Look for `overlay:` lines (DX11/DX10/DX9 games: also `panel:` lines, e.g. `panel: captured D3D11 swapchain ...`, `panel: D3D11 renderer ready ...`, `panel: no frame presented for N ms: panel closed`). Try from the game's pause menu. As a fallback, edit `gyrolib.ini` directly. |
 | Double motion | Steam Input or another tool is also converting the gyro to mouse. In the F10 panel, set "Steam Input mouse" to Block (or Convert movement). |
@@ -1042,9 +1043,9 @@ Requirements:
 
 - Visual Studio 2022 or newer with the C++ desktop workload (MSVC x64, CMake 3.24+). C++20.
 - Git Bash (for the helper scripts).
-- The GyroLib **1.3.1** Windows x64 SDK, from the
+- The GyroLib **1.4.0** Windows x64 SDK, from the
   [GyroLib releases](https://github.com/lud-berthe/GyroLib/releases). Verify it against `SHA256SUMS` and
-  extract it to `third_party/GyroLib-1.3.1/sdk/GyroLib-1.3.1-sdk-windows-x64/`. The pinned version is in
+  extract it to `third_party/GyroLib-1.4.0/sdk/GyroLib-1.4.0-sdk-windows-x64/`. The pinned version is in
   `tools/gyrolib-sdk.sh`.
 
 ```bash

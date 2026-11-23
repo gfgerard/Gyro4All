@@ -4,7 +4,7 @@ Gyro4All is released under the [MIT License](../LICENSE.txt).
 
 ## GyroLib
 
-Gyro4All depends on and redistributes **[GyroLib](https://github.com/lud-berthe/GyroLib)** (version 1.3.1,
+Gyro4All depends on and redistributes **[GyroLib](https://github.com/lud-berthe/GyroLib)** (version 1.4.0,
 commit `9addfd9`), which provides all controller input, gyro processing and the settings panel.
 
 ```text

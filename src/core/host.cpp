@@ -556,6 +556,14 @@ bool start_gyro() {
         log("gyro: calibration.automatic menus only -> any time (the %s module can't see the game's menus)",
             g_engine->name());
     }
+    // GyroLib 1.4.0's automatic-calibration limits (gyrolib.ini; panel: Any time, then "..."), for drift reports.
+    double residual = 0, time_constant = 0, reference = 0;
+    gl_setting_get(ctx, "calibration.automatic", &calibration);
+    if (gl_setting_get(ctx, "calibration.active_residual_limit_dps", &residual) == GL_OK &&
+        gl_setting_get(ctx, "calibration.active_time_constant_s", &time_constant) == GL_OK &&
+        gl_setting_get(ctx, "calibration.manual_reference_limit_dps", &reference) == GL_OK)
+        log("gyro: automatic calibration %.0f, during play residual limit %.2f deg/s, time constant %.0f s, "
+            "manual reference limit %.2f deg/s", calibration, residual, time_constant, reference);
 
     // Recenter is offered from the start, so the panel shows it in the main menu too; a gameplay view that can't
     // support it withdraws it (update_recenter_support).
