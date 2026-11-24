@@ -5,6 +5,22 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-25 **Genome: the layout read from the game's code instead of fixed offsets (for other builds and ELEX 2).**
+  Each offset comes from an instruction in code found by class (RTTI vtable) or a short signature, with a cross-check;
+  what a build doesn't give turns only its feature off, logged (`genome: layout from code: ...; not found: ...`).
+  Sources: camera frame builder `ELEX.exe+0x312DBE` (`lea rcx,[rdi+0x1C0]`; call state getter `0x564E50` = `lea rax,
+  [rcx+0x170]; ret`; `movss xmm7,[rax+0x70]` pitch; after `call cosf`, `movss xmm7,[rbx+0x6C]` yaw; check yaw = pitch -
+  4); turn function `0x414B70` (signature now wildcards `mov r14,[rcx+0x48]`; `movss xmm7,[rbx+0x20]` ... `comiss xmm6,
+  [rbx+0x24]` turn/factor, `movss xmm7,[rbx+0x1C]; ucomiss; je` remaining, `lea rcx,[r14+0xC]` heading; checks
+  remaining = turn - 4, factor = turn + 4); `gCCameraTargetMovement` vtable slot 2 (`lea rdi,[rcx+8]` proxy; `mov edx,
+  0x66 ... call [r8+0xF0]` property set type and getter slot); `eCEntityProxy` slot 1 (`mov rax,[rcx+8]` handle); the
+  live entity's own property set getter (`mov r8,[rcx+0x30]` ... `mov rax,[rcx+0x38]`, read once per entity vtable);
+  `CProcessor@gCCameraAdmin` slot 2 -> thunk `0x5C070` (`jmp [rax+0x128]`: update slot 37). Pitch is also only written
+  while it reads within +-90. Still fixed (checked before use): admin `+0x30` (processor owner), `+0x78` (camera
+  target, by vtable), render camera FOV `+0xCC`/`+0x64` (cot check). Every pattern matched once in the 2018 Steam exe
+  and gave the old values (offline and in the game's log); user-tested in game, DualSense via the USB adapter, Steam
+  Input off: works as before.
+
 - 2026-11-24 **Genome engine module (`src/engines/genome/`): ELEX (Steam, `system\ELEX.exe`, time stamp 1521487194,
   image 0x1843000). User-tested with a DualSense through a USB adapter that presents it as a wired DualSense, Steam
   Input off (XInput translation) and on: camera, aiming (bow, gun, flamethrower), no drift; installed as `version.dll`.**
