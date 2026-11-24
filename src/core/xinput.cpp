@@ -26,6 +26,7 @@
 #include <cstring>
 #include <cctype>
 #include <cwctype>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -38,6 +39,7 @@ using GetState_t = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
 using SetState_t = DWORD(WINAPI*)(DWORD, XINPUT_VIBRATION*);
 using GetCaps_t = DWORD(WINAPI*)(DWORD, DWORD, XINPUT_CAPABILITIES*);
 using Enable_t = void(WINAPI*)(BOOL);
+using GetKeystroke_t = DWORD(WINAPI*)(DWORD, DWORD, XINPUT_KEYSTROKE*);
 using RegisterRawInputDevices_t = BOOL(WINAPI*)(PCRAWINPUTDEVICE, UINT, UINT);
 using GetRawInputData_t = UINT(WINAPI*)(HRAWINPUT, UINT, LPVOID, PUINT, UINT);
 
@@ -50,6 +52,7 @@ GetState_t g_get_state_ex = nullptr;  // XInputGetStateEx: ordinal 100 only (add
 SetState_t g_set_state = nullptr;
 GetCaps_t g_get_caps = nullptr;
 Enable_t g_enable = nullptr;
+GetKeystroke_t g_get_keystroke = nullptr;  // xinput1_3/1_4 only (ordinal 8); xinput9_1_0 has none
 RegisterRawInputDevices_t g_register_raw = nullptr;
 GetRawInputData_t g_get_raw_data = nullptr;
 using GetRawInputBuffer_t = UINT(WINAPI*)(PRAWINPUT, PUINT, UINT);
@@ -265,6 +268,136 @@ DWORD WINAPI hk_get_caps(DWORD user, DWORD flags, XINPUT_CAPABILITIES* caps) {
 void WINAPI hk_enable(BOOL enable) {
     g_enabled = enable != FALSE;
     if (Enable_t real = original(g_enable, "XInputEnable", "xinput1_4.dll")) real(enable);
+}
+
+// ------------------------------------------------------------------ XInputGetKeystroke
+
+// The translated controller's key events, made from changes of the state XInputGetState shows: buttons (not Guide),
+// triggers past XINPUT_GAMEPAD_TRIGGER_THRESHOLD and each stick's direction outside its dead zone, with key repeat for
+// the key pressed last. Games that read their buttons only this way see the sticks and no button otherwise (ELEX:
+// sticks with XInputGetState, every button with XInputGetKeystroke, MODLOG 2026-11-24).
+constexpr ULONGLONG kRepeatDelayMs = 400, kRepeatMs = 100;
+
+struct ButtonKey {
+    WORD button, vk;
+};
+constexpr ButtonKey kButtonKeys[] = {
+    {XINPUT_GAMEPAD_A, VK_PAD_A},
+    {XINPUT_GAMEPAD_B, VK_PAD_B},
+    {XINPUT_GAMEPAD_X, VK_PAD_X},
+    {XINPUT_GAMEPAD_Y, VK_PAD_Y},
+    {XINPUT_GAMEPAD_RIGHT_SHOULDER, VK_PAD_RSHOULDER},
+    {XINPUT_GAMEPAD_LEFT_SHOULDER, VK_PAD_LSHOULDER},
+    {XINPUT_GAMEPAD_DPAD_UP, VK_PAD_DPAD_UP},
+    {XINPUT_GAMEPAD_DPAD_DOWN, VK_PAD_DPAD_DOWN},
+    {XINPUT_GAMEPAD_DPAD_LEFT, VK_PAD_DPAD_LEFT},
+    {XINPUT_GAMEPAD_DPAD_RIGHT, VK_PAD_DPAD_RIGHT},
+    {XINPUT_GAMEPAD_START, VK_PAD_START},
+    {XINPUT_GAMEPAD_BACK, VK_PAD_BACK},
+    {XINPUT_GAMEPAD_LEFT_THUMB, VK_PAD_LTHUMB_PRESS},
+    {XINPUT_GAMEPAD_RIGHT_THUMB, VK_PAD_RTHUMB_PRESS},
+};
+
+// A stick's direction key, 0 inside its dead zone. keys: UP, DOWN, RIGHT, LEFT, UPLEFT, UPRIGHT, DOWNRIGHT, DOWNLEFT.
+WORD stick_key(SHORT x, SHORT y, int dead, const WORD (&keys)[8]) {
+    const bool up = y > dead, down = y < -dead, right = x > dead, left = x < -dead;
+    if (up) return left ? keys[4] : right ? keys[5] : keys[0];
+    if (down) return right ? keys[6] : left ? keys[7] : keys[1];
+    return right ? keys[2] : left ? keys[3] : 0;
+}
+
+constexpr WORD kLeftStickKeys[8] = {VK_PAD_LTHUMB_UP,     VK_PAD_LTHUMB_DOWN,    VK_PAD_LTHUMB_RIGHT,     VK_PAD_LTHUMB_LEFT,
+                                    VK_PAD_LTHUMB_UPLEFT, VK_PAD_LTHUMB_UPRIGHT, VK_PAD_LTHUMB_DOWNRIGHT, VK_PAD_LTHUMB_DOWNLEFT};
+constexpr WORD kRightStickKeys[8] = {VK_PAD_RTHUMB_UP,     VK_PAD_RTHUMB_DOWN,    VK_PAD_RTHUMB_RIGHT,     VK_PAD_RTHUMB_LEFT,
+                                     VK_PAD_RTHUMB_UPLEFT, VK_PAD_RTHUMB_UPRIGHT, VK_PAD_RTHUMB_DOWNRIGHT, VK_PAD_RTHUMB_DOWNLEFT};
+
+struct KeyEvents {
+    bool started = false;           // the first call only records what is held (no events for it)
+    std::vector<WORD> down;         // keys down at the last call
+    std::deque<XINPUT_KEYSTROKE> queue;
+    WORD repeat = 0;                // the key that repeats (pressed last, still down)
+    ULONGLONG repeat_at = 0;
+};
+std::mutex g_key_mutex;  // guards g_keys
+KeyEvents g_keys;        // the translated controller's
+
+void queue_keys(KeyEvents& k, const XINPUT_GAMEPAD& g, BYTE user) {
+    std::vector<WORD> now;
+    for (const ButtonKey& b : kButtonKeys)
+        if (g.wButtons & b.button) now.push_back(b.vk);
+    if (g.bLeftTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD) now.push_back(VK_PAD_LTRIGGER);
+    if (g.bRightTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD) now.push_back(VK_PAD_RTRIGGER);
+    if (WORD vk = stick_key(g.sThumbLX, g.sThumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE, kLeftStickKeys)) now.push_back(vk);
+    if (WORD vk = stick_key(g.sThumbRX, g.sThumbRY, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE, kRightStickKeys)) now.push_back(vk);
+    const ULONGLONG t = GetTickCount64();
+    const auto event = [&](WORD vk, WORD flags) {
+        XINPUT_KEYSTROKE e{};
+        e.VirtualKey = vk;
+        e.Flags = flags;
+        e.UserIndex = user;
+        k.queue.push_back(e);
+    };
+    const auto has = [](const std::vector<WORD>& keys, WORD vk) { return std::find(keys.begin(), keys.end(), vk) != keys.end(); };
+    if (k.started) {
+        for (WORD vk : k.down)
+            if (!has(now, vk)) {
+                event(vk, XINPUT_KEYSTROKE_KEYUP);
+                if (k.repeat == vk) k.repeat = 0;
+            }
+        for (WORD vk : now)
+            if (!has(k.down, vk)) {
+                event(vk, XINPUT_KEYSTROKE_KEYDOWN);
+                k.repeat = vk;
+                k.repeat_at = t + kRepeatDelayMs;
+            }
+    }
+    k.started = true;
+    k.down = std::move(now);
+    if (k.repeat && k.queue.empty() && t >= k.repeat_at) {
+        event(k.repeat, XINPUT_KEYSTROKE_KEYDOWN | XINPUT_KEYSTROKE_REPEAT);
+        k.repeat_at = t + kRepeatMs;
+    }
+    while (k.queue.size() > 64) k.queue.pop_front();  // a game that stopped reading them
+}
+
+DWORD get_keystroke(GetKeystroke_t real, DWORD user, DWORD reserved, XINPUT_KEYSTROKE* key) {
+    Inside inside;
+    if (!key) return ERROR_BAD_ARGUMENTS;
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) log("xinput: the game reads buttons with XInputGetKeystroke");
+    bool ours = false;
+    DWORD slot = 0;
+    XINPUT_GAMEPAD g{};
+    if (!t_watcher) {
+        std::lock_guard lock(g_mutex);
+        if (g_exposed && (user == g_slot || user == XUSER_INDEX_ANY)) {
+            ours = true;
+            slot = g_slot;
+            if (g_enabled) g = g_state.Gamepad;
+        } else if (user < 4 && pending_slot(user)) {
+            return ERROR_EMPTY;  // connected, at rest
+        }
+    }
+    if (ours) {
+        std::lock_guard lock(g_key_mutex);
+        queue_keys(g_keys, g, BYTE(slot));
+        if (!g_keys.queue.empty()) {
+            *key = g_keys.queue.front();
+            g_keys.queue.pop_front();
+            return ERROR_SUCCESS;
+        }
+        if (user != XUSER_INDEX_ANY) return ERROR_EMPTY;
+    }
+    DWORD result = real ? real(user, reserved, key) : ERROR_DEVICE_NOT_CONNECTED;
+    // A real controller's keys while GyroLib's panel has the controller: dropped (its buttons are the panel's).
+    if (g_neutral.load(std::memory_order_relaxed))
+        for (int i = 0; result == ERROR_SUCCESS && i < 64; ++i) result = real(user, reserved, key);
+    if (result == ERROR_SUCCESS && g_neutral.load(std::memory_order_relaxed)) result = ERROR_EMPTY;
+    return ours && result == ERROR_DEVICE_NOT_CONNECTED ? ERROR_EMPTY : result;
+}
+
+DWORD WINAPI hk_get_keystroke(DWORD user, DWORD reserved, XINPUT_KEYSTROKE* key) {
+    return get_keystroke(original(g_get_keystroke, "XInputGetKeystroke", "xinput1_4.dll"), user, reserved, key);
 }
 
 // xinput1_4 on protected exes (Mass Effect LE imports it): inline hooks on its exports, with their own originals.
@@ -934,6 +1067,9 @@ void install(const Settings& settings) {
             hooks::add(dll, "XInputSetState", reinterpret_cast<void*>(&hk_set_state), reinterpret_cast<void**>(&g_set_state));
             hooks::add(dll, "XInputGetCapabilities", reinterpret_cast<void*>(&hk_get_caps), reinterpret_cast<void**>(&g_get_caps));
             hooks::add(dll, "XInputEnable", reinterpret_cast<void*>(&hk_enable), reinterpret_cast<void**>(&g_enable));
+            if (GetProcAddress(GetModuleHandleA(dll), "XInputGetKeystroke"))  // not in xinput9_1_0
+                hooks::add(dll, "XInputGetKeystroke", reinterpret_cast<void*>(&hk_get_keystroke),
+                           reinterpret_cast<void**>(&g_get_keystroke));
         }
         bool any14 = false;
         if (GetModuleHandleA("xinput1_4.dll")) {
@@ -962,13 +1098,16 @@ void install(const Settings& settings) {
     hooks::add(nullptr, "XInputSetState", reinterpret_cast<void*>(&hk_set_state), reinterpret_cast<void**>(&g_set_state));
     hooks::add(nullptr, "XInputGetCapabilities", reinterpret_cast<void*>(&hk_get_caps), reinterpret_cast<void**>(&g_get_caps));
     hooks::add(nullptr, "XInputEnable", reinterpret_cast<void*>(&hk_enable), reinterpret_cast<void**>(&g_enable));
+    hooks::add(nullptr, "XInputGetKeystroke", reinterpret_cast<void*>(&hk_get_keystroke), reinterpret_cast<void**>(&g_get_keystroke));
     // The Windows SDK's xinput.lib imports by ordinal; xinput1_3 and xinput1_4 share these ordinals (xinput9_1_0 has
-    // other ones, but exports everything by name and has no XInputGetStateEx).
+    // other ones, but exports everything by name and has no XInputGetStateEx or XInputGetKeystroke).
     for (const char* dll : {"xinput1_4.dll", "xinput1_3.dll"}) {
         any = hooks::add_ordinal(dll, 2, "XInputGetState", reinterpret_cast<void*>(&hk_get_state), reinterpret_cast<void**>(&g_get_state)) || any;
         hooks::add_ordinal(dll, 3, "XInputSetState", reinterpret_cast<void*>(&hk_set_state), reinterpret_cast<void**>(&g_set_state));
         hooks::add_ordinal(dll, 4, "XInputGetCapabilities", reinterpret_cast<void*>(&hk_get_caps), reinterpret_cast<void**>(&g_get_caps));
         hooks::add_ordinal(dll, 5, "XInputEnable", reinterpret_cast<void*>(&hk_enable), reinterpret_cast<void**>(&g_enable));
+        hooks::add_ordinal(dll, 8, "XInputGetKeystroke", reinterpret_cast<void*>(&hk_get_keystroke),
+                           reinterpret_cast<void**>(&g_get_keystroke));
         hooks::add_ordinal(dll, 100, "XInputGetStateEx", reinterpret_cast<void*>(&hk_get_state_ex), reinterpret_cast<void**>(&g_get_state_ex));
     }
     log("xinput: XInputGetState hook %s (%s)", any ? "installed" : "registered, no game module imports it yet",
