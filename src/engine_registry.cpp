@@ -22,11 +22,12 @@
 #include "decima.hpp"
 #include "toylogic.hpp"
 #include "foundation.hpp"
+#include "genome.hpp"
 
 namespace gyro4all {
 
 std::span<Engine* const> all_engines() {
-    static Engine* const engines[] = {&halo::engine(), &unreal::engine(), &unreal3::engine(), &unity::engine(), &re::engine(), &fb::engine(), &idtech::engine(), &source::engine(), &foura::engine(), &swarm::engine(), &cryengine::engine(), &glacier::engine(), &northlight::engine(), &asura::engine(), &rage::engine(), &red::engine(), &platinum::engine(), &dawn::engine(), &decima::engine(), &toylogic::engine(), &foundation::engine()};
+    static Engine* const engines[] = {&halo::engine(), &unreal::engine(), &unreal3::engine(), &unity::engine(), &re::engine(), &fb::engine(), &idtech::engine(), &source::engine(), &foura::engine(), &swarm::engine(), &cryengine::engine(), &glacier::engine(), &northlight::engine(), &asura::engine(), &rage::engine(), &red::engine(), &platinum::engine(), &dawn::engine(), &decima::engine(), &toylogic::engine(), &foundation::engine(), &genome::engine()};
     return engines;
 }
 

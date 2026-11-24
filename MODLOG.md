@@ -5,6 +5,60 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-24 **Genome engine module (`src/engines/genome/`): ELEX (Steam, `system\ELEX.exe`, time stamp 1521487194,
+  image 0x1843000). User-tested with a DualSense through a USB adapter that presents it as a wired DualSense, Steam
+  Input off (XInput translation) and on: camera, aiming (bow, gun, flamethrower), no drift; installed as `version.dll`.**
+  - Static triage: x64, no DRM wrapper, MSVC RTTI kept (~3,500 classes), engine linked into the exe. Imports
+    `VERSION.dll` (and `binkw64`/`fmod64`/`iggy_w64` import `winmm.dll`, so `winmm.dll` should load too: untested).
+    `XINPUT1_3` by ordinal: 2 (`XInputGetState`), 3 (`XInputSetState`), 8 (`XInputGetKeystroke`). Config
+    `data\ini\ConfigDefault.xml` (`Camera AziSpeedScale/ElevSpeedScale`, `Relax*`, `FoV=85`).
+  - Camera: static `gCCameraAdmin` at `ELEX.exe+0x12ED600` (ctor `0x30A1C0`, called from the static initializer
+    `0xA75330`; found at run time by its vtable `+0xBAD528` in `.data`, checked by `+0x30` = itself). Per-frame update:
+    vtable slot 37 (`0x30EEB0`, `void(admin*)`, main thread, called by its `CProcessor`); hooked to see pauses (it stops
+    in the pause menu and while loading). `+0x1C0` camera name (`cam_normal`, `cam_ranged`, `cam_ranged_dist`
+    (flamethrower), `cam_ui_world` (inventory), `cam_dialog_npc_1_dist8`); camera state at `+0x330` (getter `0x564E50` on
+    `+0x1C0`): `+0x350` yaw-only base frame (copied every frame from the heading; writes undone), `+0x39C` yaw offset
+    (degrees, game keeps 0; a write is kept and turns the view, not used), `+0x3A0` pitch (degrees, + down: the pitch
+    source, written directly). View = base x yaw offset x pitch (`0x312DE9..0x31302F`), eased (~0.3 s).
+  - Heading: camera target `+0x78` (static `gCCameraTargetMovement` `ELEX.exe+0xDE3708`, vtable `+0xBAD4A0`, slot 2
+    `0x309F50`) -> entity (`[[target+0x10]]`, `eCDynamicEntity`) -> property set 0x66 (`[entity+0x30]` byte table at
+    `type+1`, `[entity+0x38]` array) = `gCCharacterMovement2_PS` -> `[+0x48]` object D -> `D+0xC` horizontal unit
+    heading (base frame forward via `0x411070` -> `0x5F0E10`). Heading = atan2(x, z), + = right.
+  - How the game turns it: movement job `0x413D80` (worker thread, reached by a jump from a job dispatcher at
+    `0x413D52`) calls `0x413720` -> `0x413000(PS, move input global +0x12D9034, turn input float global +0x12D9028
+    (degrees), info)`: wanted heading T = heading x rot(turn input); the job stores angle(heading, T) (`0x72DE0`:
+    normalize both, dot clamped, `acosf`; sign from a 2D cross product, 0 taken as +) at `D+0x118`, the body's
+    remaining turn at `D+0x114`, factor `D+0x11C` (-1; +1 while aiming). Main thread: `0x414150` -> `0x414B70(PS,
+    D+0xF8, dt)` rotates the entity by the remaining turn and the heading by the turn (`0x5F10F0`/`0x5F13D0`), with a
+    clamp when factor >= 0: at most the remaining turn. Watched with the right stick: the stick drives the turn, the
+    yaw offset stays 0.
+  - Final route: `0x414B70` hooked (first-bytes signature), gyro yaw added to `D+0x118` (and to `D+0x114` when the factor
+    is >= 0, else aiming was clamped to the body's lag: "sensitivity fine for under a second, then very low"). Pitch
+    written to `+0x3A0`. Stick fallback off while that route runs (`view_angles` false: the turn shows a frame later,
+    the fallback took every turn for an undone write and drove the right stick: jumpy camera).
+  - **The drift (game bug):** with no turn input T equals the heading bit for bit, yet `acosf(dot)` of the normalized
+    pair can give 0.000345 rad (dot one ulp under 1), signed + (cross exactly 0). Vanilla rests where the dot rounds to
+    1; every gyro turn lands on a new heading, a third of which make that spurious turn next frame: creep right
+    0.4-1 deg/s with the gyro on (also with the pad on the desk, any GyroLib noise). Fix: a positive turn equal to
+    `0x72DE0(heading, heading)` (the game's own function, found by its call in the job) is dropped. Automated A/B with
+    synthetic tremor (a temporary `GenomeTestNoise` switch, removed): 0.90 deg/s off, 0.00-0.03 on.
+  - FOV: static render cameras `eCCameraBase` (`ELEX.exe+0x12C2970`, `+0x12C2AE8`, `+0x12C2C60`, alike): `+0xCC`
+    vertical FOV in radians (60 deg, 45 aiming a bow), `+0x64` = cot(FOV/2). Reported for *Adapt to Zoom*; reference =
+    the third-person FOV once steady 0.5 s (the game eases back after aiming), or `ZoomReferenceFOV=`.
+  - Dead ends: direct heading writes (kept, but the movement job races them: lag and ~0.6 deg/s creep); the yaw
+    added to `0x413000`'s turn-input argument (`0x413720` runs from five callers a frame and the first, not the job's,
+    took it: no yaw at all); a yaw "step" (holding back yaw under 20-100 millidegrees) cut the creep but quantizes the
+    gyro; the right-stick rest offset (dead zone `eCWinGamePadInput+0x350` = 0.265, offset 0.056: not it); mouse input
+    (a Raw Input listener saw none). `guided.py` lost its first run: the comparison took 3 min while the user moved;
+    a patched copy took pose 2's snapshot at once and used `--ref` = the admin's camera forward.
+- 2026-11-24 **Core: `XInputGetKeystroke` translated (`xinput.cpp`).** ELEX reads every button with it (ordinal 8) and
+  only the sticks with `XInputGetState`: with the DualSense shown as XInput the sticks worked and no button did.
+  Hooked by name and by ordinal 8 (`xinput1_3`/`xinput1_4`; not in `xinput9_1_0`), inline on `xinput1_3` for protected
+  exes. Our slot: key events from the translated state's changes (14 buttons, triggers past 30, 8-way stick
+  directions past XInput's dead zones), repeat after 400 ms every 100 ms for the key pressed last; `XUSER_INDEX_ANY`
+  then falls through to real pads; real pads' events dropped while GyroLib's panel has the controller. User-verified in
+  ELEX (Steam Input off).
+
 - 2026-11-24 **Halo 3 / ODST: stray weapon pickups with the gyro on; turn now written on the game's thread (Halo 3
   confirmed by the user).** Report (1.12.0, DualSense Edge, activation Toggle on a back paddle): over a weapon, pressing
   another button (melee, crouch) picked the weapon up; not in Halo 2. Same with Gyro4All's XInput translation (Steam

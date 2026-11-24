@@ -8,7 +8,8 @@ play.
 - **Drop-in install:** one proxy `winmm.dll` (or `version.dll`) plus a `Gyro4All` folder next to the game executable. No loader
   (UE4SS etc.) required.
 - **Engine modules:** an engine-neutral core plus one module per engine, picked at startup (`engine:` in the log,
-  `Engine=Unreal` / `Engine=RE` in `Gyro4All.ini` to force one). Unreal Engine 4/5 and, since 1.0, Capcom's RE Engine.
+  `Engine=Unreal` / `Engine=RE` in `Gyro4All.ini` to force one). Unreal Engine 4/5 and, since 1.0, Capcom's RE Engine;
+  more engines since (see [GAMES](GAMES.md)), among them Piranha Bytes' Genome (ELEX).
 - **Signature-free engine access:** Unreal: GUObjectArray, FNamePool and the UStruct/FProperty layout are found at
   runtime by shape and verified against known engine classes, so no per-game byte patterns are needed.
   Works on monolithic and modular (one DLL per engine module) builds. RE Engine: the type database (TDB) is found
@@ -245,7 +246,12 @@ All diagnostics go to `Gyro4All\Gyro4All.log` (probe results, if enabled, to `Gy
 | `dinputpad: the game reads controller VID:PID with GetDeviceState (N bytes, ...) into 0x... (...), called from <module>+0x... (thread ...)` | Each place the game reads a DirectInput controller from, once: the call site in the game's code, the buffer (static, heap or `on the caller's stack`) and its data format. The last `GetDeviceState` buffer is WriteWatch's `di` address. |
 | `xinput: WMI: the game reads controller VID:PID's DeviceID: shown as an XInput one` | The game checks which DirectInput controllers are XInput ones through WMI (`IsXInputDevice`); that controller now passes, and the game should poll it (`the game polls XInputGetState`). |
 | `xinput: XInputGetState hook registered, no game module imports it yet` | The game hasn't loaded its XInput code yet, or uses another input API (then there is nothing to translate). |
+| `xinput: the game reads buttons with XInputGetKeystroke` | The game takes its button presses as key events; Gyro4All makes them from the translated controller's state. |
 | `engine: RE (detected)` | `re_chunk_000.pak` next to the exe: the RE Engine module is used. |
+| `engine: Genome (detected)` | The exe is in a `system` folder next to `data\ini\ConfigDefault.xml` and `data\packed` (ELEX): the Genome module is used. |
+| `genome: turn function ELEX.exe+0x... hooked`, `genome: angle function ...: spurious turns (heading to itself) dropped` | Genome start-up: the gyro's yaw goes with the game's own turn of the player's heading, and a rounding artifact of the game that made the camera creep right while the gyro was on is removed. `not found` instead: the yaw is written to the heading directly (the camera may lag and creep right). |
+| `genome: camera "cam_normal"` (or `cam_ranged`, `cam_ui_world`, ...) | Genome: the active camera. The gyro turns `cam_normal*` (view *Default*) and `cam_ranged*` (view *Ranged aim*); other cameras (menus, dialogs) keep it off. |
+| `status: genome: heading turned X, gyro Y (...), rest Z deg; spurious turns dropped N, clamped turns opened M` | Genome, every 30 s: the heading's turn in gameplay against the gyro's; `rest` is the right stick or mouse, about 0 with them idle (anything else is drift). |
 | `re: TDB 70 ready`, `re: via.Application ...`, `re: gyro frame hooked before LateUpdateBehavior` | RE Engine start-up: the type database, the engine's application object and its per-frame steps (all listed once, `name(priority)`) were found, and the gyro runs once per frame before that step. `re: ... the gyro can't run in this game` says which part failed. |
 | `re: camera <controller> (type N[, animation][, paused])` | RE Engine: the player camera's current controller. `MaximumOperatable (type 0)` is free look, where the gyro turns the camera; anything else (`FullAnimation`, `ElasticRotation`...) is a scripted camera and the gyro stays off. `re: camera no player` in menus and loading. |
 | `overlay: Present chain (call N): called from <module>; slot 8 ...; our original <module> (starts with a jump to ...)` | D3D10/D3D11 games: who presents through the settings panel's hook, logged three times per session. A jump at the start of the original is another overlay's inline hook (RivaTuner's on `dxgi.dll`'s Present), which runs after the panel; a slot that no longer holds our hook was rewritten by another module. Useful when another overlay misbehaves with Gyro4All. |
@@ -276,8 +282,10 @@ DualSense --HID--> SDL3 (inside gyrolib.dll)
   which mode is used (`hooks: ... import-table hooks` / `inline hooks on exports`); `GYRO4ALL_INLINE=1` in the
   environment forces inline mode.
 - Xbox controller translation: the game's imports of `XInputGetState`, `XInputSetState`, `XInputGetCapabilities`,
-  `XInputEnable` (by name or ordinal, including delay-loaded ones: UE 5 delay-loads `XINPUT1_4.dll`) and
+  `XInputEnable`, `XInputGetKeystroke` (by name or ordinal, including delay-loaded ones: UE 5 delay-loads `XINPUT1_4.dll`) and
   `XInputGetStateEx` are patched in the game modules only, so SDL inside GyroLib never sees the virtual controller.
+  `XInputGetKeystroke` gets key events made from the translated state's changes (buttons, triggers, stick directions,
+  with key repeat): some games read every button that way and only the sticks with `XInputGetState` (ELEX).
   Once per frame Gyro4All copies the SDL state of GyroLib's selected controller into the slot it answers for (the
   first one with no real controller), and turns `XInputSetState` into SDL rumble. In auto mode it waits 2 s after
   the controller appears, and stays off if a real XInput controller is connected or the game shows signs of reading
