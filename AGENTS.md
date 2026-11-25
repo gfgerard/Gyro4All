@@ -146,7 +146,10 @@ Key rules:
 - `tools/`: build, package, deploy, benchmark and test tools (see Tooling). Engine-specific debug and camera-finding
   tools go in `tools/<engine>/` (same names as `src/engines/`), each with a `README.md` of step-by-step instructions:
   `tools/reEngine/` (`tdbdump.py`, `camera_finder.lua`), `tools/unrealEngine/` and `tools/unity/` (the built-in camera probes),
-  `tools/unrealEngine3/` (`ue3tool.py`: UE3 reflection, scene, snapshot diff and camera write test on a running game).
+  `tools/unrealEngine3/` (`ue3tool.py`: UE3 reflection, scene, snapshot diff and camera write test on a running game),
+  `tools/genome/` (`shapes.py`: the Genome module's code shapes checked against a game build; `pe.py`: exports, named
+  disassembly, references, a dump of a running game; `heapstates.py`: cued state search in the camera admin and the
+  player's property sets; `phases.py` with `test-switches.patch`: synthetic-input tests).
   Engine-neutral: `tools/camtrace/` (`guided.py`: sound-cued read-only search for the view's copies and sources, the
   first step; `camtrace.py`: copies of the view at fixed addresses, write tests, one-hit
   hardware write breakpoints through cdb, code references and signatures).

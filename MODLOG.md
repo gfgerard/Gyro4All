@@ -5,6 +5,24 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-25 **Genome: unknown builds fall back to the gyro as right stick; `tools/genome/`.** Compared with the other
+  engine modules (layout, hooks, logs, docs in line), Genome lacked one thing 16 of 22 modules have: when its code shapes
+  don't match a build (a game patch, another store's build), it reported "camera layout not known" and the gyro stayed
+  off. Now, like Northlight's and Asura's "no camera hook", it reports `no_camera` with view 1 (the core sends the gyro
+  to the game as right-stick input; menus still gate it where the UI state stack or Risen 3's game mode is known):
+  `GenomeEngine::hooked_layout()` (camera layout, heading offsets, player chain, the admin's and movement's classes; not
+  while the code is still encrypted) and Risen's route when its code read fails. Log: `genome: no camera hook for this
+  build ...`. Tested in ELEX II with the test build's `GenomeForceNoCamera=1`: the core's blind stick fallback turned the
+  camera (with the stick's acceleration, as expected of stick emulation), no gyro in menus (the UI state stack); user:
+  "worked as expected".
+  - `tools/genome/` (README): `shapes.py` checks the module's code shapes against a build offline, the patterns parsed
+    from the module's own source (no copy to drift; in ELEX II the frame builder, turn function, angle call and aim
+    mode each match once); `pe.py` (exports parsed by hand: pefile stops at 8192, Risen's `Game.dll` has 10,858; named
+    disassembly, references, RTTI vtables, strings, `dump` of a running game for Risen 3's encrypted exe);
+    `heapstates.py` (the cued state search that found ELEX II's aim mode, generalized: roots and the player's property
+    sets by camtrace address expressions, exact and tolerant-float candidates per round; re-run on the saved ELEX II
+    snapshots it finds the camera distances again); `phases.py` and `test-switches.patch` (the test-only switches:
+    synthetic yaw/pitch/stick/tremor, `GenomeForceNoCamera=1` for the fallback; never committed into `src`).
 - 2026-11-25 **Genome: ELEX II's aim view from the game's aim mode.** ELEX II aims with its gameplay camera
   (`cam_game_alt`), so its *Ranged aim* view never came on. Tested in game (Steam, DualSense via USB adapter, Steam Input
   off): with *Default* Off and *Ranged aim* Always on the gyro works only while aiming; user: "It works".
