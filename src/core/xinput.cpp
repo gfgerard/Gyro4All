@@ -635,13 +635,25 @@ void export_hooks_pass() {
 
 // No game module imports XInputGetState (by name or ordinal) or XInputGetStateEx: a game that reads XInput then loaded it
 // and resolved the functions itself. A module that imports it later is still fine: its translated calls pass through.
+// An import from XInputUap only counts as none: Death Stranding imports it (delay-load) but never calls it, and reads
+// xinput1_4 through GetProcAddress, which only the export hooks see.
 bool resolves_xinput_itself() {
-    return hooks::source_dll("XInputGetState").empty() && hooks::source_dll("XInputGetStateEx").empty();
+    auto none = [](const char* function) {
+        const std::string dll = hooks::source_dll(function);
+        return dll.empty() || _stricmp(dll.c_str(), "XINPUTUAP.dll") == 0;
+    };
+    return none("XInputGetState") && none("XInputGetStateEx");
 }
 
 void watch() {
     t_watcher = true;
-    GetState_t real = original(g_get_state, "XInputGetState", "xinput1_4.dll");
+    // Real controllers are counted through xinput1_4 (the Xbox controller driver), not the DLL the game imports:
+    // XInputUap (Windows.Gaming.Input) reported a controller in slot 0 that xinput1_4 didn't (Death Stranding, a
+    // Bluetooth Switch Pro controller and no other pad), and the controller was never shown. Its export hooks, if any,
+    // pass the watcher's calls straight through.
+    GetState_t real = nullptr;
+    if (HMODULE x14 = LoadLibraryW(L"xinput1_4.dll")) real = reinterpret_cast<GetState_t>(GetProcAddress(x14, "XInputGetState"));
+    if (!real) real = original(g_get_state, "XInputGetState", "xinput1_4.dll");
     if (!real) log("xinput: the real XInputGetState could not be resolved; real controllers count as absent");
     // Protected exes: the protector's import table is filled before the game's first frame; a few passes are enough.
     int import_passes = hooks::inline_mode() ? 5 : 0;
