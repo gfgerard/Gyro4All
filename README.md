@@ -120,8 +120,8 @@ changed.
   Example: `AdsProfileButton=LT` and `AdsProfileMode=Hold`.
 
   When two profiles are active, the one activated last wins. The button still does its normal action in the game.
-- **Gyro only while aiming.** In games whose aiming has its own tab in the panel (ELEX: *Ranged aim*; Risen: *Ranged
-  weapon*, with *Magic* following it), set the default tab's **Activation Mode** to **Off** and the aim tab's to
+- **Gyro only while aiming.** In games whose aiming has its own tab in the panel (ELEX and ELEX II: *Ranged aim*; Risen:
+  *Ranged weapon*, with *Magic* following it), set the default tab's **Activation Mode** to **Off** and the aim tab's to
   **Always on**. The gyro then turns the camera only while you aim (or, in Risen, while a bow, crossbow or spell is
   out), and the right stick does the rest as usual. Set the default tab back to Always on to undo it; each game keeps
   its own setting. Which games have an aim tab: see [GAMES](docs/GAMES.md).

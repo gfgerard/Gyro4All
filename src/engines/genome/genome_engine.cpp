@@ -50,6 +50,13 @@
 // inventory, map and skills), "QuickSlotWheel" (ELEX 2's weapon wheel), "GameWorld" (ELEX's inventory) on top) turns the
 // gyro off whenever anything is on top of "Game": ELEX 2 keeps its gameplay camera behind its menus.
 //
+// Aiming (the view "Ranged aim", e.g. for gyro only while aiming): ELEX and Risen 3 aim with a camera of their own
+// (cam_ranged*). ELEX 2 aims with its gameplay camera (only its target distance shrinks: 250 -> 100 with a pistol), so its
+// aim mode decides (MODLOG 2026-11-25): gCCombatSystem2_PS (the player's property set 0x57) -> aim object (+0xA0): state
+// (+4: 0 idle, 1 aiming, 2 shooting) or the cool-down after a shot (+0xB0, seconds), as its IsInAimMode reads them (offsets
+// read from that code; the set found by its class). The view follows the mode frame by frame: aiming and shooting with
+// RT drops it between shots, as the game's own zoom does (a 0.75 s linger was tried and dropped: the user aims with LB).
+//
 // The layout (MODLOG 2026-11-25): the offsets above are read at start from the game's own instructions, each from code
 // found by its class (RTTI vtable) or by a short signature, so another build with the same code shape but other offsets
 // still works; each finder knows the code shapes of both games (kFrameShapes, kTurnShapes, ...). What can't be read is
@@ -341,6 +348,12 @@ constexpr const char* kUpdateThunkPattern = "48 8B 01 48 FF A0 ?? ?? ?? ??";
 // found by its setter: cmp ecx, [mode]; je; mov [mode], ecx; mov [next], ecx; ret. Not in ELEX's code.
 constexpr const char* kGameModeSetterPattern = "3B 0D ?? ?? ?? ?? 74 ?? 89 0D ?? ?? ?? ?? 89 0D ?? ?? ?? ?? F3 C3";
 constexpr const char* kProcessDirectPattern = "48 83 EC 28 80 3D ?? ?? ?? ?? 00 74 ?? 48 8B 49 ?? 48 85 C9 74 ?? E8 ?? ?? ?? ??";
+// ELEX 2's aim mode, gCCombatSystem2_PS::IsInAimMode (behind the script function of that name): mov rax, [rcx+aim];
+// test rax, rax; je; cmp dword [rax+state], 0; jne <yes>; xorps xmm0, xmm0; comiss xmm0, [rax+cool-down]; jae <no>;
+// mov al, 1; ret; xor al, al; ret. Aiming: the aim object's state isn't 0 (1 aiming, 2 shooting), or the cool-down after
+// a shot still runs. Not in ELEX's code (its aim has a camera of its own).
+constexpr const char* kAimModePattern =
+    "48 8B 81 ?? ?? ?? ?? 48 85 C0 74 ?? 83 78 ?? 00 75 ?? 0F 57 C0 0F 2F 80 ?? ?? ?? ?? 73 ?? B0 01 C3 32 C0 C3";
 
 // --- the camera update hook ------------------------------------------------------------------------------------------
 
@@ -473,6 +486,7 @@ public:
         ui_module_vtable_ = rtti::primary_vtable(im, ".?AVgCUIModule@@");
         ui_system_vtable_ = rtti::primary_vtable(im, ".?AVgCUISystem@@");
         ui_state_vtable_ = rtti::primary_vtable(im, ".?AVgCUIState@@");
+        combat_vtable_ = rtti::primary_vtable(im, ".?AVgCCombatSystem2_PS@@");
         log("genome: vtables gCCameraAdmin %s, gCCameraTargetMovement %s, gCCharacterMovement2_PS %s, eCCameraBase %s",
             admin_vtable_ ? mem::module_offset(admin_vtable_).c_str() : "not found",
             target_vtable_ ? mem::module_offset(target_vtable_).c_str() : "not found",
@@ -498,7 +512,7 @@ public:
         if (!risen1_) load_zoom_reference();
     }
 
-    // Ranged aim: ELEX's cam_ranged* (ELEX 2 aims with its gameplay camera: Default only).
+    // Ranged aim: ELEX's and Risen 3's cam_ranged*; ELEX 2 aims with its gameplay camera, so there its aim mode picks it.
     std::vector<ViewInfo> views() const override {
         if (risen1_) return risen1::views();
         return {{1, "Default", 0, true}, {2, "Ranged aim", 1, true}};
@@ -548,6 +562,16 @@ public:
 
         resolve_heading();
         g_player_movement.store(movement_, std::memory_order_relaxed);
+        // ELEX 2 aims with its gameplay camera: the player's aim mode turns its view into the aim view, frame by frame.
+        if (view == 1 && aim_obj_) {
+            const bool aim = aiming();
+            if (aim != aim_view_ && aim_logs_ < 300) {
+                ++aim_logs_;
+                log("genome: aim mode %s", aim ? "on: view Ranged aim" : "off: view Default");
+            }
+            aim_view_ = aim;
+            if (aim) view = 2;
+        }
         f.in_game = heading_ != 0;
         f.paused = !updating_;
         const bool live = updating_ && view && heading_;
@@ -651,9 +675,10 @@ public:
         const bool yaw = yaw_ && mem::rd(admin_ + yaw_, y);
         double v[3] = {};
         const bool dir = heading_ && read_dir(heading_, v);
-        return std::format("genome: camera \"{}\"{}{}, UI \"{}\", heading {} pitch {} yaw offset {} (pitch seen "
+        return std::format("genome: camera \"{}\"{}{}{}, UI \"{}\", heading {} pitch {} yaw offset {} (pitch seen "
                            "{:.1f}..{:.1f})",
                            camera_name_, updating_ ? "" : " (update stopped)", gameplay_camera_ ? "" : " (not gameplay)",
+                           aim_view_ ? " (aim mode)" : "",
                            ui_states_,
                            dir ? std::format("{:.1f}", heading_of(v)) : std::string("?"),
                            pitch ? std::format("{:.1f}", -p) : std::string("?"),
@@ -789,7 +814,62 @@ private:
             update_fn_ ? mem::module_offset(update_fn_).c_str() : ("slot " + std::to_string(update_slot_)).c_str(),
             missing.empty() ? "" : "; not found: ", missing.c_str());
         if (game_mode_) log("genome: game mode mask %s (menus: not 0)", mem::module_offset(game_mode_).c_str());
+
+        // ELEX 2's aim mode (it aims with its gameplay camera: no camera of its own to tell aiming apart).
+        if (const auto aims = find_code(kAimModePattern); aims.size() == 1 && combat_vtable_) {
+            const int32_t aim = rd_i32(aims[0] + 3), cool = rd_i32(aims[0] + 24);
+            if (aim > 0 && aim < 0x1000 && cool > 0 && cool < 0x1000) {
+                aim_obj_ = uintptr_t(aim);
+                aim_state_ = rd_u8(aims[0] + 14);
+                aim_cool_ = uintptr_t(cool);
+                log("genome: aim mode from %s (gCCombatSystem2_PS::IsInAimMode: aim object +%s, state +%s, cool-down +%s): "
+                    "aiming gives the Ranged aim view",
+                    mem::module_offset(aims[0]).c_str(), hex(aim_obj_).c_str(), hex(aim_state_).c_str(), hex(aim_cool_).c_str());
+            }
+        }
     }
+    // ELEX 2: the aim mode (read from IsInAimMode's code): gCCombatSystem2_PS -> aim object (+aim_obj_), its state and
+    // cool-down; the player's combat property set found by its class.
+    uintptr_t combat_vtable_ = 0, aim_obj_ = 0, aim_state_ = 0, aim_cool_ = 0;
+    uintptr_t combat_ = 0;  // the player's gCCombatSystem2_PS
+    int combat_type_ = -1;
+    ULONGLONG next_combat_search_ = 0;
+    bool combat_search_logged_ = false;
+    bool aim_view_ = false;
+    int aim_logs_ = 0;
+
+    // The player's aim mode, read as the game's IsInAimMode reads it.
+    bool aiming() const {
+        const uintptr_t aim = combat_ && aim_obj_ ? mem::rdp(combat_ + aim_obj_) : 0;
+        int32_t state = 0;
+        float cool = 0;
+        return aim && mem::rd(aim + aim_state_, state) && (state != 0 || (mem::rd(aim + aim_cool_, cool) && cool > 0));
+    }
+
+    // The player entity's gCCombatSystem2_PS: the type whose set is of that class, looked for at most once a second
+    // until found (the entity may still be loading).
+    uintptr_t combat_ps(uintptr_t table, uintptr_t array) {
+        const auto is_combat = [&](uintptr_t ps) {
+            uintptr_t vt = 0;
+            return ps && mem::rd(ps, vt) && vt == combat_vtable_;
+        };
+        if (const uintptr_t ps = property_set(table, array, combat_type_); is_combat(ps)) return ps;
+        const ULONGLONG now = GetTickCount64();
+        if (now < next_combat_search_) return 0;
+        next_combat_search_ = now + 1000;
+        for (int type = 0; type < 0xFF; ++type) {
+            const uintptr_t ps = property_set(table, array, type);
+            if (!is_combat(ps)) continue;
+            log("genome: the player's combat property set is type %s (its aim mode picks the aim view)",
+                hex(uintptr_t(type)).c_str());
+            combat_type_ = type;
+            return ps;
+        }
+        if (!combat_search_logged_) log("genome: no combat property set among the player entity's yet (no aim view)");
+        combat_search_logged_ = true;
+        return 0;
+    }
+
     uintptr_t game_mode_ = 0;  // Risen 3: the game mode mask (0: gameplay)
     uint32_t last_game_mode_ = 0;
     int game_mode_logs_ = 0;
@@ -1071,7 +1151,7 @@ private:
 
     // The player's heading direction, from the camera target (every frame: the target and the entity can change).
     void resolve_heading() {
-        uintptr_t found = 0, movement = 0;
+        uintptr_t found = 0, movement = 0, combat = 0;
         const char* why = nullptr;
         uintptr_t target = 0, vt = 0, index = 0, array = 0;
         if (!g_heading || !target_proxy_ || !admin_target_) {
@@ -1084,6 +1164,7 @@ private:
             const uintptr_t entity = handle ? mem::rdp(handle) : 0;
             const uintptr_t table = entity && ps_tables(entity, index, array) ? mem::rdp(entity + index, 1) : 0;
             const uintptr_t ps = table ? movement_ps(table, mem::rdp(entity + array)) : 0;
+            if (aim_obj_ && table) combat = combat_ps(table, mem::rdp(entity + array));
             if (!ps) {
                 why = "no player entity or movement";
             } else {
@@ -1100,6 +1181,7 @@ private:
         }
         heading_ = found;
         movement_ = movement;
+        combat_ = combat;
     }
 
     // The heading's turn in gameplay, for the status line.

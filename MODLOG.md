@@ -5,6 +5,25 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-25 **Genome: ELEX II's aim view from the game's aim mode.** ELEX II aims with its gameplay camera
+  (`cam_game_alt`), so its *Ranged aim* view never came on. Tested in game (Steam, DualSense via USB adapter, Steam Input
+  off): with *Default* Off and *Ranged aim* Always on the gyro works only while aiming; user: "It works".
+  - Found by cued snapshots (aim with LB, then RT, three rounds; the exe's data, the camera admin two levels deep, the
+    player's property sets one level): exact-value search found only a manager's "changed" flag
+    (`ELEX2.exe+0x1AA6200`, a lock-protected object at `+0x1AA5A50` whose methods set it after each change: not an aim
+    state); a tolerant float search found the camera admin's target distance (`+0x400`/`+0x418`/`+0x41C`: 250 -> 100 with
+    a pistol) and current distance (`+0x318`/`+0x320`: 352 -> 222). The names in the exe led further: camera modifiers
+    by condition (`CamModTargetDistance_Cond_RangedAim`, `..._HybridAim`, `..._HeavyWeaponAim`, `..._RangedAimJetpack`,
+    `CamModFOV_Cond_RangedAim`) and the script function `IsInAimMode` (registered `0x93D478` -> `0x8BF5A0` -> the entity's
+    `0xB43340`: property set 0x57 through the entity's vtable +0x110, dynamic_cast to `gCCombatSystem2_PS`, then
+    `0x4EBD50`).
+  - `gCCombatSystem2_PS::IsInAimMode` (`ELEX2.exe+0x4EBD50`): aim object `[ps+0xA0]`; aiming when its state (+4) isn't 0
+    (1 aiming, 2 shooting) or its cool-down after a shot (+0xB0, seconds) is above 0. In the snapshots: LB rounds 1 in every
+    aim snapshot, idle 0; the RT round (aim and shoot) 2, 2 (cool-down 0.85, 0.35), then 0 between shots, as the game's
+    zoom goes off between shots. The module reads the three offsets from that function's code (one match in ELEX II, none
+    in ELEX 1) and finds the player's `gCCombatSystem2_PS` by its class; while aiming, view 1 becomes view 2. A 0.75 s
+    linger to bridge RT's gaps was tried and dropped (user: "RB is all that matters": the aim button; RT's gaps stay);
+    without it: "Works great now".
 - 2026-11-25 **Gyro only while aiming: GyroLib's per-view Activation Mode, no new setting; Risen gets a Magic view.**
   GyroLib 1.4.0 saves Activation Mode per view (Off / Always on / Hold to enable / Hold to disable / Toggle), so a game
   whose aim has its own view needs nothing new: the default view Off, the aim view Always on (explicitly: a view
@@ -13,9 +32,7 @@ or gyro to stick.
   parent is *Ranged weapon* (2), so one setting there covers bow, crossbow and spells; the game's own mode is the toggle
   (drawn until put away); tested in Risen (user: "Separate ranged/magic profiles are working as expected now!"). A bow
   aiming oddity the user saw in Risen also happens without Gyro4All (the game's own). Documented in README (after the sensitivity profiles) and the ELEX / Risen rows of GAMES.md.
-  Not covered: ELEX II (aims with its gameplay camera, no aim view: its aim state not looked for yet; an ADS sensitivity
-  profile on the aim button would be the button-based stand-in, untested); Risen 3 has the same *Ranged aim* view as
-  ELEX (not tried).
+  ELEX II: see the next entry. Risen 3 has the same *Ranged aim* view as ELEX (not tried).
 - 2026-11-25 **Genome: Risen (2009; the 2023 64-bit release, Steam) supported, in the same module through its own route
   (`genome_risen1.cpp`); core: several game DLL names.** Tested in game (Steam, DualSense through a USB adapter shown as a
   wired DualSense, Steam Input off, the game in controller mode, Gyro4All as `version.dll` in `bin`): default camera, bow
