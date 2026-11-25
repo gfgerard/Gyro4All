@@ -1,6 +1,7 @@
-// Genome (Piranha Bytes): ELEX, ELEX 2 and Risen 3 (MODLOG 2026-11-24/25). Native x64 (Risen 3's 2015 Enhanced Edition;
-// the 32-bit Risen 1/2 and the original Risen 3 can't load this DLL), D3D9 (Risen 3), D3D11 (ELEX) or D3D12 (ELEX 2),
-// MSVC RTTI kept, the engine linked into the exe (<root>\system\ELEX.exe, ELEX2.exe, Risen3.exe), data in
+// Genome (Piranha Bytes): ELEX, ELEX 2 and Risen 3 (MODLOG 2026-11-24/25), and Risen through its own route
+// (genome_risen1.cpp: the older engine generation, nothing below applies to it). Native x64 (Risen's 2023 release, Risen
+// 3's 2015 Enhanced Edition; the 32-bit Risen 2 and the original Risen/Risen 3 can't load this DLL), D3D9 (Risen 3),
+// D3D11 (ELEX) or D3D12 (ELEX 2), MSVC RTTI kept, the engine linked into the exe (<root>\system\ELEX.exe, ELEX2.exe, Risen3.exe), data in
 // <root>\data\packed. The exes import VERSION.dll (Risen 3 also winmm.dll): install Gyro4All as version.dll.
 // Controllers through XInput 1.3 by ordinal: the sticks with XInputGetState, every button with XInputGetKeystroke (the
 // core translates both for a DualSense). Offsets below: ELEX (2018 Steam exe, time stamp 1521487194) / ELEX 2 (2022 Steam
@@ -73,6 +74,7 @@
 // The FOV: the render camera, a static eCCameraBase (+0xCC vertical FOV, radians: ELEX 60 degrees in third person, 45
 // aiming a bow; ELEX 2 65, unchanged when aiming; +0x64 cot(FOV/2), checked to match).
 #include "genome.hpp"
+#include "genome_risen1.hpp"
 
 #include "engine.hpp"
 #include "fov.hpp"
@@ -118,6 +120,12 @@ constexpr double kMaxPitch = 80;
 constexpr ULONGLONG kStoppedMs = 250;
 
 uintptr_t exe_base() { return reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)); }
+
+// The game is Risen (its own route, genome_risen1.cpp).
+bool risen1_exe() {
+    wchar_t exe[MAX_PATH] = {};
+    return GetModuleFileNameW(nullptr, exe, MAX_PATH) && risen1::detect(exe);
+}
 
 // The exe carries Steam's DRM wrapper (a ".bind" section; Risen 3): its code is encrypted until the wrapper's entry
 // point has run, after this DLL's load, so the code is read on the first frame instead.
@@ -433,8 +441,9 @@ class GenomeEngine final : public Engine {
 public:
     const char* name() const override { return "Genome"; }
 
-    // <root>\system\<game>.exe with <root>\data\ini\ConfigDefault.xml and <root>\data\packed.
+    // <root>\system\<game>.exe with <root>\data\ini\ConfigDefault.xml and <root>\data\packed; or Risen's layout.
     bool detect(const std::wstring& exe_path) const override {
+        if (risen1::detect(exe_path)) return true;
         const std::wstring dir = exe_path.substr(0, exe_path.find_last_of(L"\\/"));
         const size_t up = dir.find_last_of(L"\\/");
         if (up == std::wstring::npos || _wcsicmp(dir.c_str() + up + 1, L"system") != 0) return false;
@@ -442,7 +451,15 @@ public:
         return exists(root + L"\\data\\ini\\ConfigDefault.xml") && exists(root + L"\\data\\packed");
     }
 
+    // Risen's engine is split into DLLs (Engine.dll: XInput, D3D9, the message pump); the other games are one exe.
+    std::wstring module_prefix(const std::wstring&) const override { return risen1_exe() ? risen1::module_prefix() : L""; }
+
     void configure() override {
+        risen1_ = risen1_exe();
+        if (risen1_) {
+            risen1::configure();
+            return;
+        }
         const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(exe_base());
         const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(exe_base() + dos->e_lfanew);
         log("genome: exe time stamp %lu, image size 0x%lx", nt->FileHeader.TimeDateStamp, nt->OptionalHeader.SizeOfImage);
@@ -477,12 +494,18 @@ public:
     }
     bool code_pending_ = false;
 
-    void settings_changed() override { load_zoom_reference(); }
+    void settings_changed() override {
+        if (!risen1_) load_zoom_reference();
+    }
 
     // Ranged aim: ELEX's cam_ranged* (ELEX 2 aims with its gameplay camera: Default only).
-    std::vector<ViewInfo> views() const override { return {{1, "Default", 0, true}, {2, "Ranged aim", 1, true}}; }
+    std::vector<ViewInfo> views() const override {
+        if (risen1_) return risen1::views();
+        return {{1, "Default", 0, true}, {2, "Ranged aim", 1, true}};
+    }
 
     EngineFrame read_frame() override {
+        if (risen1_) return risen1::read_frame();
         EngineFrame f;
         if (code_pending_) {
             code_pending_ = false;
@@ -544,6 +567,7 @@ public:
     // (+ = right), or, where that isn't applied for the player, the heading direction turned about the vertical. Pitch: the camera's pitch (+ looks down),
     // when its offset is known and it holds a pitch.
     bool apply(double pitch, double yaw) override {
+        if (risen1_) return risen1::apply(pitch, yaw);
         if (!heading_ || !admin_) return false;
         double v[3];
         if (!read_dir(heading_, v)) return false;
@@ -577,6 +601,7 @@ public:
     }
 
     Recenter recenter_support(std::string& detail) override {
+        if (risen1_) return risen1::recenter_support(detail);
         float p = 0;
         if (!pitch_) {
             detail = "the camera's pitch isn't known in this build";
@@ -591,6 +616,7 @@ public:
     }
 
     bool recenter(double fraction) override {
+        if (risen1_) return risen1::recenter(fraction);
         float p = 0;
         if (!admin_ || !read_pitch(p)) return false;
         const float out = float(p * (1.0 - fraction));
@@ -602,7 +628,7 @@ public:
     // then turned the camera through the right stick: a jumpy camera, MODLOG 2026-11-24). Nothing there can be undone;
     // with direct heading writes, the fallback watches as usual.
     bool view_angles(double& pitch, double& yaw, uintptr_t& camera) override {
-        if (via_turn_) return false;
+        if (risen1_ || via_turn_) return false;  // Risen: its turn goes in as the game's input, applied a frame later
         double v[3];
         float p = 0;
         if (!heading_ || !admin_ || !read_dir(heading_, v) || !read_pitch(p)) return false;
@@ -617,6 +643,7 @@ public:
     bool sees_menus() const override { return true; }
 
     std::string status_scene() const override {
+        if (risen1_) return risen1::status_scene();
         if (!camera_slot_) return "genome: camera layout not known in this build";
         if (!admin_) return "genome: camera admin not found yet";
         float p = 0, y = 0;
@@ -636,6 +663,7 @@ public:
     // Since the last status line: how far the heading turned in gameplay against the gyro's yaw (the rest is the
     // player's stick or mouse, or drift: about 0 with them idle) and the spurious turns dropped.
     void status_details() override {
+        if (risen1_) return risen1::status_details();
         log("status: genome: heading turned %+.1f, gyro %+.1f (%s), rest %+.1f deg; spurious turns dropped %u",
             sum_turned_, sum_gyro_, via_turn_ ? "after the game's turn" : "written", sum_turned_ - sum_gyro_,
             g_spurious.exchange(0, std::memory_order_relaxed));
@@ -643,6 +671,7 @@ public:
     }
 
 private:
+    bool risen1_ = false;  // Risen: every call goes to its route (genome_risen1.cpp)
     uintptr_t admin_vtable_ = 0, target_vtable_ = 0, movement_vtable_ = 0, render_vtable_ = 0;
     // The layout read from the code (see the top of the file); 0 (or -1) = not known.
     uintptr_t camera_slot_ = 0;   // gCCameraAdmin: the active camera's struct (its name first)

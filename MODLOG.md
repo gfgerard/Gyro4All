@@ -5,6 +5,63 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-25 **Genome: Risen (2009; the 2023 64-bit release, Steam) supported, in the same module through its own route
+  (`genome_risen1.cpp`); core: several game DLL names.** Tested in game (Steam, DualSense through a USB adapter shown as a
+  wired DualSense, Steam Input off, the game in controller mode, Gyro4All as `version.dll` in `bin`): default camera, bow
+  aiming, stick + gyro, menus; user: "it was not affecting any in-game menu, or main menu. gyro worked fine in default
+  camera and with aiming too"; with the small-turn fix below: "everything feels good now". Synthetic gyro and stick (a test build's switches, not committed): yaw and pitch in the
+  right senses, pitch exact (0.0499 a frame for 0.05), stick 22.0 deg/s + gyro +-4.3 = 26.3 / 17.7 measured.
+  - Layout: `<root>\bin\Risen.exe` with the engine in DLLs of its own (`Engine.dll`, `Game.dll`, `GUI2.dll`,
+    `SharedBase.dll`...), data in `<root>\data\compiled`; D3D9 (`Engine.dll`); XInput 1.4 `XInputGetState` by ordinal 2
+    from `Engine.dll` (no keystrokes); `SharedBase.dll` imports `VERSION.dll` (loaded early: the proxy's name), `fmod`/
+    `binkw64` `winmm.dll`. The message pump: `Engine.dll` `PeekMessageA` (the game thread), `GUI2.dll` `PeekMessageW`.
+    Their names share no prefix: **core** `Engine::module_prefix` may now list several, separated by `|`
+    (`engine.dll|game.dll|gui2.dll`; `hooks.cpp` splits it; whole file names work as prefixes). Not the same engine
+    generation as ELEX/Risen 3: no `gCCameraTargetMovement`, `gCCharacterMovement_PS` v1, a constraint-solver camera
+    (`gCCameraTypeConstSolver`, `gCCSConstraint*`): none of the code shapes apply, hence its own route behind
+    `GenomeEngine` (detected by the `bin` layout; every `Engine` call handed to `risen1::`).
+  - `Game.dll` exports about 10,800 C++ names, `Engine.dll` 14,800 (pefile caps exports at 8192: the scratch tools parse the
+    table by hand). Every function the route uses is found by its exported name, and the few offsets from those functions'
+    own code, each checked (the log line lists them).
+  - The camera (guided search, a breakpoint, then the code): the view's yaw is the player's own rotation (the camera
+    follows from behind; the guided search's yaw-only quaternions were the player's, `gCCharacterSensor`, `eCRigidBody_PS`...),
+    its pitch the camera admin's elevation `gCCameraAdmin +0x310` (float degrees, + looks down; an identical copy in the
+    solver). Dead end: `eCCameraBase` (Engine.dll vtable `+0x9871C0`) pitch +0x9C / yaw +0xA0 are derived each frame from
+    the solver's look direction (`Engine.dll+0x4F64D0`, caller `Game.dll+0x7AFDE0` <- solver `0x7B8670`): a write there
+    froze the game once; a one-hit breakpoint showed the writer.
+  - Input (`gCActionAdmin`, an engine module on the heap; `this` taken from its exported `ProcessBegin`, which runs once a
+    frame): `AnalogInput(axis, int)` adds raw counts at `+0x2F0 + 4 x axis` (axes 1/2 the mouse, ignored in controller mode
+    `+0x411`; 3/4 the right stick); `ProcessBegin` turns them into `gSAction`s (`id, state 4 = axis, 0, value`): stick X
+    TurnRight 8 / TurnLeft 7, Y TurnUp 9 / TurnDown 10, value = deflection x camera sensitivity (`+0x414`) x frame time x
+    `+0x3E8`/`+0x3EC` (0.8), positive; each through `SendActionEvent` (`0x802B40`): `gCCameraAdmin::OnAction` first
+    (pitch: elevation += value x 0.075, -65..75, when the camera type's `+0x19` allows; camera type `+0x180`, its flags
+    +0x18 orbit, +0x19 pitch, +0x1C character rotation), then the action key script, then, unhandled,
+    `gCCharacterControl::OnAction` (TurnRight stores the value at `+0x14`, TurnLeft its negation, when `type +0x1C`). Then
+    `ProcessBegin` calls `gCCharacterControl::ProcessMovements` (only when `+0x400` is 0 and the session's GUI bit is
+    clear): yaw = `+0x14` x (mouse SensitivityX x 0.003 + 0.002) rad (`eSMouseOptions`, Engine.dll export: SensitivityX
+    0.5 by default, InvertX -1), a weighted average of five frames (1, 0.666, 0.4436, 0.2954, 0.1967; sum 2.6017: nothing
+    lost), `bCMatrix::RotateLocalAxisY`, `gCCharacterMovement_PS::SetAlignmentLookAt(forward, true)`; `+0x14` cleared.
+  - The gyro goes in the same way: `ProcessMovements` hooked; before it, the gyro's queued yaw and pitch are sent through
+    `SendActionEvent` as the same axis actions (units: radians / the turn scale, from the game's own sensitivity and
+    invert getters found in `ProcessMovements`' code; pitch degrees / 0.075). The character's `+0x14` is a store: when the
+    gyro's yaw reaches it, the stick's value from this frame is added back (`merged` in the status line).
+  - Small turns: `gCCharacterMovement_PS::ProcessControledRotationLookAt` rotates the player by `GetAngleUnitDeg(current,
+    look-at)` (SharedBase.dll: acosf of a float dot, stored at `+0x184`) when under 1 degree (`CalcNewRotationAngleAndVelocity`
+    only eases bigger turns). Near 0 that angle only takes 0.0198, 0.028, 0.034 ... 0.056 degrees: the gyro alone reached
+    92% at 0.05 degrees a frame and **nothing** at 0.005 or 0.015 (0.7 and 2 deg/s at 144 fps: slow aiming lost). Fixed by
+    hooking Game.dll's import of `GetAngleUnitDeg` and returning atan2(|a x b|, a . b) for that one call (its return
+    address `Game.dll+0x8EB56F`, read from the code); the sign stays the game's (an exact-zero `HasZeroMagnitude` test and
+    level vectors: tiny turns keep their sense). Measured: 0.0050 a frame for 0.005 (left too), 0.0149 for 0.015, 0.0498 for
+    0.05; idle drift 0.01 deg/s. Dead end: hooking `CalcNewRotationAngleAndVelocity` for immediate turns (`+0x4D4`), not
+    the path small turns take.
+  - Menus: the input mode `gCActionAdmin +0x3E0`, written by each `Set<Mode>ModeActionMap` (the value read from each
+    setter's first `mov dword [rcx+0x3E0], imm`): 1 pause menu, 2 normal, 3 inventory, 4 character, 5 log, 6 map, 7 loot,
+    8 pickpocket, 9 item request, 10 craft, 11 dialog, 12 quick slot, 13 trade, 14 lockpick, 15 melee, 16 bow, 17
+    crossbow, 18 magic, 19 cast, 20 levitate, 21 beast, 22 nautilus, 23/24 modal dialogs. Gyro in 2 and 15-22 (view
+    *Ranged weapon* in 16/17); seen in game: the inventory's tabs switch 3/4/5/6, the pause menu 1, the bow 16. Cameras seen:
+    `cam_normal`, `cam_inventory`, `cam_ranged`, `cam_ranged_bow` (aiming).
+  - Not done: zoom compensation (no FOV source looked for), the stick fallback (`view_angles`: none), the GOG build,
+    `winmm.dll` as the name, Steam Input on, a mouse player (the gyro's units don't depend on it).
 - 2026-11-25 **Genome: Risen 3: Titan Lords (Steam, 64-bit Enhanced Edition) supported, in the same module; D3D9
   settings panel fixed (core).** Tested in game (Steam, DualSense through a USB adapter shown as a wired DualSense,
   Steam Input off, the game's gamepad option on, Gyro4All as `version.dll`, a downloaded 2014 save loaded fine): camera,
