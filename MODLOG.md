@@ -5,6 +5,52 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-25 **Genome: Risen 3: Titan Lords (Steam, 64-bit Enhanced Edition) supported, in the same module; D3D9
+  settings panel fixed (core).** Tested in game (Steam, DualSense through a USB adapter shown as a wired DualSense,
+  Steam Input off, the game's gamepad option on, Gyro4All as `version.dll`, a downloaded 2014 save loaded fine): camera,
+  aiming, stick + gyro together, menus; user: "everything felt fine".
+  - Same module, not a separate one: Risen 3 (`Risen3.exe`, time stamp 1437990428, VS2010, D3D9, imports `VERSION.dll`
+    and `WINMM.dll`, XInput 1.3 ordinals 8/2/3) has ELEX's camera and movement code in an older build: the same classes
+    (`gCCameraAdmin`, `gCCameraTargetMovement`, `gCCharacterMovement2_PS`, `eCEntityProxy`, `eCCameraBase`), camera names
+    (`cam_normal`, `cam_ranged*`), turn struct (turn +0x20, remaining +0x1C, factor +0x24, the same clamp) and the same
+    spurious-turn bug (synthetic tremor 0.60 deg/s with the filter off, 0.08 on). New entries in the code-shape lists:
+    - frame builder `Risen3.exe+0x468DBF`: `lea rcx,[rbx+0x1C0]; call getter 0x4E5DC0` (`lea rax,[rcx+0x130]`);
+      `lea rcx,[rbp-x]; movss xmm1,[rax+0x70]` (pitch) `mulss [deg2rad]`; call; the same again with `[rax+0x6C]` (yaw
+      offset). Admin pitch +0x360. Camera target: `cmp rdi,[rbx+0x78]; je; mov [rbx+0x78],rdi; test rdi,rdi`.
+    - turn function `Risen3.exe+0x3383A0` (`mov rax,rsp; mov [rax+0x18],rbx; push rbp/rsi/rdi; ...; movaps xmm7,xmm2; mov
+      rbx,rdx; mov rdi,rcx`): **no movement object**, the heading is in the property set itself at +0x48 (`lea rcx,
+      [rdi+0x48]` before the rotation `0x76D580`; ELEX: `[ps+0x48]` points to an object with the heading). TurnShape
+      look_at 0 = in the set itself (`heading_in`). Remaining: `movss xmm7,[rbx+0x1C]; comiss; jae; mov al,1; jmp; xor al,
+      al; ucomiss; je`.
+    - angle function `Risen3.exe+0x1B9D30`, by its call in the movement job `0x33BF8E` after the heading's copy (`mov eax,
+      [rbx+0x48]` x3: the pattern matches twice, filtered by the heading offset).
+    - camera target slot 2 `0x4661A0`: `lea rsi,[rcx+8]` (proxy; ELEX `lea rdi`); GetEntity a thunk to eCEntityProxy's slot
+      1 (handle +8); `mov edx,0x69; ... call [r8+0xD8]`. **0x69 is not the movement** but the animation controller
+      (`eCAnimation3Controller_PS`); the movement is type 0x68. The module now takes the camera target's type only if its
+      set is a `gCCharacterMovement2_PS`, else finds the type by that class once (`movement_ps`, logged).
+    - camera update: `CProcessor@gCCameraAdmin` slot 2 calls it directly (`sub rsp,0x28; cmp byte [enabled],0; je; mov
+      rcx,[rcx+0x18]; test; je; call 0x1C6810`), no vtable slot: hooked inline (MinHook). Admin static
+      `Risen3.exe+0x1027180`, owner +0x30 as in ELEX.
+    - Steam DRM (SteamStub, a `.bind` section): `.text` is encrypted on disk (entropy 8.0) and decrypted by the wrapper's
+      entry point, after Gyro4All's DllMain. With a `.bind` section the module reads the code on the first frame
+      (`read_code`). Static analysis used a dump of the running game's image.
+    - Menus: Risen 3 has no gCUIState stack (`gCHudModule2`/`gCHudSystem2`, older); its tabbed menu (inventory, map,
+      character) keeps `cam_normal` and the camera update running (the world too), the pause menu stops the world but not
+      the camera update. Found by cued snapshots (static data and HUD objects, two levels): a global game mode mask
+      (`Risen3.exe+0xBE49CC`; setter `0x1CF840` `cmp ecx,[mode]; je; mov [mode],ecx; mov [next],ecx; ret`, getter,
+      `IsMode(mask)`): 0 gameplay and aiming, 0x20 the menu, 1 the pause menu, 2/0x10 while loading. Read from the
+      setter's code (not in ELEX's code); the gyro is off while it isn't 0. Verified with synthetic gyro input in each
+      state: aiming 3.03 deg/s, menu and pause 0.00.
+    - FOV: render camera static `Risen3.exe+0xFBA2E0` (+0xCC/+0x64 as in ELEX): 60 degrees, 45 aiming (eased).
+  - **Core, D3D9 panel:** the panel attaches only to a render target that has presented (`overlay.cpp` attach, added
+    with Alan Wake 2's early D3D11 swapchain, `7db91cf`); D3D9 devices never counted their presents, so the panel
+    never attached in D3D9 games (the Create+Options combo did nothing). `panel_host.cpp`: the D3D9 present hooks now
+    mark the captured device as presented. Verified in Risen 3 (the panel opens).
+  - Dead ends: one menu flag for both of Risen 3's menus in the HUD objects (the pause menu and the tabbed menu are
+    different mechanisms; only the game mode covers both).
+  - Not tested: Risen 3 dialogs (expected off: the game mode or a dialog camera), the GOG build, `winmm.dll` as the name;
+    ELEX and ELEX II with this build (their code shapes and derived values checked offline; their code paths unchanged
+    except where a Risen 3 alternative was added).
 - 2026-11-25 **Genome: ELEX II (Steam) supported; the gyro's yaw now turns the heading after the game's turn; menus
   from the UI's state stack.** Tested in game (both games, Steam, DualSense through a USB adapter that shows it as a wired
   DualSense, Steam Input off, Gyro4All as `version.dll`): camera, aiming, stick + gyro together, menus; user: "everything

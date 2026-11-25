@@ -1,6 +1,7 @@
-// Genome (Piranha Bytes): ELEX and ELEX 2 (MODLOG 2026-11-24/25). Native x64 (the 32-bit Risen games can't load this
-// DLL), D3D11 (ELEX) or D3D12 (ELEX 2), MSVC RTTI kept, the engine linked into the exe (<root>\system\ELEX.exe or
-// ELEX2.exe), data in <root>\data\packed. Both exes import VERSION.dll (not winmm.dll): install Gyro4All as version.dll.
+// Genome (Piranha Bytes): ELEX, ELEX 2 and Risen 3 (MODLOG 2026-11-24/25). Native x64 (Risen 3's 2015 Enhanced Edition;
+// the 32-bit Risen 1/2 and the original Risen 3 can't load this DLL), D3D9 (Risen 3), D3D11 (ELEX) or D3D12 (ELEX 2),
+// MSVC RTTI kept, the engine linked into the exe (<root>\system\ELEX.exe, ELEX2.exe, Risen3.exe), data in
+// <root>\data\packed. The exes import VERSION.dll (Risen 3 also winmm.dll): install Gyro4All as version.dll.
 // Controllers through XInput 1.3 by ordinal: the sticks with XInputGetState, every button with XInputGetKeystroke (the
 // core translates both for a DualSense). Offsets below: ELEX (2018 Steam exe, time stamp 1521487194) / ELEX 2 (2022 Steam
 // exe, time stamp 1652720224).
@@ -36,6 +37,12 @@
 // Where the turn function doesn't run for the player (no call for 250 ms), the heading is written directly instead.
 // Dead ends (MODLOG): writing the heading directly (lag and the race's creep); adding the yaw to 0x413000's turn input
 // argument (0x413720 runs five times a frame and the first call, not the job's, took it); adding it to the turn struct.
+//
+// Risen 3 (Steam, time stamp 1437990428; the same camera and movement code, built with VS2010): camera struct +0x1C0,
+// state +0x130 (pitch +0x70, yaw offset +0x6C: admin +0x360), camera target admin +0x78, the movement property set's type
+// 0x69 (vtable +0xD8), the heading in the property set itself (+0x48, no separate object), the turn function
+// Risen3.exe+0x3383A0, the angle function +0x1B9D30, and the camera update called directly by the CProcessor
+// (Risen3.exe+0x1C6810, hooked inline). Its exe carries Steam's DRM wrapper: the code is read on the first frame.
 //
 // Menus: the camera update stops (pause, loading) or another camera takes over (ELEX: cam_ui_world for the inventory,
 // dialog cameras); and the UI's state stack (gCUIModule -> gCUISystem: "Game", then "PauseMenu", "GameMenu" (ELEX 2's
@@ -111,6 +118,17 @@ constexpr double kMaxPitch = 80;
 constexpr ULONGLONG kStoppedMs = 250;
 
 uintptr_t exe_base() { return reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)); }
+
+// The exe carries Steam's DRM wrapper (a ".bind" section; Risen 3): its code is encrypted until the wrapper's entry
+// point has run, after this DLL's load, so the code is read on the first frame instead.
+bool steam_drm() {
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(exe_base());
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(exe_base() + dos->e_lfanew);
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+        if (std::memcmp(sec[i].Name, ".bind", 6) == 0) return true;
+    return false;
+}
 
 // --- reading code ----------------------------------------------------------------------------------------------------
 
@@ -204,12 +222,28 @@ constexpr FrameShape kFrameShapes[] = {
          const uintptr_t t = find_in(at - 0x100, 0x100, "48 3B BB ?? ?? ?? ?? 74 ?? 48 89 BB ?? ?? ?? ??");
          if (t && rd_i32(t + 3) == rd_i32(t + 0xC)) l.target = rd_i32(t + 3);
      }},
+    // Risen 3: lea rcx, [rbx+slot]; call <state getter>; lea rcx, [rbp-x]; movss xmm1, [rax+pitch]; mulss xmm1,
+    // [deg to rad]; call; the same again for the yaw (movss xmm1, [rax+yaw]). Before it: cmp rdi, [rbx+target]; je;
+    // mov [rbx+target], rdi; test rdi, rdi.
+    {"Risen 3",
+     "48 8D 8B ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 4D ?? F3 0F 10 48 ?? F3 0F 59 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 8B ?? ?? "
+     "?? ?? E8 ?? ?? ?? ?? 48 8D 4D ?? F3 0F 10 48 ??",
+     [](uintptr_t at, CameraLayout& l) {
+         if (rd_i32(at + 0x25) != rd_i32(at + 3) || rel_target(at + 0x2A) != rel_target(at + 8)) return;
+         l.slot = rd_i32(at + 3);
+         l.state = state_of_getter(rel_target(at + 8));
+         l.pitch = rd_u8(at + 0x14);
+         l.yaw = rd_u8(at + 0x36);
+         const uintptr_t t = find_in(at - 0x100, 0x100, "48 3B 7B ?? 74 ?? 48 89 7B ?? 48 85 FF");
+         if (t && rd_u8(t + 3) == rd_u8(t + 9)) l.target = rd_u8(t + 3);
+     }},
 };
 
 // The function that applies the movement's turn: its start (the movement object's offset at look_at: mov reg,
-// [rcx+look]), and in its code: `turn` (movss xmmA, [rbx+turn]; ucomiss xmmA, xmmB; je; comiss xmmB, [rbx+factor]: turn at
-// +4, factor at +0x11), `remaining` (movss xmmA, [rbx+remaining]; ucomiss; je short: at +4) and `heading` (lea rcx,
-// [look reg+heading] for the rotation: at +3).
+// [rcx+look]; 0: no such object, the heading is in the movement property set itself, Risen 3), and in its code: `turn`
+// (movss xmmA, [rbx+turn]; ucomiss xmmA, xmmB; je; comiss xmmB, [rbx+factor]: turn at +4, factor at +0x11),
+// `remaining` (movss xmmA, [rbx+remaining]; ... ucomiss; je short: at +4) and `heading` (lea rcx, [look reg+heading]
+// for the rotation: at +3).
 struct TurnShape {
     const char* game;
     const char* pattern;
@@ -235,10 +269,19 @@ constexpr TurnShape kTurnShapes[] = {
      "48 89 45 07 48 8B 71 ?? 44 0F 28 C2 48 8B DA 48 8B F9",
      0x2B, "F3 0F 10 73 ?? 0F 2E F7 0F 84 ?? ?? ?? ?? 0F 2F 7B ??", "F3 0F 10 73 ?? 0F 2E F7 74",
      "48 8D 4E ?? 0F 28 C8 F3 0F 11 55 ?? 0F 57 0D"},
+    // mov rax, rsp; mov [rax+0x18], rbx; push rbp; push rsi; push rdi; lea rbp, [rax-0x5F]; sub rsp, 0xF0; four movaps
+    // saves; mov rax, [security cookie]; xor rax, rsp; mov [rbp-1], rax; xor esi, esi; test byte [rcx+0x18], 8;
+    // movaps xmm7, xmm2; mov rbx, rdx; mov rdi, rcx. The heading: lea rcx, [rdi+heading] (the property set itself);
+    // remaining: movss xmm7, [rbx+remaining]; comiss; jae; mov al, 1; jmp; xor al, al; ucomiss; je.
+    {"Risen 3",
+     "48 8B C4 48 89 58 18 55 56 57 48 8D 68 A1 48 81 EC ?? ?? ?? ?? 0F 29 70 D8 0F 29 78 C8 44 0F 29 40 B8 44 0F 29 48 "
+     "A8 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 FF 33 F6 F6 41 18 08 0F 28 FA 48 8B DA 48 8B F9",
+     0, "F3 0F 10 7B ?? 0F 2E FE 0F 84 ?? ?? ?? ?? 0F 2F 73 ??", "F3 0F 10 7B ?? 0F 2F FE 73 04 B0 01 EB 02 32 C0 0F 2E FE 74",
+     "48 8D 4F ?? 48 8D 55 ?? F3 0F 11 75"},
 };
 
 // The game's angle between two directions (both normalized, dot clamped to [-1, 1], acosf; ELEX.exe+0x72DE0,
-// ELEX2.exe+0x5E00D0), found by its call in the movement job (call's rel32 at call_at). heading_at: where the shape
+// ELEX2.exe+0x5E00D0, Risen3.exe+0x1B9D30), found by its call in the movement job (call's rel32 at call_at). heading_at: where the shape
 // names the heading's offset (checked against the turn function's), 0 if it doesn't.
 struct AngleShape {
     const char* game;
@@ -256,11 +299,15 @@ constexpr AngleShape kAngleShapes[] = {
      "48 83 C0 ?? EB ?? 48 8D 05 ?? ?? ?? ?? F2 0F 10 00 48 8D 54 24 ?? 8B 40 08 48 8D 4C 24 ?? F2 0F 11 44 24 ?? 89 44 "
      "24 ?? E8 ?? ?? ?? ??",
      41, 3},
+    // The heading copied from the property set (mov eax, [rbx+heading]; mov [rsp+a], eax; three times), then call
+    // <angle> (the heading against the wanted one).
+    {"Risen 3", "8B 43 ?? 89 44 24 ?? 8B 43 ?? 89 44 24 ?? 8B 43 ?? 89 44 24 ?? E8 ?? ?? ?? ??", 22, 2},
 };
 
-// The camera target's vtable slot 2 (GetMatrix): lea rdi, [rcx+proxy] at +0xD; later the movement property set's
-// lookup: call <GetEntity(proxy)>; mov edx, type; (mov r8, [rax]; mov rcx, rax, either order); call [r8+slot].
-constexpr const char* kTargetMatrixPattern = "48 89 5C 24 08 57 48 83 EC ?? 48 8D 79 ?? 48 8B DA";
+// The camera target's vtable slot 2 (GetMatrix): near its start lea rdi (ELEX) or rsi (Risen 3), [rcx+proxy]; mov rbx,
+// rdx; later the movement property set's lookup: call <GetEntity(proxy)>; mov edx, type; (mov r8, [rax]; mov rcx, rax,
+// either order); call [r8+slot].
+constexpr const char* kTargetProxyPatterns[] = {"48 8D 79 ?? 48 8B DA", "48 8D 71 ?? 48 8B DA"};
 constexpr const char* kPropertySetCallPatterns[] = {
     "BA ?? ?? ?? ?? 4C 8B 00 48 8B C8 41 FF 90 ?? ?? ?? ??",  // ELEX
     "BA ?? ?? ?? ?? 48 8B C8 4C 8B 00 41 FF 90 ?? ?? ?? ??",  // ELEX 2
@@ -276,10 +323,16 @@ constexpr const char* kGetEntityAt0Pattern = "48 8B 01 48 85 C0 74 ?? 48 8B 00 C
 constexpr const char* kGetEntityThunkPattern = "48 8B 01 48 FF 60 08";
 // The camera admin's CProcessor, vtable slot 2: the process callback itself (ELEX: mov rcx, [rcx+owner]; test rcx, rcx;
 // jne <thunk>), or (ELEX 2) a call through the scheduler with it: mov rax, [rdx]; mov r9, rdx; mov r8, rcx;
-// lea rdx, [callback]; mov rcx, r9; jmp [rax+8]. The thunk: mov rax, [rcx]; jmp [rax+slot*8].
+// lea rdx, [callback]; mov rcx, r9; jmp [rax+8]. The thunk: mov rax, [rcx]; jmp [rax+slot*8]. Risen 3 calls the update
+// directly (not a vtable slot: hooked inline): sub rsp, 0x28; cmp byte [enabled], 0; je; mov rcx, [rcx+owner];
+// test rcx, rcx; je; call <update>.
 constexpr const char* kProcessCallbackPattern = "48 8B 49 ?? 48 85 C9 0F 85 ?? ?? ?? ??";
 constexpr const char* kProcessSchedulePattern = "48 8B 02 4C 8B CA 4C 8B C1 48 8D 15 ?? ?? ?? ?? 49 8B C9 48 FF 60 08";
 constexpr const char* kUpdateThunkPattern = "48 8B 01 48 FF A0 ?? ?? ?? ??";
+// Risen 3's game mode mask (a global: 0 in gameplay, 0x20 in the inventory/map/character menu, 1 in the pause menu),
+// found by its setter: cmp ecx, [mode]; je; mov [mode], ecx; mov [next], ecx; ret. Not in ELEX's code.
+constexpr const char* kGameModeSetterPattern = "3B 0D ?? ?? ?? ?? 74 ?? 89 0D ?? ?? ?? ?? 89 0D ?? ?? ?? ?? F3 C3";
+constexpr const char* kProcessDirectPattern = "48 83 EC 28 80 3D ?? ?? ?? ?? 00 74 ?? 48 8B 49 ?? 48 85 C9 74 ?? E8 ?? ?? ?? ??";
 
 // --- the camera update hook ------------------------------------------------------------------------------------------
 
@@ -295,7 +348,7 @@ void hooked_update(void* admin) {
 // --- the player's turn, applied (main thread, like the gyro frame) --------------------------------------------------
 
 // Read from the turn function at start (see the top of the file); 0 = not known.
-uintptr_t g_look = 0;       // gCCharacterMovement2_PS: the object holding the heading
+uintptr_t g_look = 0;       // gCCharacterMovement2_PS: the object holding the heading (0: the property set itself)
 uintptr_t g_heading = 0;    // that object: the heading, float[3]
 uintptr_t g_turn = 0;       // the turn struct: the turn (radians, + = right)
 constexpr ULONGLONG kTurnInputMs = 250;  // the gyro's yaw goes with the game's turn while that ran this recently
@@ -309,26 +362,35 @@ std::atomic<int64_t> g_pending_nano{0};       // the gyro's yaw waiting for the 
 std::atomic<ULONGLONG> g_turn_seen{0};         // GetTickCount64 of the last turn applied for the player
 std::atomic<uint32_t> g_spurious{0};          // for the status line: spurious turns dropped
 
+// The heading's address in a movement property set: in the object it points to at g_look (ELEX), or in the set itself
+// (Risen 3, g_look 0). 0 if not readable.
+uintptr_t heading_in(uintptr_t ps) {
+    if (!ps || !g_heading) return 0;
+    if (!g_look) return ps + g_heading;
+    const uintptr_t look = mem::rdp(ps + g_look);
+    return look ? look + g_heading : 0;
+}
+
 // The no-input turn's artifact (see the top of the file): a positive turn equal to the heading's angle to itself.
 bool spurious_turn(uintptr_t ps, float turn) {
     if (!g_angle || !(turn > 0)) return false;
     float d[3];
-    const uintptr_t look = mem::rdp(ps + g_look);
-    if (!look || !mem::rd(look + g_heading, d)) return false;
+    const uintptr_t at = heading_in(ps);
+    if (!at || !mem::rd(at, d)) return false;
     return g_angle(d, d) == turn;
 }
 
 // The heading turned about the vertical by `rad` (+ = right), kept a horizontal unit vector.
 void turn_heading(uintptr_t ps, double rad) {
-    const uintptr_t look = mem::rdp(ps + g_look);
+    const uintptr_t at = heading_in(ps);
     float d[3];
-    if (!look || !mem::rd(look + g_heading, d)) return;
+    if (!at || !mem::rd(at, d)) return;
     const double c = std::cos(rad), s = std::sin(rad);
     const double x = c * d[0] + s * d[2], z = -s * d[0] + c * d[2];
     const double len = std::sqrt(x * x + z * z);
     if (!(len > 0.5)) return;
     const float out[3] = {float(x / len), 0.0f, float(z / len)};
-    mem::guarded_store(look + g_heading, out, sizeof out);
+    mem::guarded_store(at, out, sizeof out);
 }
 
 void* hooked_apply_turn(void* movement, void* turn_struct, float dt) {
@@ -399,10 +461,21 @@ public:
             target_vtable_ ? mem::module_offset(target_vtable_).c_str() : "not found",
             movement_vtable_ ? mem::module_offset(movement_vtable_).c_str() : "not found",
             render_vtable_ ? mem::module_offset(render_vtable_).c_str() : "not found");
-        read_layout(im);
-        hook_turn();
+        if (steam_drm()) {
+            code_pending_ = true;
+            log("genome: the exe's code is encrypted until it starts (Steam DRM): read on the first frame");
+        } else {
+            read_code(im);
+        }
         load_zoom_reference();
     }
+
+    // The layout and the turn hook, from the game's code (see the top of the file).
+    void read_code(const rtti::Image& im) {
+        read_layout(im);
+        hook_turn();
+    }
+    bool code_pending_ = false;
 
     void settings_changed() override { load_zoom_reference(); }
 
@@ -411,6 +484,10 @@ public:
 
     EngineFrame read_frame() override {
         EngineFrame f;
+        if (code_pending_) {
+            code_pending_ = false;
+            read_code(rtti::exe_image());
+        }
         if (!camera_slot_) {
             f.target = "camera layout not known in this build";
             return f;
@@ -444,7 +521,7 @@ public:
         for (const GameplayCamera& c : kGameplayCameras)
             if (cam.starts_with(c.prefix)) view = c.view;
         gameplay_camera_ = view != 0;
-        if (ui_menu()) view = 0;
+        if (ui_menu() || game_mode_menu()) view = 0;
 
         resolve_heading();
         g_player_movement.store(movement_, std::memory_order_relaxed);
@@ -629,8 +706,11 @@ private:
         // the camera target's vtable slot 2; the proxy's handle from the GetEntity it calls (or, virtual, eCEntityProxy's
         // slot 1).
         const uintptr_t target_fn = vtable_fn(target_vtable_, 2 * 8);
-        if (starts_with(target_fn, kTargetMatrixPattern)) {
-            target_proxy_ = rd_u8(target_fn + 0xD);
+        uintptr_t proxy_at = 0;
+        for (const char* p : kTargetProxyPatterns)
+            if (!proxy_at) proxy_at = find_in(target_fn, 0x40, p);
+        if (proxy_at) {
+            target_proxy_ = rd_u8(proxy_at + 3);
             for (const char* p : kPropertySetCallPatterns) {
                 const uintptr_t call = find_in(target_fn, 0x100, p);
                 if (!call) continue;
@@ -657,22 +737,35 @@ private:
 
         // The camera update's vtable slot, from the admin's CProcessor, its process callback and the thunk it calls.
         uintptr_t process = vtable_fn(rtti::primary_vtable(im, ".?AVCProcessor@gCCameraAdmin@@"), 2 * 8);
+        if (starts_with(process, kProcessDirectPattern)) update_fn_ = rel_target(process + 0x17);
         if (starts_with(process, kProcessSchedulePattern)) process = rel_target(process + 0xC);
         if (starts_with(process, kProcessCallbackPattern)) {
             const uintptr_t thunk = rel_target(process + 9);
             if (starts_with(thunk, kUpdateThunkPattern) && rd_i32(thunk + 6) % 8 == 0) update_slot_ = rd_i32(thunk + 6) / 8;
         }
-        if (update_slot_ < 0) note("camera update slot: no pause detection");
+        if (update_slot_ < 0 && !update_fn_) note("camera update: no pause detection");
+
+        // Risen 3's game mode (menus behind which the camera keeps running).
+        if (const auto setters = find_code(kGameModeSetterPattern); setters.size() == 1) {
+            const uintptr_t mode = rel_target(setters[0] + 2);
+            if (rel_target(setters[0] + 10) == mode) game_mode_ = mode;
+        }
 
         log("genome: layout from code (%s code shape): camera struct +%s (pitch +%s, yaw offset +%s, target +%s), camera "
-            "target proxy +%s handle +%s, movement property set %s via vtable +%s, camera update slot %d%s%s",
+            "target proxy +%s handle +%s, movement property set %s via vtable +%s, camera update %s%s%s",
             shape ? shape : "no", hex(camera_slot_).c_str(), hex(pitch_).c_str(), hex(yaw_).c_str(),
             hex(admin_target_).c_str(), hex(target_proxy_).c_str(),
             proxy_handle_ < 0 ? "?" : hex(uintptr_t(proxy_handle_)).c_str(),
-            hex(uintptr_t(movement_type_ < 0 ? 0 : movement_type_)).c_str(), hex(get_ps_offset_).c_str(), update_slot_,
+            hex(uintptr_t(movement_type_ < 0 ? 0 : movement_type_)).c_str(), hex(get_ps_offset_).c_str(),
+            update_fn_ ? mem::module_offset(update_fn_).c_str() : ("slot " + std::to_string(update_slot_)).c_str(),
             missing.empty() ? "" : "; not found: ", missing.c_str());
+        if (game_mode_) log("genome: game mode mask %s (menus: not 0)", mem::module_offset(game_mode_).c_str());
     }
-    int update_slot_ = -1;  // the camera update's slot in gCCameraAdmin's vtable
+    uintptr_t game_mode_ = 0;  // Risen 3: the game mode mask (0: gameplay)
+    uint32_t last_game_mode_ = 0;
+    int game_mode_logs_ = 0;
+    int update_slot_ = -1;     // the camera update's slot in gCCameraAdmin's vtable
+    uintptr_t update_fn_ = 0;  // or the update function the processor calls directly (Risen 3: hooked inline)
 
     // The live entity's property set tables, from the property set getter in its own vtable.
     bool ps_tables(uintptr_t entity, uintptr_t& index, uintptr_t& array) {
@@ -720,7 +813,7 @@ private:
     }
 
     // The static gCCameraAdmin: the qword in the exe's writable data equal to its vtable, whose processor names it as
-    // its owner. Looked for once a second until found; then its camera update is hooked (vtable slot).
+    // its owner. Looked for once a second until found; then its camera update is hooked (vtable slot, or inline).
     bool find_admin() {
         const ULONGLONG now = GetTickCount64();
         if (!admin_vtable_ || now < next_search_) return false;
@@ -737,10 +830,17 @@ private:
             if (admin_) break;
         }
         if (!admin_) return false;
-        void* original = update_slot_ >= 0 ? rtti::patch_slot(admin_vtable_, update_slot_, reinterpret_cast<void*>(&hooked_update))
-                                           : nullptr;
+        void* original = nullptr;
+        if (update_fn_) {
+            if (!hooks::hook_function(reinterpret_cast<void*>(update_fn_), reinterpret_cast<void*>(&hooked_update),
+                                      &original))
+                original = nullptr;
+        } else if (update_slot_ >= 0) {
+            original = rtti::patch_slot(admin_vtable_, update_slot_, reinterpret_cast<void*>(&hooked_update));
+        }
         g_update_orig = reinterpret_cast<UpdateFn>(original);
-        log("genome: camera admin %s; camera update (slot %d) %s", mem::module_offset(admin_).c_str(), update_slot_,
+        log("genome: camera admin %s; camera update (%s) %s", mem::module_offset(admin_).c_str(),
+            update_fn_ ? ("inline, " + mem::module_offset(update_fn_)).c_str() : ("slot " + std::to_string(update_slot_)).c_str(),
             original ? ("hooked, was " + mem::module_offset(reinterpret_cast<uintptr_t>(original))).c_str()
                      : "NOT hooked (no pause detection)");
         return true;
@@ -824,6 +924,18 @@ private:
         return out;
     }
 
+    // Risen 3: a menu while the game mode mask isn't 0 (each change logged).
+    bool game_mode_menu() {
+        uint32_t mode = 0;
+        if (!game_mode_ || !mem::rd(game_mode_, mode)) return false;
+        if (mode != last_game_mode_ && game_mode_logs_ < 300) {
+            ++game_mode_logs_;
+            log("genome: game mode %s%s", hex(mode).c_str(), mode ? " (menu: gyro off)" : " (gameplay)");
+        }
+        last_game_mode_ = mode;
+        return mode != 0;
+    }
+
     // A menu: a UI state other than "Game" on top of a stack that starts with "Game" (the gameplay state; a stack named
     // otherwise isn't read as menus: the camera's name still is).
     bool ui_menu() {
@@ -855,11 +967,11 @@ private:
             log("genome: turn function not found (no known code shape): no gyro (the heading's offsets come from it)");
             return;
         }
-        const uintptr_t look = rd_u8(fn + shape->look_at);
+        const uintptr_t look = shape->look_at ? rd_u8(fn + shape->look_at) : 0;
         const uintptr_t turn = find_in(fn, 0x400, shape->turn);
         const uintptr_t remaining = find_in(fn, 0x400, shape->remaining);
         const uintptr_t heading = find_in(fn, 0x400, shape->heading);
-        if (!look || !heading) {
+        if ((shape->look_at && !look) || !heading || !rd_u8(heading + 3)) {
             log("genome: turn function %s: the heading's offsets not readable: no gyro", mem::module_offset(fn).c_str());
             return;
         }
@@ -879,12 +991,15 @@ private:
             return;
         }
         log("genome: turn function %s (%s code shape) hooked: gyro yaw turned into the heading after the game's own turn "
-            "(movement +%s, heading +%s, turn +%s, remaining +%s, factor +%s)",
-            mem::module_offset(fn).c_str(), shape->game, hex(g_look).c_str(), hex(g_heading).c_str(), hex(g_turn).c_str(),
+            "(movement %s, heading +%s, turn +%s, remaining +%s, factor +%s)",
+            mem::module_offset(fn).c_str(), shape->game, g_look ? ("+" + hex(g_look)).c_str() : "itself",
+            hex(g_heading).c_str(), hex(g_turn).c_str(),
             hex(r).c_str(), hex(f).c_str());
         for (const AngleShape& s : kAngleShapes) {
-            const auto calls = find_code(s.pattern);
-            if (calls.size() != 1 || (s.heading_at && rd_u8(calls[0] + s.heading_at) != g_heading)) continue;
+            auto calls = find_code(s.pattern);
+            if (s.heading_at)  // the copy of this heading, not of another vector
+                std::erase_if(calls, [&](uintptr_t c) { return rd_u8(c + s.heading_at) != g_heading; });
+            if (calls.size() != 1) continue;
             const uintptr_t angle = rel_target(calls[0] + s.call_at);
             if (!starts_with(angle, "40 53 48 83 EC 40")) continue;  // push rbx; sub rsp, 0x40
             g_angle = reinterpret_cast<AngleFn>(angle);
@@ -895,12 +1010,42 @@ private:
         log("genome: angle function not found (no known code shape): spurious turns kept (the camera may creep right)");
     }
 
+    // An entity's property set of type `type` (its tables: index bytes at type + 1, pointer array), 0 if it has none.
+    static uintptr_t property_set(uintptr_t table, uintptr_t array, int type) {
+        uint8_t slot = 0xFF;
+        if (!table || !array || type < 0 || !mem::rd(table + uintptr_t(type) + 1, slot) || slot == 0xFF) return 0;
+        return mem::rdp(array + uintptr_t(slot) * 8);
+    }
+
+    // The entity's gCCharacterMovement2_PS: the type the camera target asks for (ELEX), else the type whose set is of that
+    // class, looked for once (Risen 3's camera target asks for its animation controller's, 0x69; the movement is 0x68).
+    uintptr_t movement_ps(uintptr_t table, uintptr_t array) {
+        const auto is_movement = [&](uintptr_t ps) {
+            uintptr_t vt = 0;
+            return ps && mem::rd(ps, vt) && vt == movement_vtable_;
+        };
+        if (const uintptr_t ps = property_set(table, array, movement_type_); is_movement(ps)) return ps;
+        if (movement_searched_) return 0;
+        movement_searched_ = true;
+        for (int type = 0; type < 0xFF; ++type) {
+            const uintptr_t ps = property_set(table, array, type);
+            if (!is_movement(ps)) continue;
+            log("genome: the player's movement property set is type %s (the camera target asks for %s)",
+                hex(uintptr_t(type)).c_str(), hex(uintptr_t(movement_type_)).c_str());
+            movement_type_ = type;
+            return ps;
+        }
+        log("genome: no movement property set among the player entity's (no gyro)");
+        return 0;
+    }
+    bool movement_searched_ = false;
+
     // The player's heading direction, from the camera target (every frame: the target and the entity can change).
     void resolve_heading() {
         uintptr_t found = 0, movement = 0;
         const char* why = nullptr;
         uintptr_t target = 0, vt = 0, index = 0, array = 0;
-        if (!g_look || !g_heading || !target_proxy_ || !admin_target_) {
+        if (!g_heading || !target_proxy_ || !admin_target_) {
             why = "the heading's offsets aren't known in this build";
         } else if (!mem::rd(admin_ + admin_target_, target) || !mem::plausible(target) || !mem::rd(target, vt) ||
                    vt != target_vtable_) {
@@ -909,17 +1054,15 @@ private:
             const uintptr_t handle = mem::rdp(target + target_proxy_ + uintptr_t(proxy_handle_));
             const uintptr_t entity = handle ? mem::rdp(handle) : 0;
             const uintptr_t table = entity && ps_tables(entity, index, array) ? mem::rdp(entity + index, 1) : 0;
-            uint8_t slot = 0xFF;
-            if (!table || !mem::rd(table + uintptr_t(movement_type_) + 1, slot) || slot == 0xFF) {
+            const uintptr_t ps = table ? movement_ps(table, mem::rdp(entity + array)) : 0;
+            if (!ps) {
                 why = "no player entity or movement";
             } else {
-                const uintptr_t ps = mem::rdp(mem::rdp(entity + array) + uintptr_t(slot) * 8);
-                uintptr_t psvt = 0;
-                const uintptr_t look = ps && mem::rd(ps, psvt) && psvt == movement_vtable_ ? mem::rdp(ps + g_look) : 0;
+                const uintptr_t at = heading_in(ps);
                 double v[3];
-                if (!look) why = "no movement property set";
-                else if (!read_dir(look + g_heading, v)) why = "heading not a horizontal unit vector";
-                else found = look + g_heading, movement = ps;
+                if (!at) why = "no movement property set";
+                else if (!read_dir(at, v)) why = "heading not a horizontal unit vector";
+                else found = at, movement = ps;
             }
         }
         if (found != heading_ && heading_logs_ < 50) {
