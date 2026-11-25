@@ -62,7 +62,8 @@ public:
     virtual const char* name() const = 0;  // "Unreal"; also the value of Engine= in Gyro4All.ini
     // DllMain: the game was made with this engine (cheap checks on the exe and its folder only).
     virtual bool detect(const std::wstring& exe_path) const = 0;
-    // DllMain: file-name prefix of the game's own DLLs (modular builds), hooked like the exe ("" = the exe only).
+    // DllMain: file-name prefix of the game's own DLLs (modular builds), hooked like the exe ("" = the exe only); several
+    // separated by '|' when they share none (whole file names work too: Risen's "engine.dll|game.dll|gui2.dll").
     virtual std::wstring module_prefix(const std::wstring& /*exe_stem*/) const { return {}; }
     // DllMain: the same game's exe stem in other stores' builds (e.g. Unreal's -Win64- / -WinGDK-), whose profile is
     // used when profiles\<exe stem>.ini doesn't exist.
