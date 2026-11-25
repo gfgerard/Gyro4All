@@ -5,6 +5,17 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-25 **Gyro only while aiming: GyroLib's per-view Activation Mode, no new setting; Risen gets a Magic view.**
+  GyroLib 1.4.0 saves Activation Mode per view (Off / Always on / Hold to enable / Hold to disable / Toggle), so a game
+  whose aim has its own view needs nothing new: the default view Off, the aim view Always on (explicitly: a view
+  inherits its parent's settings, Off included). Tested in ELEX (user: "Can confirm it works in Elex 1"): gyro only
+  while `cam_ranged*` (held aim). Risen: the magic and cast input modes (18, 19) now give a *Magic* view (id 3) whose
+  parent is *Ranged weapon* (2), so one setting there covers bow, crossbow and spells; the game's own mode is the toggle
+  (drawn until put away); tested in Risen (user: "Separate ranged/magic profiles are working as expected now!"). A bow
+  aiming oddity the user saw in Risen also happens without Gyro4All (the game's own). Documented in README (after the sensitivity profiles) and the ELEX / Risen rows of GAMES.md.
+  Not covered: ELEX II (aims with its gameplay camera, no aim view: its aim state not looked for yet; an ADS sensitivity
+  profile on the aim button would be the button-based stand-in, untested); Risen 3 has the same *Ranged aim* view as
+  ELEX (not tried).
 - 2026-11-25 **Genome: Risen (2009; the 2023 64-bit release, Steam) supported, in the same module through its own route
   (`genome_risen1.cpp`); core: several game DLL names.** Tested in game (Steam, DualSense through a USB adapter shown as a
   wired DualSense, Steam Input off, the game in controller mode, Gyro4All as `version.dll` in `bin`): default camera, bow

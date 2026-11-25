@@ -38,6 +38,11 @@
 // Menus: the input mode (gCActionAdmin +0x3E0, written by its Set<Mode>ModeActionMap functions: 1 the pause menu, 2
 // normal, 3 inventory, ... 15 melee, 16 bow, 17 crossbow, 18 magic; each value read from its setter's code); the gyro runs
 // only in the gameplay modes. ProcessMovements stops too in the pause menu and while loading (no call for 250 ms).
+//
+// Views: the mode also picks the gyro's view. Drawing a ranged weapon or a spell is the game's own toggle (the mode stays
+// until it is put away): "Ranged weapon" (bow, crossbow) and "Magic" (magic, cast), which inherits from it, so a player
+// who sets Default's Activation Mode to Off and Ranged weapon's to Always on has the gyro only with a bow, crossbow or
+// spell out (MODLOG 2026-11-25).
 #include "genome_risen1.hpp"
 
 #include "hooks.hpp"
@@ -103,8 +108,8 @@ constexpr ModeSetter kModeSetters[] = {
     {"melee", "?SetMeleeModeActionMap@gCActionAdmin@@QEAAXXZ", 1},
     {"bow", "?SetBowModeActionMap@gCActionAdmin@@QEAAXXZ", 2},
     {"crossbow", "?SetCrossBowModeActionMap@gCActionAdmin@@QEAAXXZ", 2},
-    {"magic", "?SetMagicModeActionMap@gCActionAdmin@@QEAAXXZ", 1},
-    {"cast", "?SetCastModeActionMap@gCActionAdmin@@QEAAXXZ", 1},
+    {"magic", "?SetMagicModeActionMap@gCActionAdmin@@QEAAXXZ", 3},
+    {"cast", "?SetCastModeActionMap@gCActionAdmin@@QEAAXXZ", 3},
     {"levitate", "?SetLevitateModeActionMap@gCActionAdmin@@QEAAXXZ", 1},
     {"beast", "?SetBeastModeActionMap@gCActionAdmin@@QEAAXXZ", 1},
     {"nautilus", "?SetNautilusModeActionMap@gCActionAdmin@@QEAAXXZ", 1},
@@ -491,7 +496,10 @@ void configure() {
     log("genome: Risen (bin\\ layout, Game.dll exports): the camera route is read from Game.dll on the first frame");
 }
 
-std::vector<ViewInfo> views() { return {{1, "Default", 0, false}, {2, "Ranged weapon", 1, false}}; }
+// Magic inherits from Ranged weapon: one setting there covers every drawn weapon or spell (see the top of the file).
+std::vector<ViewInfo> views() {
+    return {{1, "Default", 0, false}, {2, "Ranged weapon", 1, false}, {3, "Magic", 2, false}};
+}
 
 EngineFrame read_frame() {
     EngineFrame f;
