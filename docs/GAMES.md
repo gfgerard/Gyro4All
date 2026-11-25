@@ -26,6 +26,7 @@
 | Alan Wake 2 | ✅ Works | Northlight | Install next to `AlanWake2.exe` in the game's main folder. Rename `msvcp140.dll` and `msvcp140_2.dll` in that folder (e.g. to `.bak`: incompatible old VC++ runtime shipped). |
 | Alan Wake Remastered | ✅ Works (tested on the Epic version) | Northlight | Install next to `Game_f_x64_EOS.exe` in the game's main folder. |
 | AMID EVIL | ✅ Works | Unreal Engine 4 | Install next to `AmidEvil-Win64-Shipping.exe`, in the game's `Binaries\Win64` folder. |
+| Battle Shapers | ✅ Works | Unity (Mono) | Install next to `BattleShapers.exe` in the game's main folder. Needs the profile provided. |
 | Battlefield 4 | ✅ Works (tested on the EA app version, Game Pass) | Frostbite 3 | Install next to `bf4.exe` in the game's main folder. Turn off the EA app's in-game overlay for the game (it freezes on start otherwise). Move the right stick once in game to start the gyro. On foot only so far (vehicles not tested). Campaign only: never play multiplayer with it (PunkBuster). |
 | Battlefield Hardline | ✅ Works (tested on the EA app version, Game Pass) | Frostbite 3 | Install next to `bfh.exe` in the game's main folder. Move the right stick once in game to start the gyro (again after cutscenes). Off in vehicles. Campaign only: never play multiplayer with it (PunkBuster). |
 | Borderlands 4 | ✅ Works | Unreal Engine 5 | Install in `OakGame\Binaries\Win64`, next to `Borderlands4.exe`. Single-player only: never play online co-op with it. |
