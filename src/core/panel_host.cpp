@@ -125,8 +125,13 @@ T resolve(T& original, const char* function) {
 }
 
 void draw(IDirect3DDevice9* device) {
+    if (static_cast<void*>(device) != g_target.load()) return;
+    // The panel attaches to a target that presents (overlay.cpp's attach); a D3D9 device never counted, so its panel never
+    // attached (Risen 3, MODLOG 2026-11-25).
+    g_target_presented = GetTickCount64();
+    g_target_has_presented = true;
     const g4a_api* a = g_api.load();
-    if (!a || t_presenting || static_cast<void*>(device) != g_target.load()) return;
+    if (!a || t_presenting) return;
     a->dx9_present(device);
 }
 
@@ -206,7 +211,8 @@ void device_created(IDirect3DDevice9* device, HWND window, const char* via) {
                         reinterpret_cast<void**>(&g_swapchain_present));
         sc->Release();
     }
-    g_target = device;
+    if (g_target.exchange(device) != device) g_target_has_presented = false;
+    g_target_presented = GetTickCount64();
     g_window = window;
     log("panel: captured D3D9%s device %p (%s) for window %p", ex ? "Ex" : "", static_cast<void*>(device), via,
         static_cast<void*>(window));
