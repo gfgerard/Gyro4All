@@ -5,6 +5,65 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-25 **Genome: ELEX II (Steam) supported; the gyro's yaw now turns the heading after the game's turn; menus
+  from the UI's state stack.** Tested in game (both games, Steam, DualSense through a USB adapter that shows it as a wired
+  DualSense, Steam Input off, Gyro4All as `version.dll`): camera, aiming, stick + gyro together, menus; user: "everything
+  works fine".
+  - **ELEX II** (`ELEX2.exe`, time stamp 1652720224, D3D12, imports `VERSION.dll` and XInput 1.3 ordinals 2/3/8): the
+    same classes as ELEX (`gCCameraAdmin`, `gCCameraTargetMovement`, `gCCharacterMovement2_PS`, `eCCameraBase`,
+    `CProcessor@gCCameraAdmin`; no `eCEntityProxy` RTTI). None of ELEX's signatures match, so each finder now has a list
+    of code shapes (`kFrameShapes`, `kTurnShapes`, `kAngleShapes`, two property set call orders, two processor slot 2
+    shapes), each unique in its exe (checked offline on both exes). ELEX II's layout, all read from code:
+    - frame builder `ELEX2.exe+0x4A20E5`: `lea rcx,[rbx+0x1E8]`; five movaps; call state getter `0x7A53C0` (`lea rax,
+      [rcx+0x158]; ret`); `lea rcx,[rbp-x]; mov rdi,rax; movss xmm1,[rax+0xFC]` (pitch) `mulss [deg2rad]`; call;
+      `movss xmm6,[rdi+0xE0]` (yaw offset). Admin pitch +0x43C, yaw offset +0x420 (the yaw = pitch - 4 check of ELEX
+      doesn't hold: dropped).
+    - camera target: admin +0x80 (ELEX +0x78), read from its store just before the frame builder (`cmp rdi,[rbx+0x80];
+      je; mov [rbx+0x80],rdi`; ELEX `cmp rbx,[rdi+0x78]; je; mov [rdi+0x78],rbx`), no longer a fixed offset.
+    - camera target slot 2 `0x4A0FD0`: proxy +8; `call 0x312600` (GetEntity, not virtual: `mov rax,[rcx]; test; je;
+      mov rax,[rax]; ret`: handle at proxy +0); `mov edx,0x66; mov rcx,rax; mov r8,[rax]; call [r8+0x110]` (the
+      entity's GetPropertySet at vtable +0x110, tables +0x30/+0x38 as in ELEX). ELEX calls its GetEntity directly too
+      (`0x2005C0`, a thunk `mov rax,[rcx]; jmp [rax+8]`, followed to eCEntityProxy's slot 1).
+    - turn function `ELEX2.exe+0x5F5790` (prologue `mov r11,rsp; mov [r11+0x18],rbx; push rbp/rsi/rdi; ...; mov rsi,
+      [rcx+0x48]; movaps xmm8,xmm2; mov rbx,rdx; mov rdi,rcx`): heading at movement object +8 (`lea rcx,[rsi+8]`
+      before the rotation call `0x839DE0`), turn struct turn +0x20, remaining +0x1C, factor +0x24 (same as ELEX). Called
+      from job threads, not the main thread.
+    - angle function `ELEX2.exe+0x5E00D0` (same algorithm, `minss/maxss` clamp, tail-jumps to acosf), found by its call
+      in the movement job `0x5F4790` right after the heading's copy (`add rax,8` checked against the heading offset).
+      The spurious turn exists in ELEX II too: synthetic tremor 0.51 deg/s with the filter off, 0.07 with it on.
+    - camera update: `CProcessor@gCCameraAdmin` slot 2 `0x4A1700` no longer is the callback but schedules it (`mov
+      rax,[rdx]; mov r9,rdx; mov r8,rcx; lea rdx,[callback 0x1011C0]; mov rcx,r9; jmp [rax+8]`); the callback has
+      ELEX's shape (`mov rcx,[rcx+0x18]; test; jne thunk 0x1018A0: jmp [rax+0x140]`): update slot 40 (ELEX 37). Admin
+      static `ELEX2.exe+0x1AC2500`, owner at +0x30 as in ELEX.
+    - camera names: `cam_game_alt` in third person **and** while aiming (no `cam_ranged`): one view. FOV: the render
+      camera (static `eCCameraBase` `ELEX2.exe+0x1AA84A0`, +0xCC/+0x64 as in ELEX) stays 65 degrees while aiming; the
+      visible "zoom" is the camera moving closer, nothing for zoom compensation. The game's render camera getter
+      (`0x3B1B00`, ELEX `0x272F20`: `mov rax,[rcx+0x468]; test; cmovne rcx,rax; mov rax,rcx; ret`) can return an
+      override at +0x468; live it pointed at the static camera itself.
+    - aim signals seen (not used, two aim rounds): movement object +0x8D byte 0 -> 1, +0x160/+0x174/+0x260 0 -> 1.0;
+      camera admin +0x324/+0x32C 50 -> 100, +0x3F8/+0x3FC 0 -> -62/-20; `gCPlayerControlsAdmin` (static
+      `ELEX2.exe+0x1AC6980`) +0x68/+0x6C 0.06 -> 0.03 (the game halves its stick speed while aiming).
+  - **Yaw route changed (both games):** the queued gyro yaw now turns the heading right after the original turn function
+    returns, in the same call (`turn_heading`), instead of being added to the turn struct's turn (and, factor >= 0, its
+    remaining turn). Why: the function's clamp (`if factor >= 0 and turn has remaining's sign and |turn| >= |remaining|:
+    turn = min(|remaining x factor|, |turn|)`). ELEX II's factor is 10 in normal play; with the stick held (turn
+    1.375 deg/frame, remaining 0) the old route made remaining = the gyro's yaw, so every frame with a same-signed yaw
+    was cut to 10 x yaw (~0.3 deg): the stick turn alternated 1.4/0.3 deg a frame (stutter, even with the controller
+    on the desk), and the gyro's own yaw was cancelled while the stick turned (stick + gyro right 50.8 deg/s, stick +
+    gyro left 51.1). Per-frame trace and synthetic stick (test build) before/after: sd 0.55 -> 0.002 deg/frame, gyro
+    +-0.03 deg/frame exactly added. ELEX regression with the same test: stick + gyro smooth (sd 0.002), aiming
+    `cam_ranged` follows the synthetic gyro at 1.68-1.80 of 1.80 deg/s, spurious filter 0.48 -> 0.00 deg/s.
+  - **Menus from the UI's state stack (both games):** static `gCUIModule` (found by vtable in the exe's data; ELEX II
+    `0x1AE1E80`) -> `gCUISystem` (+0x70, found by its class) -> array of `gCUIState*` +0x10, count +0x18 (found as the
+    first array of `gCUIState`), name char* at state +0x10. Gameplay `Game`; on top: `PauseMenu`, `GameMenu` (ELEX II's
+    inventory/map/skills tabs), `QuickSlotWheel` (ELEX II's weapon wheel), `GameWorld` (ELEX's inventory). The gyro is
+    off when anything is on top of `Game` (only when the bottom state is named `Game`); ELEX II keeps `cam_game_alt` and
+    the camera update running behind its menus, so the camera couldn't tell (the user's first ELEX II test: gyro moved
+    the camera in the menu and the weapon wheel, where pitch also lagged). Nothing in the exe's `.data` separated the
+    menus (snapshot diff); the stack is on the heap.
+  - Dead ends: the yaw through the turn struct (above); ELEX II's LT is the jetpack, not aim (the first synthetic "aim"
+    test flew; the jetpack turns smoothly with the stick, sd 0.08); a whole-`.data` snapshot diff for menus (nothing).
+  - Not tested: ELEX II dialogs (expected off: a UI state or a dialog camera), the GOG builds, `winmm.dll` as the name.
 - 2026-11-25 **Genome: the layout read from the game's code instead of fixed offsets (for other builds and ELEX 2).**
   Each offset comes from an instruction in code found by class (RTTI vtable) or a short signature, with a cross-check;
   what a build doesn't give turns only its feature off, logged (`genome: layout from code: ...; not found: ...`).
