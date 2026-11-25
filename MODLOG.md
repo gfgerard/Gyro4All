@@ -5,6 +5,13 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-25 **Genome: ELEX II's current Steam builds, DX12 and DX11.** After a reinstall the Steam release is a newer exe
+  (time stamp 1669133930, D3D12 by default; the one first tested was 1652720224) and Steam's DX11 mode is a separate copy of
+  the game in `<root>\ELEX2DX11` (`system\ELEX2.exe` time stamp 1651007840, D3D11, its own `data`), which needs its own
+  install (`ELEX2DX11\system\version.dll`): without it the DualSense isn't shown to the game there ("my controller is not
+  working"). Both builds: every ELEX II code shape matches once (`tools/genome/shapes.py`), every offset read from their
+  code (other addresses: aim mode `+0x4EDD10` / `+0x4ECA70`, camera admin `+0x1AC5780` / `+0x1991F00`), the panel on D3D12
+  / D3D11; tested in game (gyro, aim view, menus, buttons; user: "Default run works just fine", DX11 "works fine").
 - 2026-11-25 **Genome: unknown builds fall back to the gyro as right stick; `tools/genome/`.** Compared with the other
   engine modules (layout, hooks, logs, docs in line), Genome lacked one thing 16 of 22 modules have: when its code shapes
   don't match a build (a game patch, another store's build), it reported "camera layout not known" and the gyro stayed
