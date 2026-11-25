@@ -529,11 +529,15 @@ EngineFrame read_frame() {
                              : "off",
                 g_missing.empty() ? "" : "; not found: ", g_missing.c_str());
         } else {
-            log("genome: Risen: no gyro (%s)", g_missing.c_str());
+            log("genome: Risen: no camera hook for this build (%s): the gyro goes to the game as right stick",
+                g_missing.c_str());
         }
     }
-    if (!g_ready) {
-        f.target = "Risen: " + g_missing;
+    if (!g_ready) {  // a build whose code doesn't match: the gyro as right stick, like the other modules' "no camera hook"
+        f.no_camera = true;
+        f.in_game = true;
+        f.view_id = 1;
+        f.target = "no camera hook (gyro as right stick)";
         return f;
     }
 
@@ -635,7 +639,7 @@ bool recenter(double fraction) {
 }
 
 std::string status_scene() {
-    if (!g_ready) return "genome: Risen: " + g_missing;
+    if (!g_ready) return "genome: Risen: no camera hook (gyro as right stick): " + g_missing;
     const uintptr_t camera = g_camera.load(std::memory_order_relaxed);
     const ModeSetter* m = mode_of(g_last_mode);
     double h = 0;

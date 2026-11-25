@@ -525,10 +525,7 @@ public:
             code_pending_ = false;
             read_code(rtti::exe_image());
         }
-        if (!camera_slot_) {
-            f.target = "camera layout not known in this build";
-            return f;
-        }
+        if (!hooked_layout()) return no_camera_frame();
         if (!admin_ && !find_admin()) {
             f.target = "camera admin not found yet";
             return f;
@@ -668,7 +665,7 @@ public:
 
     std::string status_scene() const override {
         if (risen1_) return risen1::status_scene();
-        if (!camera_slot_) return "genome: camera layout not known in this build";
+        if (!hooked_layout()) return "genome: no camera hook for this build (gyro as right stick)";
         if (!admin_) return "genome: camera admin not found yet";
         float p = 0, y = 0;
         const bool pitch = pitch_ && mem::rd(admin_ + pitch_, p);
@@ -697,6 +694,30 @@ public:
 
 private:
     bool risen1_ = false;  // Risen: every call goes to its route (genome_risen1.cpp)
+
+    // The build's code gave what the camera route needs: the camera layout, the heading's offsets (from the turn
+    // function), the player chain and the classes it is checked by. Not while the code is still encrypted (Steam DRM):
+    // read on the first frame.
+    bool hooked_layout() const {
+        return code_pending_ || (camera_slot_ && g_heading && target_proxy_ && admin_vtable_ && movement_vtable_);
+    }
+
+    // A build whose code the module doesn't know (a game patch, another store's build): like the other modules' "no
+    // camera hook", the gyro goes to the game as right-stick input (the core's stick fallback), still off in menus where
+    // the UI's state stack or Risen 3's game mode tells them.
+    bool no_camera_logged_ = false;
+    EngineFrame no_camera_frame() {
+        if (!no_camera_logged_)
+            log("genome: no camera hook for this build (its code doesn't match the known shapes, see the layout line): the "
+                "gyro goes to the game as right stick");
+        no_camera_logged_ = true;
+        EngineFrame f;
+        f.no_camera = true;
+        f.in_game = true;
+        f.view_id = ui_menu() || game_mode_menu() ? 0 : 1;
+        f.target = "no camera hook (gyro as right stick)";
+        return f;
+    }
     uintptr_t admin_vtable_ = 0, target_vtable_ = 0, movement_vtable_ = 0, render_vtable_ = 0;
     // The layout read from the code (see the top of the file); 0 (or -1) = not known.
     uintptr_t camera_slot_ = 0;   // gCCameraAdmin: the active camera's struct (its name first)
