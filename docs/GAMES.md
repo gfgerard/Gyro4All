@@ -111,7 +111,7 @@
 | Stellar Blade | ✅ Works | Unreal Engine 4 | Install next to the `*-shipping.exe` |
 | Subnautica | ✅ Works | Unity (Mono) | Install next to `Subnautica.exe` in the game's main folder. |
 | Terminator: resistance | ✅ Works | Unreal Engine 4 | DX11: the `F10` panel isn't verified in this game yet |
-| Titanfall 2 | ✅ Works (tested on the EA app version) | Source (Respawn) | Install in `bin\x64_retail`, **not** next to `Titanfall2.exe` (it never loads a `winmm.dll` from the main folder). Campaign only: never play multiplayer with it. |
+| Titanfall 2 | ✅ Works (tested on the EA app and Steam versions) | Source (Respawn) | EA app version: install in `bin\x64_retail`, **not** next to `Titanfall2.exe` (it never loads a `winmm.dll` from the main folder). Steam version: install next to `Titanfall2.exe` in the game's main folder (Steam's overlay, loaded even when it's turned off, takes Windows' own `winmm.dll` before the game would load the one in `bin\x64_retail`). Campaign only: never play multiplayer with it. |
 | Valor Mortis | ✅ Works | Unreal Engine 5.7.3 | |
 | Viewfinder | ✅ Works (tested on the Epic version) | Unity (IL2CPP) | Install next to `Viewfinder.exe` in the game's main folder. |
 | Visage | ✅ Works | Unreal Engine 4.24.3 | DX11: the `F10` panel isn't verified in this game yet (or change settings in `gyrolib.ini`). |
