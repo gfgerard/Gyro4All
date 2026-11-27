@@ -1,0 +1,267 @@
+Test-only switches for the Genome module (tools/genome/README.md). Never commit them: apply, build, test, revert.
+  git apply tools/genome/test-switches.patch    ...    git apply -R tools/genome/test-switches.patch
+
+diff --git a/src/engines/genome/genome_engine.cpp b/src/engines/genome/genome_engine.cpp
+--- a/src/engines/genome/genome_engine.cpp
++++ b/src/engines/genome/genome_engine.cpp
+@@ -89,6 +89,8 @@
+ #include "log.hpp"
+ #include "mem.hpp"
+ #include "rtti.hpp"
++#include "settings.hpp"  // TEST-ONLY
++#include "xinput.hpp"    // TEST-ONLY
+ 
+ #include <windows.h>
+ 
+@@ -393,7 +395,10 @@
+ }
+ 
+ // The no-input turn's artifact (see the top of the file): a positive turn equal to the heading's angle to itself.
++std::atomic<bool> g_spurious_fix{true};  // TEST-ONLY
++bool g_force_no_camera = false;          // TEST-ONLY
+ bool spurious_turn(uintptr_t ps, float turn) {
++    if (!g_spurious_fix.load(std::memory_order_relaxed)) return false;  // TEST-ONLY
+     if (!g_angle || !(turn > 0)) return false;
+     float d[3];
+     const uintptr_t at = heading_in(ps);
+@@ -471,6 +476,7 @@
+         risen1_ = risen1_exe();
+         if (risen1_) {
+             risen1::configure();
++            risen1::load_test();  // TEST-ONLY
+             return;
+         }
+         const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(exe_base());
+@@ -499,6 +505,7 @@
+             read_code(im);
+         }
+         load_zoom_reference();
++        load_test();  // TEST-ONLY
+     }
+ 
+     // The layout and the turn hook, from the game's code (see the top of the file).
+@@ -510,6 +517,8 @@
+ 
+     void settings_changed() override {
+         if (!risen1_) load_zoom_reference();
++        if (risen1_) risen1::load_test();  // TEST-ONLY
++        else load_test();                  // TEST-ONLY
+     }
+ 
+     // Ranged aim: ELEX's and Risen 3's cam_ranged*; ELEX 2 aims with its gameplay camera, so there its aim mode picks it.
+@@ -581,7 +590,62 @@
+             g_pending_nano.store(0, std::memory_order_relaxed);  // no turn queued across menus or cutscenes
+         }
+         account_heading(live);
++        test_input(live);  // TEST-ONLY
+         return f;
++    }
++
++    // TEST-ONLY (tools/genome/test-switches.patch, never committed): synthetic input from Gyro4All.ini, read on every save:
++    // GenomeTestYaw / GenomeTestPitch (millidegrees a frame), GenomeTestNoise (millidegrees a frame, random, both axes),
++    // GenomeSpuriousFix=0, GenomeTestStickX (right stick X), GenomeForceNoCamera=1 (the unknown-build fallback); per-frame
++    // heading stats logged per phase (tools/genome/phases.py).
++    int test_yaw_ = 0, test_pitch_ = 0, test_noise_ = 0;
++    int st_n_ = 0, st_back_ = 0, st_still_ = 0;
++    double st_sum_ = 0, st_sq_ = 0, st_min_ = 1e9, st_max_ = -1e9, st_last_ = 0;
++    uintptr_t st_last_at_ = 0;
++    void load_test() {
++        test_yaw_ = settings::get(L"GenomeTestYaw", 0);
++        test_pitch_ = settings::get(L"GenomeTestPitch", 0);
++        test_noise_ = settings::get(L"GenomeTestNoise", 0);
++        g_spurious_fix.store(settings::get(L"GenomeSpuriousFix", 1) != 0);
++        g_force_no_camera = settings::get(L"GenomeForceNoCamera", 0) != 0;
++        const int stick = settings::get(L"GenomeTestStickX", 0);
++        xinput::test_override(stick, 0);
++        if (st_n_)
++            log("genome: TEST phase stats: %d frames, heading/frame mean %.4f sd %.4f min %.4f max %.4f, against the mean "
++                "%d, still %d",
++                st_n_, st_sum_ / st_n_, std::sqrt(std::max(0.0, st_sq_ / st_n_ - (st_sum_ / st_n_) * (st_sum_ / st_n_))),
++                st_min_, st_max_, st_back_, st_still_);
++        st_n_ = st_back_ = st_still_ = 0;
++        st_sum_ = st_sq_ = 0;
++        st_min_ = 1e9;
++        st_max_ = -1e9;
++        st_last_at_ = 0;
++        log("genome: TEST GenomeTestYaw=%d GenomeTestPitch=%d GenomeTestNoise=%d GenomeSpuriousFix=%d GenomeTestStickX=%d "
++            "GenomeForceNoCamera=%d",
++            test_yaw_, test_pitch_, test_noise_, int(g_spurious_fix.load()), stick, int(g_force_no_camera));
++    }
++    void test_input(bool live) {
++        double v[3];
++        if (live && read_dir(heading_, v)) {
++            const double h = heading_of(v);
++            if (st_last_at_ == heading_) {
++                const double d = std::remainder(h - st_last_, 360.0);
++                if (st_n_ > 10 && d * st_sum_ < 0) ++st_back_;
++                if (d == 0) ++st_still_;
++                ++st_n_;
++                st_sum_ += d;
++                st_sq_ += d * d;
++                st_min_ = std::min(st_min_, d);
++                st_max_ = std::max(st_max_, d);
++            }
++            st_last_ = h;
++            st_last_at_ = heading_;
++        } else {
++            st_last_at_ = 0;
++        }
++        if (!live || (!test_yaw_ && !test_pitch_ && !test_noise_)) return;
++        const auto noise = [&] { return (double(rand()) / RAND_MAX * 2 - 1) * test_noise_ / 1000.0; };
++        apply(test_pitch_ / 1000.0 + noise(), test_yaw_ / 1000.0 + noise());
+     }
+ 
+     // Degrees from GyroLib (pitch up, yaw right). Yaw: queued, turned into the heading right after the game's own turn
+@@ -699,6 +763,7 @@
+     // function), the player chain and the classes it is checked by. Not while the code is still encrypted (Steam DRM):
+     // read on the first frame.
+     bool hooked_layout() const {
++        if (g_force_no_camera) return false;  // TEST-ONLY
+         return code_pending_ || (camera_slot_ && g_heading && target_proxy_ && admin_vtable_ && movement_vtable_);
+     }
+ 
+diff --git a/src/engines/genome/genome_risen1.cpp b/src/engines/genome/genome_risen1.cpp
+--- a/src/engines/genome/genome_risen1.cpp
++++ b/src/engines/genome/genome_risen1.cpp
+@@ -49,6 +49,8 @@
+ #include "log.hpp"
+ #include "mem.hpp"
+ #include "rtti.hpp"
++#include "settings.hpp"  // TEST-ONLY
++#include "xinput.hpp"    // TEST-ONLY
+ 
+ #include <windows.h>
+ 
+@@ -479,6 +481,36 @@
+     return camera && g_elevation && mem::rd(camera + g_elevation, e) && std::isfinite(e) && e >= -90 && e <= 90;
+ }
+ 
++// TEST-ONLY (tools/genome/test-switches.patch, never committed): synthetic input from Gyro4All.ini, read on every save:
++// GenomeTestYaw / GenomeTestPitch (millidegrees a frame), GenomeTestStickX (right stick X), GenomeForceNoCamera=1 (the
++// unknown-build fallback); per-frame heading and elevation stats logged per phase (tools/genome/phases.py).
++int g_test_yaw = 0, g_test_pitch = 0;
++bool g_force_no_camera = false;
++int g_st_n = 0;
++double g_st_h = 0, g_st_hsq = 0, g_st_e = 0, g_st_hmin = 1e9, g_st_hmax = -1e9, g_st_last_h = 0;
++float g_st_last_e = 0;
++bool g_st_have = false;
++void test_stats(bool live, uintptr_t camera) {
++    double h = 0;
++    float e = 0;
++    if (live && read_heading(camera, h) && read_elevation(camera, e)) {
++        if (g_st_have) {
++            const double d = std::remainder(h - g_st_last_h, 360.0);
++            ++g_st_n;
++            g_st_h += d;
++            g_st_hsq += d * d;
++            g_st_hmin = std::min(g_st_hmin, d);
++            g_st_hmax = std::max(g_st_hmax, d);
++            g_st_e += double(e) - g_st_last_e;
++        }
++        g_st_last_h = h;
++        g_st_last_e = e;
++        g_st_have = true;
++    } else {
++        g_st_have = false;
++    }
++}
++
+ }  // namespace
+ 
+ bool detect(const std::wstring& exe_path) {
+@@ -533,7 +565,7 @@
+                 g_missing.c_str());
+         }
+     }
+-    if (!g_ready) {  // a build whose code doesn't match: the gyro as right stick, like the other modules' "no camera hook"
++    if (!g_ready || g_force_no_camera) {  // a build whose code doesn't match (TEST-ONLY: or forced): the gyro as right stick, like the other modules' "no camera hook"
+         f.no_camera = true;
+         f.in_game = true;
+         f.view_id = 1;
+@@ -594,7 +626,30 @@
+     } else {
+         g_tracking = false;
+     }
++    test_stats(live, camera);  // TEST-ONLY
++    if (live && (g_test_yaw || g_test_pitch)) apply(g_test_pitch / 1000.0, g_test_yaw / 1000.0);  // TEST-ONLY
+     return f;
++}
++
++void load_test() {  // TEST-ONLY
++    g_test_yaw = settings::get(L"GenomeTestYaw", 0);
++    g_test_pitch = settings::get(L"GenomeTestPitch", 0);
++    g_force_no_camera = settings::get(L"GenomeForceNoCamera", 0) != 0;
++    const int stick = settings::get(L"GenomeTestStickX", 0);
++    xinput::test_override(stick, 0);
++    if (g_st_n)
++        log("genome: TEST phase stats: %d frames, heading/frame mean %.4f sd %.4f min %.4f max %.4f, elevation/frame mean "
++            "%.4f; sent yaw %.2f pitch %.2f, merged %u, not taken %u",
++            g_st_n, g_st_h / g_st_n, std::sqrt(std::max(0.0, g_st_hsq / g_st_n - (g_st_h / g_st_n) * (g_st_h / g_st_n))),
++            g_st_hmin, g_st_hmax, g_st_e / g_st_n, double(g_sent_yaw_nano.load()) * 1e-9,
++            double(g_sent_pitch_nano.load()) * 1e-9, g_merged.load(), g_not_taken.load());
++    g_st_n = 0;
++    g_st_h = g_st_hsq = g_st_e = 0;
++    g_st_hmin = 1e9;
++    g_st_hmax = -1e9;
++    g_st_have = false;
++    log("genome: TEST GenomeTestYaw=%d GenomeTestPitch=%d GenomeTestStickX=%d GenomeForceNoCamera=%d", g_test_yaw,
++        g_test_pitch, stick, int(g_force_no_camera));
+ }
+ 
+ // Degrees from GyroLib (pitch up, yaw right), queued for the next ProcessMovements.
+diff --git a/src/engines/genome/genome_risen1.hpp b/src/engines/genome/genome_risen1.hpp
+--- a/src/engines/genome/genome_risen1.hpp
++++ b/src/engines/genome/genome_risen1.hpp
+@@ -22,5 +22,6 @@
+ bool recenter(double fraction);
+ std::string status_scene();
+ void status_details();
++void load_test();  // TEST-ONLY
+ 
+ }  // namespace gyro4all::genome::risen1
+diff --git a/src/core/xinput.cpp b/src/core/xinput.cpp
+index a44e53c..c8501b9 100644
+--- a/src/core/xinput.cpp
++++ b/src/core/xinput.cpp
+@@ -862,6 +862,8 @@ bool button(SDL_Gamepad* pad, SDL_GamepadButton b) {
+     return (SDL_GetGamepadButton(pad, b) && !(g_hide.load() & bit)) || (g_tap.load() & bit);
+ }
+ 
++std::atomic<int> g_test_rx{0}, g_test_lt{0};  // TEST-ONLY
++
+ XINPUT_GAMEPAD read_pad(SDL_Gamepad* pad, bool suppress_right_stick) {
+     XINPUT_GAMEPAD g{};
+     auto set = [&](bool on, WORD bit) {
+@@ -896,6 +898,8 @@ XINPUT_GAMEPAD read_pad(SDL_Gamepad* pad, bool suppress_right_stick) {
+         g.sThumbRX = axis(pad, SDL_GAMEPAD_AXIS_RIGHTX, false);
+         g.sThumbRY = axis(pad, SDL_GAMEPAD_AXIS_RIGHTY, true);
+     }
++    if (const int rx = g_test_rx.load(std::memory_order_relaxed)) g.sThumbRX = SHORT(rx);     // TEST-ONLY
++    if (const int lt = g_test_lt.load(std::memory_order_relaxed)) g.bLeftTrigger = BYTE(lt);  // TEST-ONLY
+     return g;
+ }
+ 
+@@ -912,6 +916,11 @@ void stop_rumble(SDL_Gamepad* pad) {
+ 
+ }  // namespace
+ 
++void test_override(int right_x, int left_trigger) {  // TEST-ONLY
++    g_test_rx.store(right_x);
++    g_test_lt.store(left_trigger);
++}
++
+ bool sony_library() { return g_native[Sony]; }
+ 
+ bool sony_hid_import_only() { return g_native[Sony] && !g_sony_library; }
+diff --git a/src/core/xinput.hpp b/src/core/xinput.hpp
+index a43b807..d233aba 100644
+--- a/src/core/xinput.hpp
++++ b/src/core/xinput.hpp
+@@ -27,6 +27,7 @@ struct Settings {
+ 
+ // The game links Sony's pad library (auto mode's check: libScePad or hid.dll among its imports, or libScePad loaded).
+ bool sony_library();
++void test_override(int right_x, int left_trigger);  // TEST-ONLY
+ 
+ // That sign is only hid.dll among the imports, no libScePad seen: Unreal's RawInput plugin looks the same, and it
+ // enumerates controllers well before it reads one (S.T.A.L.K.E.R. 2).

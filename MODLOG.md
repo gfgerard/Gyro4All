@@ -5,6 +5,291 @@ or gyro to stick.
 
 ## Findings
 
+- 2026-11-25 **Genome: ELEX II's current Steam builds, DX12 and DX11.** After a reinstall the Steam release is a newer exe
+  (time stamp 1669133930, D3D12 by default; the one first tested was 1652720224) and Steam's DX11 mode is a separate copy of
+  the game in `<root>\ELEX2DX11` (`system\ELEX2.exe` time stamp 1651007840, D3D11, its own `data`), which needs its own
+  install (`ELEX2DX11\system\version.dll`): without it the DualSense isn't shown to the game there ("my controller is not
+  working"). Both builds: every ELEX II code shape matches once (`tools/genome/shapes.py`), every offset read from their
+  code (other addresses: aim mode `+0x4EDD10` / `+0x4ECA70`, camera admin `+0x1AC5780` / `+0x1991F00`), the panel on D3D12
+  / D3D11; tested in game (gyro, aim view, menus, buttons; user: "Default run works just fine", DX11 "works fine").
+- 2026-11-25 **Genome: unknown builds fall back to the gyro as right stick; `tools/genome/`.** Compared with the other
+  engine modules (layout, hooks, logs, docs in line), Genome lacked one thing 16 of 22 modules have: when its code shapes
+  don't match a build (a game patch, another store's build), it reported "camera layout not known" and the gyro stayed
+  off. Now, like Northlight's and Asura's "no camera hook", it reports `no_camera` with view 1 (the core sends the gyro
+  to the game as right-stick input; menus still gate it where the UI state stack or Risen 3's game mode is known):
+  `GenomeEngine::hooked_layout()` (camera layout, heading offsets, player chain, the admin's and movement's classes; not
+  while the code is still encrypted) and Risen's route when its code read fails. Log: `genome: no camera hook for this
+  build ...`. Tested in ELEX II with the test build's `GenomeForceNoCamera=1`: the core's blind stick fallback turned the
+  camera (with the stick's acceleration, as expected of stick emulation), no gyro in menus (the UI state stack); user:
+  "worked as expected".
+  - `tools/genome/` (README): `shapes.py` checks the module's code shapes against a build offline, the patterns parsed
+    from the module's own source (no copy to drift; in ELEX II the frame builder, turn function, angle call and aim
+    mode each match once); `pe.py` (exports parsed by hand: pefile stops at 8192, Risen's `Game.dll` has 10,858; named
+    disassembly, references, RTTI vtables, strings, `dump` of a running game for Risen 3's encrypted exe);
+    `heapstates.py` (the cued state search that found ELEX II's aim mode, generalized: roots and the player's property
+    sets by camtrace address expressions, exact and tolerant-float candidates per round; re-run on the saved ELEX II
+    snapshots it finds the camera distances again); `phases.py` and `test-switches.patch` (the test-only switches:
+    synthetic yaw/pitch/stick/tremor, `GenomeForceNoCamera=1` for the fallback; never committed into `src`).
+- 2026-11-25 **Genome: ELEX II's aim view from the game's aim mode.** ELEX II aims with its gameplay camera
+  (`cam_game_alt`), so its *Ranged aim* view never came on. Tested in game (Steam, DualSense via USB adapter, Steam Input
+  off): with *Default* Off and *Ranged aim* Always on the gyro works only while aiming; user: "It works".
+  - Found by cued snapshots (aim with LB, then RT, three rounds; the exe's data, the camera admin two levels deep, the
+    player's property sets one level): exact-value search found only a manager's "changed" flag
+    (`ELEX2.exe+0x1AA6200`, a lock-protected object at `+0x1AA5A50` whose methods set it after each change: not an aim
+    state); a tolerant float search found the camera admin's target distance (`+0x400`/`+0x418`/`+0x41C`: 250 -> 100 with
+    a pistol) and current distance (`+0x318`/`+0x320`: 352 -> 222). The names in the exe led further: camera modifiers
+    by condition (`CamModTargetDistance_Cond_RangedAim`, `..._HybridAim`, `..._HeavyWeaponAim`, `..._RangedAimJetpack`,
+    `CamModFOV_Cond_RangedAim`) and the script function `IsInAimMode` (registered `0x93D478` -> `0x8BF5A0` -> the entity's
+    `0xB43340`: property set 0x57 through the entity's vtable +0x110, dynamic_cast to `gCCombatSystem2_PS`, then
+    `0x4EBD50`).
+  - `gCCombatSystem2_PS::IsInAimMode` (`ELEX2.exe+0x4EBD50`): aim object `[ps+0xA0]`; aiming when its state (+4) isn't 0
+    (1 aiming, 2 shooting) or its cool-down after a shot (+0xB0, seconds) is above 0. In the snapshots: LB rounds 1 in every
+    aim snapshot, idle 0; the RT round (aim and shoot) 2, 2 (cool-down 0.85, 0.35), then 0 between shots, as the game's
+    zoom goes off between shots. The module reads the three offsets from that function's code (one match in ELEX II, none
+    in ELEX 1) and finds the player's `gCCombatSystem2_PS` by its class; while aiming, view 1 becomes view 2. A 0.75 s
+    linger to bridge RT's gaps was tried and dropped (user: "RB is all that matters": the aim button; RT's gaps stay);
+    without it: "Works great now".
+- 2026-11-25 **Gyro only while aiming: GyroLib's per-view Activation Mode, no new setting; Risen gets a Magic view.**
+  GyroLib 1.4.0 saves Activation Mode per view (Off / Always on / Hold to enable / Hold to disable / Toggle), so a game
+  whose aim has its own view needs nothing new: the default view Off, the aim view Always on (explicitly: a view
+  inherits its parent's settings, Off included). Tested in ELEX (user: "Can confirm it works in Elex 1"): gyro only
+  while `cam_ranged*` (held aim). Risen: the magic and cast input modes (18, 19) now give a *Magic* view (id 3) whose
+  parent is *Ranged weapon* (2), so one setting there covers bow, crossbow and spells; the game's own mode is the toggle
+  (drawn until put away); tested in Risen (user: "Separate ranged/magic profiles are working as expected now!"). A bow
+  aiming oddity the user saw in Risen also happens without Gyro4All (the game's own). Documented in README (after the sensitivity profiles) and the ELEX / Risen rows of GAMES.md.
+  ELEX II: see the next entry. Risen 3 has the same *Ranged aim* view as ELEX (not tried).
+- 2026-11-25 **Genome: Risen (2009; the 2023 64-bit release, Steam) supported, in the same module through its own route
+  (`genome_risen1.cpp`); core: several game DLL names.** Tested in game (Steam, DualSense through a USB adapter shown as a
+  wired DualSense, Steam Input off, the game in controller mode, Gyro4All as `version.dll` in `bin`): default camera, bow
+  aiming, stick + gyro, menus; user: "it was not affecting any in-game menu, or main menu. gyro worked fine in default
+  camera and with aiming too"; with the small-turn fix below: "everything feels good now". Synthetic gyro and stick (a test build's switches, not committed): yaw and pitch in the
+  right senses, pitch exact (0.0499 a frame for 0.05), stick 22.0 deg/s + gyro +-4.3 = 26.3 / 17.7 measured.
+  - Layout: `<root>\bin\Risen.exe` with the engine in DLLs of its own (`Engine.dll`, `Game.dll`, `GUI2.dll`,
+    `SharedBase.dll`...), data in `<root>\data\compiled`; D3D9 (`Engine.dll`); XInput 1.4 `XInputGetState` by ordinal 2
+    from `Engine.dll` (no keystrokes); `SharedBase.dll` imports `VERSION.dll` (loaded early: the proxy's name), `fmod`/
+    `binkw64` `winmm.dll`. The message pump: `Engine.dll` `PeekMessageA` (the game thread), `GUI2.dll` `PeekMessageW`.
+    Their names share no prefix: **core** `Engine::module_prefix` may now list several, separated by `|`
+    (`engine.dll|game.dll|gui2.dll`; `hooks.cpp` splits it; whole file names work as prefixes). Not the same engine
+    generation as ELEX/Risen 3: no `gCCameraTargetMovement`, `gCCharacterMovement_PS` v1, a constraint-solver camera
+    (`gCCameraTypeConstSolver`, `gCCSConstraint*`): none of the code shapes apply, hence its own route behind
+    `GenomeEngine` (detected by the `bin` layout; every `Engine` call handed to `risen1::`).
+  - `Game.dll` exports about 10,800 C++ names, `Engine.dll` 14,800 (pefile caps exports at 8192: the scratch tools parse the
+    table by hand). Every function the route uses is found by its exported name, and the few offsets from those functions'
+    own code, each checked (the log line lists them).
+  - The camera (guided search, a breakpoint, then the code): the view's yaw is the player's own rotation (the camera
+    follows from behind; the guided search's yaw-only quaternions were the player's, `gCCharacterSensor`, `eCRigidBody_PS`...),
+    its pitch the camera admin's elevation `gCCameraAdmin +0x310` (float degrees, + looks down; an identical copy in the
+    solver). Dead end: `eCCameraBase` (Engine.dll vtable `+0x9871C0`) pitch +0x9C / yaw +0xA0 are derived each frame from
+    the solver's look direction (`Engine.dll+0x4F64D0`, caller `Game.dll+0x7AFDE0` <- solver `0x7B8670`): a write there
+    froze the game once; a one-hit breakpoint showed the writer.
+  - Input (`gCActionAdmin`, an engine module on the heap; `this` taken from its exported `ProcessBegin`, which runs once a
+    frame): `AnalogInput(axis, int)` adds raw counts at `+0x2F0 + 4 x axis` (axes 1/2 the mouse, ignored in controller mode
+    `+0x411`; 3/4 the right stick); `ProcessBegin` turns them into `gSAction`s (`id, state 4 = axis, 0, value`): stick X
+    TurnRight 8 / TurnLeft 7, Y TurnUp 9 / TurnDown 10, value = deflection x camera sensitivity (`+0x414`) x frame time x
+    `+0x3E8`/`+0x3EC` (0.8), positive; each through `SendActionEvent` (`0x802B40`): `gCCameraAdmin::OnAction` first
+    (pitch: elevation += value x 0.075, -65..75, when the camera type's `+0x19` allows; camera type `+0x180`, its flags
+    +0x18 orbit, +0x19 pitch, +0x1C character rotation), then the action key script, then, unhandled,
+    `gCCharacterControl::OnAction` (TurnRight stores the value at `+0x14`, TurnLeft its negation, when `type +0x1C`). Then
+    `ProcessBegin` calls `gCCharacterControl::ProcessMovements` (only when `+0x400` is 0 and the session's GUI bit is
+    clear): yaw = `+0x14` x (mouse SensitivityX x 0.003 + 0.002) rad (`eSMouseOptions`, Engine.dll export: SensitivityX
+    0.5 by default, InvertX -1), a weighted average of five frames (1, 0.666, 0.4436, 0.2954, 0.1967; sum 2.6017: nothing
+    lost), `bCMatrix::RotateLocalAxisY`, `gCCharacterMovement_PS::SetAlignmentLookAt(forward, true)`; `+0x14` cleared.
+  - The gyro goes in the same way: `ProcessMovements` hooked; before it, the gyro's queued yaw and pitch are sent through
+    `SendActionEvent` as the same axis actions (units: radians / the turn scale, from the game's own sensitivity and
+    invert getters found in `ProcessMovements`' code; pitch degrees / 0.075). The character's `+0x14` is a store: when the
+    gyro's yaw reaches it, the stick's value from this frame is added back (`merged` in the status line).
+  - Small turns: `gCCharacterMovement_PS::ProcessControledRotationLookAt` rotates the player by `GetAngleUnitDeg(current,
+    look-at)` (SharedBase.dll: acosf of a float dot, stored at `+0x184`) when under 1 degree (`CalcNewRotationAngleAndVelocity`
+    only eases bigger turns). Near 0 that angle only takes 0.0198, 0.028, 0.034 ... 0.056 degrees: the gyro alone reached
+    92% at 0.05 degrees a frame and **nothing** at 0.005 or 0.015 (0.7 and 2 deg/s at 144 fps: slow aiming lost). Fixed by
+    hooking Game.dll's import of `GetAngleUnitDeg` and returning atan2(|a x b|, a . b) for that one call (its return
+    address `Game.dll+0x8EB56F`, read from the code); the sign stays the game's (an exact-zero `HasZeroMagnitude` test and
+    level vectors: tiny turns keep their sense). Measured: 0.0050 a frame for 0.005 (left too), 0.0149 for 0.015, 0.0498 for
+    0.05; idle drift 0.01 deg/s. Dead end: hooking `CalcNewRotationAngleAndVelocity` for immediate turns (`+0x4D4`), not
+    the path small turns take.
+  - Menus: the input mode `gCActionAdmin +0x3E0`, written by each `Set<Mode>ModeActionMap` (the value read from each
+    setter's first `mov dword [rcx+0x3E0], imm`): 1 pause menu, 2 normal, 3 inventory, 4 character, 5 log, 6 map, 7 loot,
+    8 pickpocket, 9 item request, 10 craft, 11 dialog, 12 quick slot, 13 trade, 14 lockpick, 15 melee, 16 bow, 17
+    crossbow, 18 magic, 19 cast, 20 levitate, 21 beast, 22 nautilus, 23/24 modal dialogs. Gyro in 2 and 15-22 (view
+    *Ranged weapon* in 16/17); seen in game: the inventory's tabs switch 3/4/5/6, the pause menu 1, the bow 16. Cameras seen:
+    `cam_normal`, `cam_inventory`, `cam_ranged`, `cam_ranged_bow` (aiming).
+  - Not done: zoom compensation (no FOV source looked for), the stick fallback (`view_angles`: none), the GOG build,
+    `winmm.dll` as the name, Steam Input on, a mouse player (the gyro's units don't depend on it).
+- 2026-11-25 **Genome: Risen 3: Titan Lords (Steam, 64-bit Enhanced Edition) supported, in the same module; D3D9
+  settings panel fixed (core).** Tested in game (Steam, DualSense through a USB adapter shown as a wired DualSense,
+  Steam Input off, the game's gamepad option on, Gyro4All as `version.dll`, a downloaded 2014 save loaded fine): camera,
+  aiming, stick + gyro together, menus; user: "everything felt fine".
+  - Same module, not a separate one: Risen 3 (`Risen3.exe`, time stamp 1437990428, VS2010, D3D9, imports `VERSION.dll`
+    and `WINMM.dll`, XInput 1.3 ordinals 8/2/3) has ELEX's camera and movement code in an older build: the same classes
+    (`gCCameraAdmin`, `gCCameraTargetMovement`, `gCCharacterMovement2_PS`, `eCEntityProxy`, `eCCameraBase`), camera names
+    (`cam_normal`, `cam_ranged*`), turn struct (turn +0x20, remaining +0x1C, factor +0x24, the same clamp) and the same
+    spurious-turn bug (synthetic tremor 0.60 deg/s with the filter off, 0.08 on). New entries in the code-shape lists:
+    - frame builder `Risen3.exe+0x468DBF`: `lea rcx,[rbx+0x1C0]; call getter 0x4E5DC0` (`lea rax,[rcx+0x130]`);
+      `lea rcx,[rbp-x]; movss xmm1,[rax+0x70]` (pitch) `mulss [deg2rad]`; call; the same again with `[rax+0x6C]` (yaw
+      offset). Admin pitch +0x360. Camera target: `cmp rdi,[rbx+0x78]; je; mov [rbx+0x78],rdi; test rdi,rdi`.
+    - turn function `Risen3.exe+0x3383A0` (`mov rax,rsp; mov [rax+0x18],rbx; push rbp/rsi/rdi; ...; movaps xmm7,xmm2; mov
+      rbx,rdx; mov rdi,rcx`): **no movement object**, the heading is in the property set itself at +0x48 (`lea rcx,
+      [rdi+0x48]` before the rotation `0x76D580`; ELEX: `[ps+0x48]` points to an object with the heading). TurnShape
+      look_at 0 = in the set itself (`heading_in`). Remaining: `movss xmm7,[rbx+0x1C]; comiss; jae; mov al,1; jmp; xor al,
+      al; ucomiss; je`.
+    - angle function `Risen3.exe+0x1B9D30`, by its call in the movement job `0x33BF8E` after the heading's copy (`mov eax,
+      [rbx+0x48]` x3: the pattern matches twice, filtered by the heading offset).
+    - camera target slot 2 `0x4661A0`: `lea rsi,[rcx+8]` (proxy; ELEX `lea rdi`); GetEntity a thunk to eCEntityProxy's slot
+      1 (handle +8); `mov edx,0x69; ... call [r8+0xD8]`. **0x69 is not the movement** but the animation controller
+      (`eCAnimation3Controller_PS`); the movement is type 0x68. The module now takes the camera target's type only if its
+      set is a `gCCharacterMovement2_PS`, else finds the type by that class once (`movement_ps`, logged).
+    - camera update: `CProcessor@gCCameraAdmin` slot 2 calls it directly (`sub rsp,0x28; cmp byte [enabled],0; je; mov
+      rcx,[rcx+0x18]; test; je; call 0x1C6810`), no vtable slot: hooked inline (MinHook). Admin static
+      `Risen3.exe+0x1027180`, owner +0x30 as in ELEX.
+    - Steam DRM (SteamStub, a `.bind` section): `.text` is encrypted on disk (entropy 8.0) and decrypted by the wrapper's
+      entry point, after Gyro4All's DllMain. With a `.bind` section the module reads the code on the first frame
+      (`read_code`). Static analysis used a dump of the running game's image.
+    - Menus: Risen 3 has no gCUIState stack (`gCHudModule2`/`gCHudSystem2`, older); its tabbed menu (inventory, map,
+      character) keeps `cam_normal` and the camera update running (the world too), the pause menu stops the world but not
+      the camera update. Found by cued snapshots (static data and HUD objects, two levels): a global game mode mask
+      (`Risen3.exe+0xBE49CC`; setter `0x1CF840` `cmp ecx,[mode]; je; mov [mode],ecx; mov [next],ecx; ret`, getter,
+      `IsMode(mask)`): 0 gameplay and aiming, 0x20 the menu, 1 the pause menu, 2/0x10 while loading. Read from the
+      setter's code (not in ELEX's code); the gyro is off while it isn't 0. Verified with synthetic gyro input in each
+      state: aiming 3.03 deg/s, menu and pause 0.00.
+    - FOV: render camera static `Risen3.exe+0xFBA2E0` (+0xCC/+0x64 as in ELEX): 60 degrees, 45 aiming (eased).
+  - **Core, D3D9 panel:** the panel attaches only to a render target that has presented (`overlay.cpp` attach, added
+    with Alan Wake 2's early D3D11 swapchain, `7db91cf`); D3D9 devices never counted their presents, so the panel
+    never attached in D3D9 games (the Create+Options combo did nothing). `panel_host.cpp`: the D3D9 present hooks now
+    mark the captured device as presented. Verified in Risen 3 (the panel opens).
+  - Dead ends: one menu flag for both of Risen 3's menus in the HUD objects (the pause menu and the tabbed menu are
+    different mechanisms; only the game mode covers both).
+  - Not tested: Risen 3 dialogs (expected off: the game mode or a dialog camera), the GOG build, `winmm.dll` as the name;
+    ELEX and ELEX II with this build (their code shapes and derived values checked offline; their code paths unchanged
+    except where a Risen 3 alternative was added).
+- 2026-11-25 **Genome: ELEX II (Steam) supported; the gyro's yaw now turns the heading after the game's turn; menus
+  from the UI's state stack.** Tested in game (both games, Steam, DualSense through a USB adapter that shows it as a wired
+  DualSense, Steam Input off, Gyro4All as `version.dll`): camera, aiming, stick + gyro together, menus; user: "everything
+  works fine".
+  - **ELEX II** (`ELEX2.exe`, time stamp 1652720224, D3D12, imports `VERSION.dll` and XInput 1.3 ordinals 2/3/8): the
+    same classes as ELEX (`gCCameraAdmin`, `gCCameraTargetMovement`, `gCCharacterMovement2_PS`, `eCCameraBase`,
+    `CProcessor@gCCameraAdmin`; no `eCEntityProxy` RTTI). None of ELEX's signatures match, so each finder now has a list
+    of code shapes (`kFrameShapes`, `kTurnShapes`, `kAngleShapes`, two property set call orders, two processor slot 2
+    shapes), each unique in its exe (checked offline on both exes). ELEX II's layout, all read from code:
+    - frame builder `ELEX2.exe+0x4A20E5`: `lea rcx,[rbx+0x1E8]`; five movaps; call state getter `0x7A53C0` (`lea rax,
+      [rcx+0x158]; ret`); `lea rcx,[rbp-x]; mov rdi,rax; movss xmm1,[rax+0xFC]` (pitch) `mulss [deg2rad]`; call;
+      `movss xmm6,[rdi+0xE0]` (yaw offset). Admin pitch +0x43C, yaw offset +0x420 (the yaw = pitch - 4 check of ELEX
+      doesn't hold: dropped).
+    - camera target: admin +0x80 (ELEX +0x78), read from its store just before the frame builder (`cmp rdi,[rbx+0x80];
+      je; mov [rbx+0x80],rdi`; ELEX `cmp rbx,[rdi+0x78]; je; mov [rdi+0x78],rbx`), no longer a fixed offset.
+    - camera target slot 2 `0x4A0FD0`: proxy +8; `call 0x312600` (GetEntity, not virtual: `mov rax,[rcx]; test; je;
+      mov rax,[rax]; ret`: handle at proxy +0); `mov edx,0x66; mov rcx,rax; mov r8,[rax]; call [r8+0x110]` (the
+      entity's GetPropertySet at vtable +0x110, tables +0x30/+0x38 as in ELEX). ELEX calls its GetEntity directly too
+      (`0x2005C0`, a thunk `mov rax,[rcx]; jmp [rax+8]`, followed to eCEntityProxy's slot 1).
+    - turn function `ELEX2.exe+0x5F5790` (prologue `mov r11,rsp; mov [r11+0x18],rbx; push rbp/rsi/rdi; ...; mov rsi,
+      [rcx+0x48]; movaps xmm8,xmm2; mov rbx,rdx; mov rdi,rcx`): heading at movement object +8 (`lea rcx,[rsi+8]`
+      before the rotation call `0x839DE0`), turn struct turn +0x20, remaining +0x1C, factor +0x24 (same as ELEX). Called
+      from job threads, not the main thread.
+    - angle function `ELEX2.exe+0x5E00D0` (same algorithm, `minss/maxss` clamp, tail-jumps to acosf), found by its call
+      in the movement job `0x5F4790` right after the heading's copy (`add rax,8` checked against the heading offset).
+      The spurious turn exists in ELEX II too: synthetic tremor 0.51 deg/s with the filter off, 0.07 with it on.
+    - camera update: `CProcessor@gCCameraAdmin` slot 2 `0x4A1700` no longer is the callback but schedules it (`mov
+      rax,[rdx]; mov r9,rdx; mov r8,rcx; lea rdx,[callback 0x1011C0]; mov rcx,r9; jmp [rax+8]`); the callback has
+      ELEX's shape (`mov rcx,[rcx+0x18]; test; jne thunk 0x1018A0: jmp [rax+0x140]`): update slot 40 (ELEX 37). Admin
+      static `ELEX2.exe+0x1AC2500`, owner at +0x30 as in ELEX.
+    - camera names: `cam_game_alt` in third person **and** while aiming (no `cam_ranged`): one view. FOV: the render
+      camera (static `eCCameraBase` `ELEX2.exe+0x1AA84A0`, +0xCC/+0x64 as in ELEX) stays 65 degrees while aiming; the
+      visible "zoom" is the camera moving closer, nothing for zoom compensation. The game's render camera getter
+      (`0x3B1B00`, ELEX `0x272F20`: `mov rax,[rcx+0x468]; test; cmovne rcx,rax; mov rax,rcx; ret`) can return an
+      override at +0x468; live it pointed at the static camera itself.
+    - aim signals seen (not used, two aim rounds): movement object +0x8D byte 0 -> 1, +0x160/+0x174/+0x260 0 -> 1.0;
+      camera admin +0x324/+0x32C 50 -> 100, +0x3F8/+0x3FC 0 -> -62/-20; `gCPlayerControlsAdmin` (static
+      `ELEX2.exe+0x1AC6980`) +0x68/+0x6C 0.06 -> 0.03 (the game halves its stick speed while aiming).
+  - **Yaw route changed (both games):** the queued gyro yaw now turns the heading right after the original turn function
+    returns, in the same call (`turn_heading`), instead of being added to the turn struct's turn (and, factor >= 0, its
+    remaining turn). Why: the function's clamp (`if factor >= 0 and turn has remaining's sign and |turn| >= |remaining|:
+    turn = min(|remaining x factor|, |turn|)`). ELEX II's factor is 10 in normal play; with the stick held (turn
+    1.375 deg/frame, remaining 0) the old route made remaining = the gyro's yaw, so every frame with a same-signed yaw
+    was cut to 10 x yaw (~0.3 deg): the stick turn alternated 1.4/0.3 deg a frame (stutter, even with the controller
+    on the desk), and the gyro's own yaw was cancelled while the stick turned (stick + gyro right 50.8 deg/s, stick +
+    gyro left 51.1). Per-frame trace and synthetic stick (test build) before/after: sd 0.55 -> 0.002 deg/frame, gyro
+    +-0.03 deg/frame exactly added. ELEX regression with the same test: stick + gyro smooth (sd 0.002), aiming
+    `cam_ranged` follows the synthetic gyro at 1.68-1.80 of 1.80 deg/s, spurious filter 0.48 -> 0.00 deg/s.
+  - **Menus from the UI's state stack (both games):** static `gCUIModule` (found by vtable in the exe's data; ELEX II
+    `0x1AE1E80`) -> `gCUISystem` (+0x70, found by its class) -> array of `gCUIState*` +0x10, count +0x18 (found as the
+    first array of `gCUIState`), name char* at state +0x10. Gameplay `Game`; on top: `PauseMenu`, `GameMenu` (ELEX II's
+    inventory/map/skills tabs), `QuickSlotWheel` (ELEX II's weapon wheel), `GameWorld` (ELEX's inventory). The gyro is
+    off when anything is on top of `Game` (only when the bottom state is named `Game`); ELEX II keeps `cam_game_alt` and
+    the camera update running behind its menus, so the camera couldn't tell (the user's first ELEX II test: gyro moved
+    the camera in the menu and the weapon wheel, where pitch also lagged). Nothing in the exe's `.data` separated the
+    menus (snapshot diff); the stack is on the heap.
+  - Dead ends: the yaw through the turn struct (above); ELEX II's LT is the jetpack, not aim (the first synthetic "aim"
+    test flew; the jetpack turns smoothly with the stick, sd 0.08); a whole-`.data` snapshot diff for menus (nothing).
+  - Not tested: ELEX II dialogs (expected off: a UI state or a dialog camera), the GOG builds, `winmm.dll` as the name.
+- 2026-11-25 **Genome: the layout read from the game's code instead of fixed offsets (for other builds and ELEX 2).**
+  Each offset comes from an instruction in code found by class (RTTI vtable) or a short signature, with a cross-check;
+  what a build doesn't give turns only its feature off, logged (`genome: layout from code: ...; not found: ...`).
+  Sources: camera frame builder `ELEX.exe+0x312DBE` (`lea rcx,[rdi+0x1C0]`; call state getter `0x564E50` = `lea rax,
+  [rcx+0x170]; ret`; `movss xmm7,[rax+0x70]` pitch; after `call cosf`, `movss xmm7,[rbx+0x6C]` yaw; check yaw = pitch -
+  4); turn function `0x414B70` (signature now wildcards `mov r14,[rcx+0x48]`; `movss xmm7,[rbx+0x20]` ... `comiss xmm6,
+  [rbx+0x24]` turn/factor, `movss xmm7,[rbx+0x1C]; ucomiss; je` remaining, `lea rcx,[r14+0xC]` heading; checks
+  remaining = turn - 4, factor = turn + 4); `gCCameraTargetMovement` vtable slot 2 (`lea rdi,[rcx+8]` proxy; `mov edx,
+  0x66 ... call [r8+0xF0]` property set type and getter slot); `eCEntityProxy` slot 1 (`mov rax,[rcx+8]` handle); the
+  live entity's own property set getter (`mov r8,[rcx+0x30]` ... `mov rax,[rcx+0x38]`, read once per entity vtable);
+  `CProcessor@gCCameraAdmin` slot 2 -> thunk `0x5C070` (`jmp [rax+0x128]`: update slot 37). Pitch is also only written
+  while it reads within +-90. Still fixed (checked before use): admin `+0x30` (processor owner), `+0x78` (camera
+  target, by vtable), render camera FOV `+0xCC`/`+0x64` (cot check). Every pattern matched once in the 2018 Steam exe
+  and gave the old values (offline and in the game's log); user-tested in game, DualSense via the USB adapter, Steam
+  Input off: works as before.
+
+- 2026-11-24 **Genome engine module (`src/engines/genome/`): ELEX (Steam, `system\ELEX.exe`, time stamp 1521487194,
+  image 0x1843000). User-tested with a DualSense through a USB adapter that presents it as a wired DualSense, Steam
+  Input off (XInput translation) and on: camera, aiming (bow, gun, flamethrower), no drift; installed as `version.dll`.**
+  - Static triage: x64, no DRM wrapper, MSVC RTTI kept (~3,500 classes), engine linked into the exe. Imports
+    `VERSION.dll` (and `binkw64`/`fmod64`/`iggy_w64` import `winmm.dll`, so `winmm.dll` should load too: untested).
+    `XINPUT1_3` by ordinal: 2 (`XInputGetState`), 3 (`XInputSetState`), 8 (`XInputGetKeystroke`). Config
+    `data\ini\ConfigDefault.xml` (`Camera AziSpeedScale/ElevSpeedScale`, `Relax*`, `FoV=85`).
+  - Camera: static `gCCameraAdmin` at `ELEX.exe+0x12ED600` (ctor `0x30A1C0`, called from the static initializer
+    `0xA75330`; found at run time by its vtable `+0xBAD528` in `.data`, checked by `+0x30` = itself). Per-frame update:
+    vtable slot 37 (`0x30EEB0`, `void(admin*)`, main thread, called by its `CProcessor`); hooked to see pauses (it stops
+    in the pause menu and while loading). `+0x1C0` camera name (`cam_normal`, `cam_ranged`, `cam_ranged_dist`
+    (flamethrower), `cam_ui_world` (inventory), `cam_dialog_npc_1_dist8`); camera state at `+0x330` (getter `0x564E50` on
+    `+0x1C0`): `+0x350` yaw-only base frame (copied every frame from the heading; writes undone), `+0x39C` yaw offset
+    (degrees, game keeps 0; a write is kept and turns the view, not used), `+0x3A0` pitch (degrees, + down: the pitch
+    source, written directly). View = base x yaw offset x pitch (`0x312DE9..0x31302F`), eased (~0.3 s).
+  - Heading: camera target `+0x78` (static `gCCameraTargetMovement` `ELEX.exe+0xDE3708`, vtable `+0xBAD4A0`, slot 2
+    `0x309F50`) -> entity (`[[target+0x10]]`, `eCDynamicEntity`) -> property set 0x66 (`[entity+0x30]` byte table at
+    `type+1`, `[entity+0x38]` array) = `gCCharacterMovement2_PS` -> `[+0x48]` object D -> `D+0xC` horizontal unit
+    heading (base frame forward via `0x411070` -> `0x5F0E10`). Heading = atan2(x, z), + = right.
+  - How the game turns it: movement job `0x413D80` (worker thread, reached by a jump from a job dispatcher at
+    `0x413D52`) calls `0x413720` -> `0x413000(PS, move input global +0x12D9034, turn input float global +0x12D9028
+    (degrees), info)`: wanted heading T = heading x rot(turn input); the job stores angle(heading, T) (`0x72DE0`:
+    normalize both, dot clamped, `acosf`; sign from a 2D cross product, 0 taken as +) at `D+0x118`, the body's
+    remaining turn at `D+0x114`, factor `D+0x11C` (-1; +1 while aiming). Main thread: `0x414150` -> `0x414B70(PS,
+    D+0xF8, dt)` rotates the entity by the remaining turn and the heading by the turn (`0x5F10F0`/`0x5F13D0`), with a
+    clamp when factor >= 0: at most the remaining turn. Watched with the right stick: the stick drives the turn, the
+    yaw offset stays 0.
+  - Final route: `0x414B70` hooked (first-bytes signature), gyro yaw added to `D+0x118` (and to `D+0x114` when the factor
+    is >= 0, else aiming was clamped to the body's lag: "sensitivity fine for under a second, then very low"). Pitch
+    written to `+0x3A0`. Stick fallback off while that route runs (`view_angles` false: the turn shows a frame later,
+    the fallback took every turn for an undone write and drove the right stick: jumpy camera).
+  - **The drift (game bug):** with no turn input T equals the heading bit for bit, yet `acosf(dot)` of the normalized
+    pair can give 0.000345 rad (dot one ulp under 1), signed + (cross exactly 0). Vanilla rests where the dot rounds to
+    1; every gyro turn lands on a new heading, a third of which make that spurious turn next frame: creep right
+    0.4-1 deg/s with the gyro on (also with the pad on the desk, any GyroLib noise). Fix: a positive turn equal to
+    `0x72DE0(heading, heading)` (the game's own function, found by its call in the job) is dropped. Automated A/B with
+    synthetic tremor (a temporary `GenomeTestNoise` switch, removed): 0.90 deg/s off, 0.00-0.03 on.
+  - FOV: static render cameras `eCCameraBase` (`ELEX.exe+0x12C2970`, `+0x12C2AE8`, `+0x12C2C60`, alike): `+0xCC`
+    vertical FOV in radians (60 deg, 45 aiming a bow), `+0x64` = cot(FOV/2). Reported for *Adapt to Zoom*; reference =
+    the third-person FOV once steady 0.5 s (the game eases back after aiming), or `ZoomReferenceFOV=`.
+  - Dead ends: direct heading writes (kept, but the movement job races them: lag and ~0.6 deg/s creep); the yaw
+    added to `0x413000`'s turn-input argument (`0x413720` runs from five callers a frame and the first, not the job's,
+    took it: no yaw at all); a yaw "step" (holding back yaw under 20-100 millidegrees) cut the creep but quantizes the
+    gyro; the right-stick rest offset (dead zone `eCWinGamePadInput+0x350` = 0.265, offset 0.056: not it); mouse input
+    (a Raw Input listener saw none). `guided.py` lost its first run: the comparison took 3 min while the user moved;
+    a patched copy took pose 2's snapshot at once and used `--ref` = the admin's camera forward.
+- 2026-11-24 **Core: `XInputGetKeystroke` translated (`xinput.cpp`).** ELEX reads every button with it (ordinal 8) and
+  only the sticks with `XInputGetState`: with the DualSense shown as XInput the sticks worked and no button did.
+  Hooked by name and by ordinal 8 (`xinput1_3`/`xinput1_4`; not in `xinput9_1_0`), inline on `xinput1_3` for protected
+  exes. Our slot: key events from the translated state's changes (14 buttons, triggers past 30, 8-way stick
+  directions past XInput's dead zones), repeat after 400 ms every 100 ms for the key pressed last; `XUSER_INDEX_ANY`
+  then falls through to real pads; real pads' events dropped while GyroLib's panel has the controller. User-verified in
+  ELEX (Steam Input off).
+
 - 2026-11-24 **Halo 3 / ODST: stray weapon pickups with the gyro on; turn now written on the game's thread (Halo 3
   confirmed by the user).** Report (1.12.0, DualSense Edge, activation Toggle on a back paddle): over a weapon, pressing
   another button (melee, crouch) picked the weapon up; not in Halo 2. Same with Gyro4All's XInput translation (Steam
