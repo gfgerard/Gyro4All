@@ -41,7 +41,8 @@ struct Patched {
     bool reported = false;
 };
 std::vector<Patched> g_patched;
-std::wstring g_prefix;                        // lower-case prefix of the game's own DLLs (Unreal: "<project>-")
+std::wstring g_prefix;                        // lower-case prefix of the game's own DLLs (Unreal: "<project>-"), as given
+std::vector<std::wstring> g_prefixes;         // the same split at '|' (games whose DLLs share no prefix: Risen)
 // The exe's import table is a protector stub (no name tables; the real imports are resolved later by
 // the protector, after DllMain), so hooks on a named DLL go inline on that DLL's export instead.
 bool g_inline = false;
@@ -62,12 +63,12 @@ std::wstring lower(std::wstring s) {
 
 bool is_game_module(HMODULE m) {
     if (m == GetModuleHandleW(nullptr)) return true;
-    if (g_prefix.empty()) return false;
+    if (g_prefixes.empty()) return false;
     wchar_t path[MAX_PATH];
     if (!GetModuleFileNameW(m, path, MAX_PATH)) return false;
     std::wstring name = path;
     name = lower(name.substr(name.find_last_of(L"\\/") + 1));
-    return name.rfind(g_prefix, 0) == 0;
+    return std::ranges::any_of(g_prefixes, [&](const std::wstring& p) { return name.rfind(p, 0) == 0; });
 }
 
 // Sony's PC pad library shipped as its own DLL (libScePad.dll): it opens the controller itself, so the hooks that must
@@ -367,6 +368,11 @@ void on_pad_library_load(HMODULE) {
 
 void init(const std::wstring& module_prefix, bool force_inline) {
     g_prefix = lower(module_prefix);
+    for (size_t at = 0; at <= g_prefix.size();) {
+        const size_t bar = std::min(g_prefix.find(L'|', at), g_prefix.size());
+        if (bar > at) g_prefixes.push_back(g_prefix.substr(at, bar - at));
+        at = bar + 1;
+    }
     // EA's Origin/EA app activation wrapper (.ooa section: Mass Effect LE, Battlefield 4, Titanfall 2) keeps a small named
     // import table of its own, so the scan below can't tell; it loads the real imports (the proxy among them) itself.
     HMODULE exe = GetModuleHandleW(nullptr);
@@ -599,6 +605,6 @@ std::vector<HMODULE> game_modules() {
     return loaded_game_modules();
 }
 
-bool modular() { return !g_prefix.empty(); }
+bool modular() { return !g_prefixes.empty(); }
 
 }  // namespace gyro4all::hooks

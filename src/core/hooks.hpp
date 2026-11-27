@@ -11,7 +11,8 @@
 namespace gyro4all::hooks {
 
 // Call once from DllMain. module_prefix: lower-case file-name prefix of the game's own DLLs ("" = the exe only), from
-// Engine::module_prefix (Unreal: "returnal-" for Returnal-Win64-Shipping.exe). force_inline: Engine::inline_hooks.
+// Engine::module_prefix (Unreal: "returnal-" for Returnal-Win64-Shipping.exe); several separated by '|' (Risen:
+// "engine.dll|game.dll|gui2.dll"). force_inline: Engine::inline_hooks.
 void init(const std::wstring& module_prefix, bool force_inline = false);
 
 // Register an import to redirect in all game modules (regular and delay-load import tables). dll may be
